@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getEffectiveReferenceStatus, llmFoundMetadataMatchesCitation } from './referenceStatus'
+import { getEffectiveReferenceStatus, isWebsiteVerifiedReference, llmFoundMetadataMatchesCitation } from './referenceStatus'
 
 describe('referenceStatus', () => {
   it('treats LLM-found matching metadata as verified, not hallucinated', () => {
@@ -136,5 +136,20 @@ describe('referenceStatus', () => {
 
     expect(llmFoundMetadataMatchesCitation(reference)).toBe(true)
     expect(getEffectiveReferenceStatus(reference, true)).toBe('suggestion')
+  })
+
+  it('shows a dedicated website-verified status for website-grounded matches', () => {
+    const reference = {
+      status: 'verified',
+      matched_database: 'Web page',
+      verified_via_website: true,
+      authoritative_urls: [{ type: 'verified_url', url: 'https://www.uni-due.de/example.pdf' }],
+      errors: [],
+      warnings: [],
+      suggestions: [],
+    }
+
+    expect(isWebsiteVerifiedReference(reference)).toBe(true)
+    expect(getEffectiveReferenceStatus(reference, true)).toBe('website_verified')
   })
 })

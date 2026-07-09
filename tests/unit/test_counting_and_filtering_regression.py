@@ -92,6 +92,7 @@ def test_webui_records_verified_cited_webpage_source():
 
     assert result['status'] == 'verified'
     assert result['matched_database'] == 'Web page'
+    assert result['verified_via_website'] is True
     assert result['authoritative_urls'] == [
         {'type': 'verified_url', 'url': cited_url}
     ]
@@ -127,6 +128,7 @@ def test_webui_records_direct_webpage_checker_success_source():
 
     assert result['status'] == 'verified'
     assert result['matched_database'] == 'Web page'
+    assert result['verified_via_website'] is True
     assert result['authoritative_urls'] == [
         {'type': 'verified_url', 'url': cited_url}
     ]

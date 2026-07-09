@@ -6450,7 +6450,17 @@ class ArxivReferenceChecker:
                         )
                     url_assessment, applied_hallucination = _apply_hallucination_for_decision(url_assessment)
                     
-                    if url_assessment and applied_hallucination.get('status') == 'verified':
+                    if url_assessment and applied_hallucination.get('verified_via_website'):
+                        website_url = url_assessment.get('website_verified_url') or url_assessment.get('link', '')
+                        if print_output:
+                            print("       Matched Database: Web page")
+                            if website_url:
+                                print(f"       Verified URL: {website_url}")
+                            explanation = url_assessment.get('explanation', '')
+                            if explanation:
+                                print(f"         {explanation}")
+                        return
+                    elif url_assessment and applied_hallucination.get('status') == 'verified':
                         # LLM confirmed the reference is real — treat as verified
                         cited_url = reference.get('cited_url') or reference.get('url', '')
                         if print_output:
@@ -6479,7 +6489,14 @@ class ArxivReferenceChecker:
                             reference, errors, verified_data=verified_data, reference_url=reference_url
                         )
                     llm_assessment, applied_hallucination = _apply_hallucination_for_decision(llm_assessment)
-                    if llm_assessment and applied_hallucination.get('status') == 'verified':
+                    if llm_assessment and applied_hallucination.get('verified_via_website'):
+                        website_url = llm_assessment.get('website_verified_url') or llm_assessment.get('link', '')
+                        if print_output:
+                            print("       Matched Database: Web page")
+                            if website_url:
+                                print(f"       Verified URL: {website_url}")
+                        precomputed_hallucination = llm_assessment
+                    elif llm_assessment and applied_hallucination.get('status') == 'verified':
                         # LLM confirmed the reference is real - don't count as unverified
                         llm_link = llm_assessment.get('link', '')
                         if print_output:

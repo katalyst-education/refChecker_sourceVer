@@ -1564,6 +1564,83 @@ def _reverify_with_llm_metadata(
     return new_errors
 
 
+def _reverify_with_website_metadata(
+    reference: Dict[str, Any],
+    old_errors: List[Dict[str, Any]],
+    assessment: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Ground an LLM-provided URL by checking the website directly."""
+    website_url = assessment.get('link')
+    if not website_url or not str(website_url).startswith('http'):
+        return None
+
+    website_url = str(website_url).strip()
+    website_reference = dict(reference)
+    website_reference['url'] = website_url
+    website_reference['cited_url'] = website_url
+
+    issues: Optional[List[Dict[str, Any]]] = None
+    verified_url = website_url
+    matched_database = 'Web page'
+
+    try:
+        from refchecker.checkers.pdf_paper_checker import PDFPaperChecker
+
+        pdf_checker = PDFPaperChecker()
+        if pdf_checker.can_check_reference(website_reference):
+            verified_data, pdf_issues, checked_url = pdf_checker.verify_reference(website_reference)
+            if verified_data:
+                issues = list(pdf_issues or [])
+                verified_url = checked_url or verified_data.get('url') or website_url
+    except Exception:
+        issues = None
+
+    if issues is None:
+        try:
+            from refchecker.checkers.webpage_checker import WebPageChecker
+
+            webpage_checker = WebPageChecker()
+            grounding_reference = dict(website_reference)
+            grounding_reference['title'] = assessment.get('found_title') or reference.get('title', '')
+            grounding_reference.pop('venue', None)
+            grounding_reference.pop('journal', None)
+            grounding_reference.pop('booktitle', None)
+
+            verified_data, webpage_issues, checked_url = webpage_checker.verify_raw_url_for_unverified_reference(
+                grounding_reference
+            )
+            web_metadata = (verified_data or {}).get('web_metadata') or {}
+            if verified_data and not web_metadata.get('access_blocked'):
+                issues = _reverify_with_llm_metadata(reference, old_errors, assessment)
+                if issues is None:
+                    issues = []
+                verified_url = checked_url or verified_data.get('url') or website_url
+        except Exception:
+            return None
+
+    if issues is None:
+        return None
+
+    for e in old_errors:
+        if 'info_type' in e and 'error_type' not in e and 'warning_type' not in e:
+            issues.append(e)
+
+    filtered_issues = [
+        e for e in issues
+        if e.get('error_type') != 'unverified'
+        and not (
+            e.get('error_type') == 'url'
+            and 'url references paper' in (e.get('error_details') or '').lower()
+        )
+    ]
+
+    return {
+        'issues': filtered_issues,
+        'verified_url': verified_url,
+        'matched_database': matched_database,
+    }
+
+
 def _split_reverified_issues(issues: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     errors: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
@@ -1776,6 +1853,41 @@ def apply_hallucination_verdict(
         or has_unverified_error
         or (result.get('status') == 'error' and url_references_paper)
     )
+
+    if verdict in ('UNLIKELY', 'UNCERTAIN') and is_upgradeable and reference is not None:
+        website_reverified = _reverify_with_website_metadata(
+            reference, result.get('errors', []), assessment,
+        )
+        if website_reverified is not None:
+            website_errors, website_warnings = _split_reverified_issues(
+                website_reverified['issues']
+            )
+            remaining_errors = [
+                e for e in website_errors
+                if e.get('error_type') not in ('info', None)
+                and not e.get('is_suggestion')
+            ]
+            corrected_assessment = dict(assessment)
+            corrected_assessment['original_verdict'] = verdict
+            corrected_assessment['verdict'] = 'UNLIKELY'
+            corrected_assessment['verified_via_website'] = True
+            corrected_assessment['website_verified_url'] = website_reverified['verified_url']
+            corrected_assessment['explanation'] = (
+                'The cited work was verified directly from a website URL whose '
+                'metadata matches the citation.'
+            )
+            result['hallucination_assessment'] = corrected_assessment
+            result['errors'] = website_errors
+            result['warnings'] = website_warnings
+            result['verified_via_website'] = True
+            result['authoritative_urls'] = _authoritative_urls_with_once(
+                result.get('authoritative_urls', []),
+                'verified_url',
+                website_reverified['verified_url'],
+            )
+            result['matched_database'] = website_reverified['matched_database']
+            result['status'] = 'error' if remaining_errors else ('warning' if website_warnings else 'verified')
+            return result
 
     if verdict == 'LIKELY':
         if reference is not None:

@@ -332,6 +332,18 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
       )
     }
 
+    if (status === 'website_verified') {
+      return (
+        <span className="flex-shrink-0 inline-block" title="Verified from website">
+          <svg className={commonSize} viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" fill="#0ea5e9" />
+            <path d="M8.5 12.5l2.5 2.5 4.5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M12 5.5c-2.5 0-4.5 2.9-4.5 6.5s2 6.5 4.5 6.5 4.5-2.9 4.5-6.5-2-6.5-4.5-6.5zm0 0c1.4 1.7 2.2 4 2.2 6.5s-.8 4.8-2.2 6.5m0-13c-1.4 1.7-2.2 4-2.2 6.5s.8 4.8 2.2 6.5M6.5 9.5h11M6.5 14.5h11" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" opacity="0.65" />
+          </svg>
+        </span>
+      )
+    }
+
     if (status === 'warning') {
       return (
         <span className="flex-shrink-0 inline-block" title="Warning">

@@ -40,6 +40,7 @@ from refchecker.utils.error_utils import create_author_error, create_doi_error, 
 from refchecker.utils.text_utils import normalize_author_name, normalize_paper_title, is_name_match, compare_authors, calculate_title_similarity, compare_titles_with_latex_cleaning, strip_latex_commands, are_venues_substantially_different, is_missing_title_spacing_artifact
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, get_best_available_url, construct_semantic_scholar_url
 from refchecker.utils.db_utils import process_semantic_scholar_result, process_semantic_scholar_results
+from refchecker.utils.venue_utils import resolve_venue_for_validation
 from refchecker.config.settings import get_config
 from refchecker.checkers.arxiv_citation import ArXivCitationChecker
 from refchecker.database.local_database_updater import repair_local_database_schema
@@ -717,7 +718,16 @@ class LocalNonArxivReferenceChecker:
         # Verify venue
         cited_venue = reference.get('journal', '') or reference.get('venue', '')
         paper_venue = paper_data.get('venue', '')
-        
+        paper_venue, used_doi_venue = resolve_venue_for_validation(
+            cited_venue,
+            paper_venue,
+            reference,
+            paper_data=paper_data,
+            cache_dir=getattr(self, 'cache_dir', None),
+        )
+        if used_doi_venue and paper_venue:
+            logger.debug(f"{self._log_prefix}: Using DOI-backed venue for validation: {paper_venue}")
+
         if cited_venue and paper_venue:
             if are_venues_substantially_different(cited_venue, paper_venue):
                 errors.append(create_venue_warning(cited_venue, paper_venue))

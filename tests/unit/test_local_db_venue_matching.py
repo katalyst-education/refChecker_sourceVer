@@ -157,6 +157,35 @@ def test_venue_match_no_warning(_make_checker):
     assert len(venue_issues) == 0, f"Unexpected venue issue: {venue_issues}"
 
 
+@patch("refchecker.utils.venue_utils.lookup_venue_via_doi")
+def test_doi_venue_match_suppresses_primary_venue_warning(mock_lookup_doi_venue, _make_checker):
+    """A DOI-backed venue match should suppress a mismatch from the primary source."""
+    checker = _make_checker([{
+        "paperId": "101",
+        "title": "Learning environment interoperability in software engineering education",
+        "year": 2024,
+        "authors": [{"authorId": "1", "name": "D. Bigler"}],
+        "venue": "Conference on Software Engineering Education and Training",
+        "externalIds_DOI": "10.1109/CSEET62301.2024.10663056",
+    }])
+
+    reference = {
+        "title": "Learning environment interoperability in software engineering education",
+        "authors": ["D. Bigler"],
+        "year": 2024,
+        "venue": "36th International Conference on Software Engineering Education and Training (CSEE&T)",
+        "url": "https://doi.org/10.1109/CSEET62301.2024.10663056",
+    }
+
+    mock_lookup_doi_venue.return_value = "36th International Conference on Software Engineering Education and Training (CSEE&T)"
+
+    verified_data, errors, _url = checker.verify_reference(reference)
+
+    assert verified_data is not None
+    venue_issues = [e for e in errors if e.get("warning_type") == "venue" or e.get("error_type") == "venue"]
+    assert venue_issues == [], f"Expected DOI-backed venue to suppress mismatch: {venue_issues}"
+
+
 def test_markup_normalized_title_fallback_finds_math_title(_make_checker):
     checker = _make_checker([{
         "paperId": "openalex:2043804332",

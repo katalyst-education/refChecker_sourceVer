@@ -334,7 +334,10 @@ class ParallelReferenceProcessor:
         llm_confirmed_without_checker_data = (
             not result.verified_data
             and result.hallucination_assessment
-            and result.hallucination_assessment.get('verdict') == 'UNLIKELY'
+            and (
+                result.hallucination_assessment.get('verdict') == 'UNLIKELY'
+                or result.hallucination_assessment.get('verified_via_website')
+            )
         )
         if llm_confirmed_without_checker_data:
             print("")
@@ -347,7 +350,15 @@ class ParallelReferenceProcessor:
         # user sees verification info instead of a bare reference.
         if not result.verified_data and result.hallucination_assessment:
             ha = result.hallucination_assessment
-            if ha.get('verdict') == 'UNLIKELY':
+            if ha.get('verified_via_website'):
+                ha_link = ha.get('website_verified_url') or ha.get('link')
+                if ha_link and ha_link.startswith('http'):
+                    print("       Matched Database: Web page")
+                    print(f"       Verified URL: {ha_link}")
+                ha_explanation = ha.get('explanation', '')
+                if ha_explanation:
+                    print(f"       {ha_explanation}")
+            elif ha.get('verdict') == 'UNLIKELY':
                 ha_link = ha.get('link')
                 ha_explanation = ha.get('explanation', '')
                 if ha_link and ha_link.startswith('http'):
@@ -457,4 +468,3 @@ class ParallelReferenceProcessor:
             'fastest_time': self.processing_stats['fastest_time'] if self.processing_stats['fastest_time'] != float('inf') else 0,
             'slowest_time': self.processing_stats['slowest_time']
         }
-

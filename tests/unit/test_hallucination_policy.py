@@ -290,6 +290,50 @@ def test_apply_hallucination_verdict_labels_unlinked_llm_upgrade():
     assert updated['errors'] == []
 
 
+def test_apply_hallucination_verdict_upgrades_downgraded_result_via_website(monkeypatch):
+    from refchecker.core import hallucination_policy as hp
+
+    result = {
+        'status': 'unverified',
+        'errors': [{'error_type': 'unverified', 'error_details': 'Paper not found by any checker'}],
+    }
+    reference = {
+        'title': 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+        'authors': ['D. Gür-Seker', 'P. Hinze'],
+        'year': 2023,
+        'venue': 'University of Duisburg-Essen',
+    }
+    assessment = {
+        'verdict': 'UNCERTAIN',
+        'explanation': 'Reference could not be verified.',
+        'link': 'https://www.uni-due.de/example.pdf',
+        'found_title': reference['title'],
+        'found_authors': 'D. Gür-Seker, P. Hinze',
+        'found_year': '2023',
+    }
+
+    monkeypatch.setattr(
+        hp,
+        '_reverify_with_website_metadata',
+        lambda reference, old_errors, assessment: {
+            'issues': [],
+            'verified_url': assessment['link'],
+            'matched_database': 'Web page',
+        },
+    )
+
+    updated = apply_hallucination_verdict(result, assessment, reference=reference)
+
+    assert updated['status'] == 'verified'
+    assert updated['verified_via_website'] is True
+    assert updated['matched_database'] == 'Web page'
+    assert updated['authoritative_urls'] == [
+        {'type': 'verified_url', 'url': 'https://www.uni-due.de/example.pdf'}
+    ]
+    assert updated['hallucination_assessment']['verdict'] == 'UNLIKELY'
+    assert updated['hallucination_assessment']['verified_via_website'] is True
+
+
 def test_apply_hallucination_verdict_labels_likely_llm_match_without_existing_source():
     result = {
         'status': 'error',

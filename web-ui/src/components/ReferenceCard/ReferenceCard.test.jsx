@@ -55,4 +55,25 @@ describe('ReferenceCard', () => {
     expect(screen.getByText('LLM search')).toBeTruthy()
     expect(screen.queryByText(/Likely hallucinated/i)).toBeNull()
   })
+
+  it('renders the website-verified icon and website source label', () => {
+    const reference = {
+      status: 'verified',
+      title: 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+      authors: ['D. Gür-Seker', 'P. Hinze'],
+      venue: 'University of Duisburg-Essen',
+      year: 2023,
+      matched_database: 'Web page',
+      verified_via_website: true,
+      authoritative_urls: [{ type: 'verified_url', url: 'https://www.uni-due.de/example.pdf' }],
+      errors: [],
+      warnings: [],
+      suggestions: [],
+    }
+
+    render(<ReferenceCard reference={reference} index={4} isCheckComplete />)
+
+    expect(screen.getByTitle('Verified from website')).toBeTruthy()
+    expect(screen.getByText('Web page')).toBeTruthy()
+  })
 })

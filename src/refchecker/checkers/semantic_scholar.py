@@ -34,6 +34,7 @@ from refchecker.utils.url_utils import construct_semantic_scholar_url
 from refchecker.utils.text_utils import normalize_text, clean_title_basic, find_best_match, is_name_match, are_venues_substantially_different, calculate_title_similarity, compare_authors, clean_title_for_search, strip_latex_commands, compare_titles_with_latex_cleaning
 from refchecker.utils.error_utils import format_title_mismatch
 from refchecker.utils.arxiv_rate_limiter import ArXivRateLimiter, arxiv_cached_get
+from refchecker.utils.venue_utils import get_semantic_scholar_venue, resolve_venue_for_validation
 from refchecker.config.settings import get_config
 
 # Set up logging
@@ -283,36 +284,7 @@ class NonArxivReferenceChecker:
         Returns:
             Venue string or None if not found
         """
-        if not paper_data:
-            return None
-            
-        paper_venue = None
-        
-        # First try the simple 'venue' field (string)
-        if paper_data.get('venue'):
-            paper_venue = paper_data.get('venue')
-        
-        # If no venue, try publicationVenue object
-        if not paper_venue and paper_data.get('publicationVenue'):
-            pub_venue = paper_data.get('publicationVenue')
-            if isinstance(pub_venue, dict):
-                paper_venue = pub_venue.get('name', '')
-            elif isinstance(pub_venue, str):
-                paper_venue = pub_venue
-        
-        # If still no venue, try journal object
-        if not paper_venue and paper_data.get('journal'):
-            journal = paper_data.get('journal')
-            if isinstance(journal, dict):
-                paper_venue = journal.get('name', '')
-            elif isinstance(journal, str):
-                paper_venue = journal
-        
-        # Ensure paper_venue is a string
-        if paper_venue and not isinstance(paper_venue, str):
-            paper_venue = str(paper_venue)
-        
-        return paper_venue if paper_venue else None
+        return get_semantic_scholar_venue(paper_data)
     
     def _extract_arxiv_id_and_version(self, reference: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -1042,33 +1014,16 @@ class NonArxivReferenceChecker:
         # Verify venue
         cited_venue = reference.get('journal', '') or reference.get('venue', '')
         
-        # Extract venue from paper_data - check multiple fields since Semantic Scholar
-        # returns venue info in different fields depending on publication type
-        paper_venue = None
-        
-        # First try the simple 'venue' field (string)
-        if paper_data.get('venue'):
-            paper_venue = paper_data.get('venue')
-        
-        # If no venue, try publicationVenue object
-        if not paper_venue and paper_data.get('publicationVenue'):
-            pub_venue = paper_data.get('publicationVenue')
-            if isinstance(pub_venue, dict):
-                paper_venue = pub_venue.get('name', '')
-            elif isinstance(pub_venue, str):
-                paper_venue = pub_venue
-        
-        # If still no venue, try journal object
-        if not paper_venue and paper_data.get('journal'):
-            journal = paper_data.get('journal')
-            if isinstance(journal, dict):
-                paper_venue = journal.get('name', '')
-            elif isinstance(journal, str):
-                paper_venue = journal
-        
-        # Ensure paper_venue is a string
-        if paper_venue and not isinstance(paper_venue, str):
-            paper_venue = str(paper_venue)
+        paper_venue = self.get_venue_from_paper_data(paper_data)
+        paper_venue, used_doi_venue = resolve_venue_for_validation(
+            cited_venue,
+            paper_venue,
+            reference,
+            paper_data=paper_data,
+            cache_dir=getattr(self, 'cache_dir', None),
+        )
+        if used_doi_venue and paper_venue:
+            logger.debug("Using DOI-backed venue for validation: %s", paper_venue)
         
         # Check venue mismatches
         if cited_venue and paper_venue:

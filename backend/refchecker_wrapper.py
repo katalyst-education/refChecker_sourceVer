@@ -516,6 +516,7 @@ class ProgressRefChecker:
             "suggestions": formatted_suggestions,
             "authoritative_urls": authoritative_urls,
             "matched_database": matched_database,
+            "verified_via_website": verified_via_webpage,
             "corrected_reference": None,
             "hallucination_assessment": hallucination_assessment,
             "_raw_errors": errors,  # Stashed for deferred hallucination check

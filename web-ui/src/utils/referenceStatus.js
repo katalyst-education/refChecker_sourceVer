@@ -1,4 +1,4 @@
-const FINAL_STATUSES = ['error', 'warning', 'suggestion', 'unverified', 'verified', 'hallucination']
+const FINAL_STATUSES = ['error', 'warning', 'suggestion', 'unverified', 'verified', 'website_verified', 'hallucination']
 
 export const normalizeForMetadataComparison = (value) => String(value || '')
   .toLowerCase()
@@ -65,6 +65,17 @@ export const llmFoundMetadataMatchesCitation = (reference = {}) => {
     && (!reference.year || String(assessment.found_year || '').includes(String(reference.year)))
 }
 
+export const isWebsiteVerifiedReference = (reference = {}) => {
+  if (reference?.verified_via_website) return true
+
+  const baseStatus = String(reference?.status || '').trim().toLowerCase()
+  const matchedDatabase = String(reference?.matched_database || '').trim().toLowerCase()
+  const hasVerifiedUrl = Array.isArray(reference?.authoritative_urls)
+    && reference.authoritative_urls.some(urlObj => urlObj?.type === 'verified_url' && urlObj?.url)
+
+  return baseStatus === 'verified' && hasVerifiedUrl && (matchedDatabase === 'web page' || matchedDatabase === 'website')
+}
+
 export const getEffectiveReferenceStatus = (reference = {}, isCheckComplete = false) => {
   const baseStatus = (reference.status || '').trim().toLowerCase()
   const llmMatch = llmFoundMetadataMatchesCitation(reference)
@@ -99,10 +110,13 @@ export const getEffectiveReferenceStatus = (reference = {}, isCheckComplete = fa
   )
   const hasWarnings = Array.isArray(reference.warnings) && reference.warnings.length > 0
   const hasSuggestions = Array.isArray(reference.suggestions) && reference.suggestions.length > 0
+  const websiteVerified = isWebsiteVerifiedReference(reference)
 
   if (hasErrors) return 'error'
   if (hasWarnings) return 'warning'
   if (hasSuggestions) return 'suggestion'
+
+  if (websiteVerified) return 'website_verified'
 
   if (baseStatus === 'error' || baseStatus === 'warning' || baseStatus === 'suggestion') {
     return 'verified'
@@ -202,7 +216,7 @@ export const computeReferenceStats = (references = [], isCheckComplete = false) 
       hallucinated += 1
     }
 
-    if (s === 'verified' || s === 'suggestion') {
+    if (s === 'verified' || s === 'website_verified' || s === 'suggestion') {
       verified += 1
     }
   }
