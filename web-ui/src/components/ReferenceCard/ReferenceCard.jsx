@@ -528,29 +528,38 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
       : []
 
   const recheckWarnings = (reference.errors || [])
-    .filter(issue => issue.warning_type && !issue.error_type)
-    .map(issue => ({
-      ...issue,
-      error_type: issue.warning_type,
-      error_details: issue.warning_details || '',
-    }))
+      .filter(issue => issue.warning_type && !issue.error_type)
+      .map(issue => ({
+        ...issue,
+        error_type:    issue.warning_type,
+        error_details: issue.warning_details || '',
+        cited_value:   issue.cited_value,
+        actual_value:  issue.actual_value,
+      }))
+
   const baseDisplayWarnings = foundMetadataMatchesCitation
-    ? []
-    : (recheckWarnings.length > 0 ? recheckWarnings : (reference.warnings || []))
-  // Style-aware venue suppression. When the active citation style
-  // permits NLM-style abbreviated journal titles AND the cited venue
-  // is a known abbreviation of the database venue, the venue warning
-  // is a false positive. Suppression runs at render time, so flipping
-  // the style dropdown re-evaluates instantly.
+      ? []
+      : recheckWarnings.length > 0
+          ? recheckWarnings
+          : (reference.warnings || []).map(w => ({
+            ...w,
+            error_type:    w.error_type    || w.warning_type    || '',
+            error_details: w.error_details || w.warning_details || '',
+            cited_value:   w.cited_value,
+            actual_value:  w.actual_value,
+          }))
+
+// Style-aware venue suppression.
   const displayWarnings = baseDisplayWarnings.filter(w => {
-    const t = (w.warning_type || w.error_type || '').toLowerCase()
+    const t = (w.error_type || w.warning_type || '').toLowerCase()
     if (t !== 'venue') return true
     return !shouldSuppressVenueWarning({
-      cited_value: reference.venue,
-      actual_value: w.ref_venue_correct || w.actual_value,
-      warning_details: w.warning_details || w.error_details,
+      citedvalue:     reference.venue,
+      actualvalue:    w.ref_venue_correct || w.actual_value,
+      warningdetails: w.error_details || w.warning_details,
     }, activeFormat)
   })
+
   const displayErrors = (reference.errors || [])
     .filter(issue => issue.error_type && issue.error_type !== 'unverified')
     .filter(() => !foundMetadataMatchesCitation)
@@ -1040,47 +1049,43 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
             const parsedDetails = parseErrorDetails(warning.error_details)
             const hasParsedCitedActual = parsedDetails?.cited || parsedDetails?.actual
 
-            // Extract version annotation from error_type if present
             const extractVersionAnnotation = (type) => {
               if (!type) return null
               const match = type.match(/\(v\d+\s+vs\s+v\d+\s+update\)/i)
               return match ? match[0] : null
             }
-
             const versionAnnotation = extractVersionAnnotation(warning.error_type)
 
-            // Use prefix from error_details and append version annotation if present
-            const baseText = (hasParsedCitedActual && typeof parsedDetails?.prefix === 'string')
-              ? parsedDetails.prefix.replace(/:$/, '')
-              : (warning.error_details || `${formatWarningType(warning.error_type)} mismatch`)
-
+            const baseText = hasParsedCitedActual && typeof parsedDetails?.prefix === 'string'
+                ? parsedDetails.prefix.replace(/:$/, '')
+                : (warning.error_details || `${formatWarningType(warning.error_type)} mismatch`)
             const warningText = versionAnnotation && baseText && !baseText.includes(versionAnnotation)
-              ? `${baseText} ${versionAnnotation}`
-              : (baseText || '')
+                ? `${baseText} ${versionAnnotation}`
+                : (baseText || '')
 
             return (
-              <div
-                key={`warning-${i}`}
-                style={{ color: 'var(--color-warning)', wordBreak: 'break-word' }}
-              >
-                <div className="flex items-start gap-2">
-                  <span>⚠️</span>
-                  <span><span className="font-bold">Warning:</span> {warningText}</span>
+                <div key={`warning-${i}`} style={{ color: 'var(--color-warning)', wordBreak: 'break-word' }}>
+                  <div className="flex items-start gap-2">
+                    <span>⚠️</span>
+                    <span><span className="font-bold">Warning</span>{' '}{warningText}</span>
+                  </div>
+                  {(parsedDetails?.cited || warning.cited_value) && (
+                      <div className="flex ml-6">
+          <span className="flex-shrink-0" style={{ width: '70px' }}>
+            <span className="font-bold">cited</span>{': '}
+          </span>
+                        <CollapsibleText text={parsedDetails?.cited || warning.cited_value} />
+                      </div>
+                  )}
+                  {(parsedDetails?.actual || warning.actual_value) && (
+                      <div className="flex ml-6">
+          <span className="flex-shrink-0" style={{ width: '70px' }}>
+            <span className="font-bold">actual</span>{': '}
+          </span>
+                        <CollapsibleText text={parsedDetails?.actual || warning.actual_value} />
+                      </div>
+                  )}
                 </div>
-                {/* Show parsed cited/actual on separate lines, or use direct fields */}
-                {(parsedDetails?.cited || warning.cited_value) && (
-                  <div className="flex ml-6">
-                    <span className="flex-shrink-0" style={{ width: '70px' }}><span className="font-bold">cited:</span></span>
-                    <CollapsibleText text={parsedDetails?.cited || warning.cited_value} />
-                  </div>
-                )}
-                {(parsedDetails?.actual || warning.actual_value) && (
-                  <div className="flex ml-6">
-                    <span className="flex-shrink-0" style={{ width: '70px' }}><span className="font-bold">actual:</span></span>
-                    <CollapsibleText text={parsedDetails?.actual || warning.actual_value} />
-                  </div>
-                )}
-              </div>
             )
           })}
 
