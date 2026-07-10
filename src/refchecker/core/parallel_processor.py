@@ -36,6 +36,8 @@ class ReferenceResult:
     processing_time: float
     reference: Dict[str, Any]
     verified_data: Optional[Dict[str, Any]] = None
+    warnings: Optional[List[Dict[str, Any]]] = None
+    status: Optional[str] = None
     hallucination_assessment: Optional[Dict[str, Any]] = None
     hallucination_verdict_applied: bool = False
 
@@ -274,6 +276,8 @@ class ParallelReferenceProcessor:
                                     )
                                     current_result.hallucination_assessment = tmp.get('hallucination_assessment', assessment)
                                     current_result.errors = tmp['errors']
+                                    current_result.warnings = tmp.get('warnings', [])
+                                    current_result.status = tmp.get('status')
                                     current_result.hallucination_verdict_applied = True
                         
                         # Print the result using base checker's output methods
@@ -375,6 +379,20 @@ class ParallelReferenceProcessor:
                     printed_llm_verification = True
                 if ha_explanation:
                     print(f"       {ha_explanation}")
+
+        if result.status == 'warning' and result.warnings:
+            warning_entries = [
+                {
+                    **warning,
+                    'warning_type': warning.get('error_type'),
+                    'warning_details': warning.get('error_details', ''),
+                }
+                for warning in result.warnings
+            ]
+            self.base_checker._display_non_unverified_errors(
+                warning_entries, debug_mode=False, print_output=True,
+            )
+            return
 
         # Display errors and warnings
         if result.errors:

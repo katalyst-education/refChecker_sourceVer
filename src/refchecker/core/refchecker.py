@@ -361,9 +361,21 @@ class ArxivReferenceChecker:
             (llm_config or {}).get('hallucination_provider')
             or (llm_config or {}).get('provider')
         )
+        web_search_api_key = (
+            (llm_config or {}).get('hallucination_api_key')
+            or (llm_config or {}).get('api_key')
+        )
+        web_search_endpoint = (
+            (llm_config or {}).get('hallucination_endpoint')
+            or (llm_config or {}).get('endpoint')
+        )
         try:
             from refchecker.checkers.web_search import create_web_search_checker
-            searcher = create_web_search_checker(preferred_provider=web_search_provider)
+            searcher = create_web_search_checker(
+                preferred_provider=web_search_provider,
+                api_key=web_search_api_key,
+                endpoint=web_search_endpoint,
+            )
             if searcher.available:
                 web_searcher = searcher
                 logger.debug(f'Web search verification enabled (provider: {searcher._provider_name})')
@@ -3132,11 +3144,8 @@ class ArxivReferenceChecker:
             
             if not authors_match:
                 logger.debug(f"DB Verification: Author mismatch - {author_error}")
-                errors.append({
-                    'error_type': 'author',
-                    'error_details': author_error,
-                    'ref_authors_correct': ', '.join(correct_names)
-                })
+                from refchecker.utils.error_utils import create_author_error
+                errors.append(create_author_error(author_error, correct_names))
         
         # Verify year (with tolerance)
         paper_year = paper_data.get('year')
@@ -7199,6 +7208,21 @@ class ArxivReferenceChecker:
                             if llm_link and llm_link.startswith('http'):
                                 print(f"       Verified URL: {llm_link}")
                         # Store assessment so it isn't re-run below
+                        precomputed_hallucination = llm_assessment
+                    elif llm_assessment and applied_hallucination.get('status') == 'warning':
+                        if print_output and applied_hallucination.get('matched_database'):
+                            print(f"       Matched Database: {applied_hallucination['matched_database']}")
+                        warning_entries = [
+                            {
+                                **warning,
+                                'warning_type': warning.get('error_type'),
+                                'warning_details': warning.get('error_details', ''),
+                            }
+                            for warning in applied_hallucination.get('warnings', [])
+                        ]
+                        self._display_non_unverified_errors(
+                            warning_entries, debug_mode, print_output,
+                        )
                         precomputed_hallucination = llm_assessment
                     else:
                         self.total_unverified_refs += 1

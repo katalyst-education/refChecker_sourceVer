@@ -954,6 +954,7 @@ class ProgressRefChecker:
         self.hallucination_model = None
         self.hallucination_api_key = None
         self.hallucination_endpoint = None
+        self.web_searcher = None
 
         # Initialize LLM if requested
         self.llm = None
@@ -1033,6 +1034,28 @@ class ProgressRefChecker:
                     )
         except Exception as e:
             logger.debug(f'Hallucination verifier init failed: {e}')
+        try:
+            from refchecker.checkers.web_search import create_web_search_checker
+
+            web_search_provider = hallucination_provider or llm_provider
+            web_search_api_key = hallucination_api_key or api_key
+            web_search_endpoint = hallucination_endpoint or endpoint
+            searcher = create_web_search_checker(
+                preferred_provider=web_search_provider,
+                api_key=web_search_api_key,
+                endpoint=web_search_endpoint,
+            )
+            if searcher.available:
+                self.web_searcher = searcher
+                logger.info(
+                    'Web searcher configured for web UI (provider=%s, key=%s)',
+                    searcher._provider_name,
+                    'present' if web_search_api_key else 'resolved-from-env',
+                )
+            else:
+                logger.info('Web searcher not available for web UI')
+        except Exception as e:
+            logger.debug(f'Web searcher init failed: {e}')
         # Web UI Semantic Scholar keys are supplied per request from the browser.
         ss_api_key = semantic_scholar_api_key
         if ss_api_key:
@@ -2935,9 +2958,10 @@ class ProgressRefChecker:
                 cached = await _db.lookup_verified_reference(reference)
                 if cached and isinstance(cached.get("result"), dict) and cached["result"]:
                     cached_result = dict(cached["result"])
-                    cached_result["index"] = index
-                    cached_result["from_cache"] = True
-                    return cached_result
+                    if self._can_reuse_cached_result(cached_result):
+                        cached_result["index"] = index
+                        cached_result["from_cache"] = True
+                        return cached_result
             except Exception as _e:
                 logger.debug("Global cache lookup skipped: %s", _e)
 
@@ -3186,6 +3210,32 @@ class ProgressRefChecker:
         old_d = ProgressRefChecker._compute_ref_stats(old_result, is_complete=is_complete)
         return {k: new_d[k] - old_d.get(k, 0) for k in new_d}
 
+    @staticmethod
+    def _can_reuse_cached_result(cached_result: Dict[str, Any]) -> bool:
+        """Only reuse settled cache entries.
+
+        Unverified / pending / hallucination-inconclusive entries must be
+        reprocessed so newer verification logic (for example direct website
+        rechecks) can upgrade them and refresh the cache.
+        """
+        if not isinstance(cached_result, dict) or not cached_result:
+            return False
+
+        status = str(cached_result.get('status') or '').strip().lower()
+        if status in {'', 'pending', 'checking', 'checked', 'unchecked', 'unverified', 'hallucination'}:
+            return False
+
+        if cached_result.get('hallucination_check_pending'):
+            return False
+
+        if any(
+            str(error.get('error_type') or '').strip().lower() == 'unverified'
+            for error in (cached_result.get('errors') or [])
+        ):
+            return False
+
+        return True
+
     def _run_hallucination_check_sync(self, result: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str, Any]:
         """Run hallucination check synchronously and return updated result.
 
@@ -3229,7 +3279,11 @@ class ProgressRefChecker:
             'url references paper' in (e.get('error_details') or '').lower()
             for e in raw_errors
         )
-        if has_url_refs_paper and assessment.get('verdict') == 'UNLIKELY':
+        if (
+            has_url_refs_paper
+            and assessment.get('verdict') == 'UNLIKELY'
+            and not str(assessment.get('link') or '').startswith('http')
+        ):
             return result
 
         with _usage_tracker.FlowScope("hallucination"):
@@ -3293,8 +3347,12 @@ class ProgressRefChecker:
                         )
                 if cached and isinstance(cached.get("result"), dict) and cached["result"]:
                     cached_result = dict(cached["result"])
-                    cached_result["index"] = idx + 1
-                    cached_result["from_cache"] = True
+                    if not self._can_reuse_cached_result(cached_result):
+                        cached = None
+                    else:
+                        cached_result["index"] = idx + 1
+                        cached_result["from_cache"] = True
+                if cached and isinstance(cached.get("result"), dict) and cached["result"]:
                     # ── Fuzzy cache hit: validate cited fields against
                     # the cached ground truth (v0.7.49) ─────────────────
                     # User's note: "if any issues should mark, not just

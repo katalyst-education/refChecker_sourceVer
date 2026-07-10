@@ -122,19 +122,33 @@ def format_doi_mismatch(cited_doi: str, correct_doi: str) -> str:
 
 def create_author_error(error_details: str, correct_authors: List[Dict[str, str]]) -> Dict[str, str]:
     """
-    Create a standardized author error dictionary.
+    Create a standardized author issue dictionary.
     
     Args:
         error_details: Description of the author error
         correct_authors: List of correct author data from database
         
     Returns:
-        Standardized error dictionary
+        Standardized error or warning dictionary
     """
+    correct_names = []
+    for author in correct_authors or []:
+        if isinstance(author, dict):
+            correct_names.append(author.get('name', ''))
+        else:
+            correct_names.append(str(author))
+
+    if is_potential_author_misspelling_details(error_details):
+        return {
+            'warning_type': 'author',
+            'warning_details': error_details,
+            'ref_authors_correct': ', '.join(name for name in correct_names if name),
+        }
+
     return {
         'error_type': 'author',
         'error_details': error_details,
-        'ref_authors_correct': ', '.join([author.get('name', '') for author in correct_authors])
+        'ref_authors_correct': ', '.join(name for name in correct_names if name)
     }
 
 
@@ -446,6 +460,15 @@ def format_author_mismatch(author_number: int, cited_author: str, correct_author
     return format_three_line_mismatch(f"Author {author_number} mismatch", cited_author, correct_author)
 
 
+def format_potential_author_misspelling(author_number: int, cited_author: str, correct_author: str) -> str:
+    """Format a likely misspelling-style author mismatch as a warning message."""
+    return format_three_line_mismatch(
+        f"Potential author misspelling for author {author_number}",
+        cited_author,
+        correct_author,
+    )
+
+
 def format_first_author_mismatch(cited_author: str, correct_author: str) -> str:
     """
     Format a three-line first author mismatch message.
@@ -458,6 +481,11 @@ def format_first_author_mismatch(cited_author: str, correct_author: str) -> str:
         Formatted three-line first author mismatch message
     """
     return format_three_line_mismatch("First author mismatch", cited_author, correct_author)
+
+
+def is_potential_author_misspelling_details(details: str) -> bool:
+    """Return True when an author issue was classified as a likely misspelling."""
+    return str(details or '').startswith("Potential author misspelling")
 
 
 def format_author_count_mismatch(cited_count: int, correct_count: int, cited_authors: list, correct_authors: list) -> str:

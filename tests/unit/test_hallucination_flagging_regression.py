@@ -279,6 +279,75 @@ class TestPreScreenRawInfoOnly:
         assert outcome == 'skip'
 
 
+class TestBackendHallucinationWebsiteReverify:
+    """Backend async hallucination path should preserve website re-verification."""
+
+    @staticmethod
+    def _make_wrapper():
+        from backend.refchecker_wrapper import ProgressRefChecker
+
+        wrapper = object.__new__(ProgressRefChecker)
+        wrapper.check_id = None
+        wrapper.hallucination_verifier = None
+        wrapper.web_searcher = None
+        wrapper._standard_refcheck_for_hallucination = lambda found_ref: None
+        return wrapper
+
+    def test_url_reference_unlikely_still_applies_website_reverify(self, monkeypatch):
+        from backend import refchecker_wrapper as rw
+
+        wrapper = self._make_wrapper()
+        reference = {
+            'title': 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+            'authors': ['D. Gür-Seker', 'P. Hinze'],
+            'year': 2023,
+            'venue': 'University of Duisburg-Essen',
+        }
+        result = {
+            'status': 'unverified',
+            'errors': [{'error_type': 'unverified', 'error_details': 'Paper not found by any checker'}],
+            '_raw_errors': [{'error_type': 'url', 'error_details': 'paper not verified but URL references paper'}],
+            'authoritative_urls': [],
+        }
+        assessment = {
+            'verdict': 'UNLIKELY',
+            'explanation': 'The exact paper was found on the University of Duisburg-Essen website.',
+            'link': 'https://www.uni-due.de/example.pdf',
+            'found_title': reference['title'],
+            'found_authors': 'D. Gür-Seker, P. Hinze',
+            'found_year': '2023',
+        }
+
+        monkeypatch.setattr(rw, 'build_hallucination_error_entry', lambda *args, **kwargs: {'error_type': 'unverified'})
+        monkeypatch.setattr(rw, 'run_hallucination_check', lambda *args, **kwargs: assessment)
+
+        def fake_apply(result_arg, assessment_arg, **kwargs):
+            assert assessment_arg is assessment
+            return {
+                **result_arg,
+                'status': 'verified',
+                'verified_via_website': True,
+                'matched_database': 'Web page',
+                'authoritative_urls': [{'type': 'verified_url', 'url': assessment['link']}],
+                'hallucination_assessment': {
+                    **assessment_arg,
+                    'verified_via_website': True,
+                    'website_verified_url': assessment['link'],
+                },
+            }
+
+        monkeypatch.setattr(rw, 'apply_hallucination_verdict', fake_apply)
+
+        updated = wrapper._run_hallucination_check_sync(result, reference)
+
+        assert updated['status'] == 'verified'
+        assert updated['verified_via_website'] is True
+        assert updated['matched_database'] == 'Web page'
+        assert updated['authoritative_urls'] == [
+            {'type': 'verified_url', 'url': 'https://www.uni-due.de/example.pdf'}
+        ]
+
+
 class TestArxivReVerify:
     """Tests for RefChecker._try_arxiv_re_verify (wrong-DB-match fallback)."""
 

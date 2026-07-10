@@ -335,6 +335,213 @@ def test_apply_hallucination_verdict_upgrades_downgraded_result_via_website(monk
     assert updated['hallucination_assessment']['verified_via_website'] is True
 
 
+def test_reverify_with_website_metadata_uses_web_search_url_when_link_missing(monkeypatch):
+    from refchecker.core import hallucination_policy as hp
+    from refchecker.checkers import pdf_paper_checker as ppc
+    from refchecker.checkers import webpage_checker as wpc
+
+    reference = {
+        'title': 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+        'authors': ['D. Gür-Seker', 'P. Hinze'],
+        'year': 2023,
+        'venue': 'University of Duisburg-Essen',
+    }
+    assessment = {
+        'verdict': 'UNCERTAIN',
+        'explanation': 'The exact paper was found on the University of Duisburg-Essen website.',
+        'found_title': reference['title'],
+        'found_authors': 'D. Gür-Seker, P. Hinze',
+        'found_year': '2023',
+        'web_search': {
+            'found': True,
+            'academic_urls': ['https://www.uni-due.de/example.pdf'],
+        },
+    }
+
+    class FakePDFPaperChecker:
+        def can_check_reference(self, website_reference):
+            return website_reference.get('url') == 'https://www.uni-due.de/example.pdf'
+
+        def verify_reference(self, website_reference):
+            return ({'url': website_reference['url']}, [], website_reference['url'])
+
+    class FakeWebPageChecker:
+        def verify_raw_url_for_unverified_reference(self, grounding_reference):
+            return ({'url': grounding_reference['url'], 'web_metadata': {}}, [], grounding_reference['url'])
+
+    monkeypatch.setattr(ppc, 'PDFPaperChecker', FakePDFPaperChecker)
+    monkeypatch.setattr(wpc, 'WebPageChecker', FakeWebPageChecker)
+    monkeypatch.setattr(hp, '_reverify_with_llm_metadata', lambda reference, old_errors, assessment: [])
+
+    reverified = hp._reverify_with_website_metadata(reference, [], assessment)
+
+    assert reverified is not None
+    assert reverified['verified_url'] == 'https://www.uni-due.de/example.pdf'
+    assert reverified['issues'] == []
+
+
+def test_reverify_with_website_metadata_uses_non_academic_web_search_url(monkeypatch):
+    from refchecker.core import hallucination_policy as hp
+    from refchecker.checkers import pdf_paper_checker as ppc
+    from refchecker.checkers import webpage_checker as wpc
+
+    reference = {
+        'title': 'Introducing Claude',
+        'authors': ['Anthropic'],
+        'year': 2023,
+        'venue': 'Anthropic News',
+    }
+    assessment = {
+        'verdict': 'UNCERTAIN',
+        'explanation': 'The exact source appears on Anthropic\'s website.',
+        'found_title': reference['title'],
+        'found_authors': 'Anthropic',
+        'found_year': '2023',
+        'web_search': {
+            'found': True,
+            'urls': ['https://www.anthropic.com/news/introducing-claude'],
+            'academic_urls': [],
+        },
+    }
+
+    class FakePDFPaperChecker:
+        def can_check_reference(self, website_reference):
+            return False
+
+    class FakeWebPageChecker:
+        def verify_raw_url_for_unverified_reference(self, grounding_reference):
+            return ({'url': grounding_reference['url'], 'web_metadata': {}}, [], grounding_reference['url'])
+
+    monkeypatch.setattr(ppc, 'PDFPaperChecker', FakePDFPaperChecker)
+    monkeypatch.setattr(wpc, 'WebPageChecker', FakeWebPageChecker)
+    monkeypatch.setattr(hp, '_reverify_with_llm_metadata', lambda reference, old_errors, assessment: [])
+
+    reverified = hp._reverify_with_website_metadata(reference, [], assessment)
+
+    assert reverified is not None
+    assert reverified['verified_url'] == 'https://www.anthropic.com/news/introducing-claude'
+    assert reverified['issues'] == []
+
+
+def test_reverify_with_website_metadata_logs_probe_attempts(monkeypatch, caplog):
+    from refchecker.core import hallucination_policy as hp
+    from refchecker.checkers import pdf_paper_checker as ppc
+    from refchecker.checkers import webpage_checker as wpc
+
+    reference = {
+        'title': 'Introducing Claude',
+        'authors': ['Anthropic'],
+        'year': 2023,
+        'venue': 'Anthropic News',
+    }
+    assessment = {
+        'verdict': 'UNLIKELY',
+        'explanation': 'The exact source appears on Anthropic\'s website.',
+        'found_title': reference['title'],
+        'web_search': {
+            'found': True,
+            'urls': ['https://www.anthropic.com/news/introducing-claude'],
+            'academic_urls': [],
+        },
+    }
+
+    class FakePDFPaperChecker:
+        def can_check_reference(self, website_reference):
+            return False
+
+    class FakeWebPageChecker:
+        def verify_raw_url_for_unverified_reference(self, grounding_reference):
+            return ({'url': grounding_reference['url'], 'web_metadata': {}}, [], grounding_reference['url'])
+
+    monkeypatch.setattr(ppc, 'PDFPaperChecker', FakePDFPaperChecker)
+    monkeypatch.setattr(wpc, 'WebPageChecker', FakeWebPageChecker)
+    monkeypatch.setattr(hp, '_reverify_with_llm_metadata', lambda reference, old_errors, assessment: [])
+
+    with caplog.at_level(logging.INFO, logger='refchecker.core.hallucination_policy'):
+        hp._reverify_with_website_metadata(reference, [], assessment)
+
+    assert 'Website recheck: probing 1 discovered URL(s)' in caplog.text
+    assert 'Website recheck: trying https://www.anthropic.com/news/introducing-claude' in caplog.text
+    assert "Website recheck: verified 'Introducing Claude'" in caplog.text
+
+
+def test_apply_hallucination_verdict_reports_missing_website_url(monkeypatch):
+    from refchecker.core import hallucination_policy as hp
+
+    result = {
+        'status': 'unverified',
+        'errors': [{'error_type': 'unverified', 'error_details': 'Paper not found by any checker'}],
+    }
+    reference = {
+        'title': 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+        'authors': ['D. Gür-Seker', 'P. Hinze'],
+        'year': 2023,
+        'venue': 'University of Duisburg-Essen',
+    }
+    assessment = {
+        'verdict': 'UNCERTAIN',
+        'explanation': 'Reference could not be verified.',
+        'link': 'https://www.uni-due.de/missing.pdf',
+        'found_title': reference['title'],
+        'found_authors': 'D. Gür-Seker, P. Hinze',
+        'found_year': '2023',
+    }
+
+    monkeypatch.setattr(
+        hp,
+        '_reverify_with_website_metadata',
+        lambda reference, old_errors, assessment: {
+            'issues': None,
+            'verified_url': assessment['link'],
+            'matched_database': 'Web page',
+            'failure_reason': 'non-existent web page',
+            'checked_url': assessment['link'],
+        },
+    )
+
+    updated = apply_hallucination_verdict(result, assessment, reference=reference)
+
+    assert updated['status'] == 'unverified'
+    assert updated['hallucination_assessment']['verdict'] == 'UNCERTAIN'
+    assert 'non-existent web page' in updated['hallucination_assessment']['explanation']
+    assert 'https://www.uni-due.de/missing.pdf' in updated['hallucination_assessment']['explanation']
+
+
+def test_apply_hallucination_verdict_includes_found_metadata_differences_in_subreason():
+    result = {
+        'status': 'unverified',
+        'errors': [{'error_type': 'unverified', 'error_details': 'Paper not found by any checker'}],
+    }
+    reference = {
+        'title': 'Didaktische Konzeption von Serious Games: Zur Verknüpfung von Spielund Lernumgebung',
+        'authors': ['M. Kerres', 'M. Vervenne'],
+        'year': 2009,
+        'venue': 'Medienpädagogik – Zeitschrift für Theorie und Praxis der Medienbildung',
+    }
+    assessment = {
+        'verdict': 'UNCERTAIN',
+        'explanation': (
+            'The exact paper was found in "MedienPädagogik. Zeitschrift für Theorie und Praxis '
+            'der Medienbildung" (2009), authored by Michael Kerres, Mark Bormann, and Marcel Vervenne. '
+            '(Verdict downgraded: the LLM response was not grounded in web search results or verified '
+            'metadata, so it cannot prove this academic reference has matching title and authors.)'
+        ),
+        'found_title': 'Didaktische Konzeption von Serious Games: Zur Verknüpfung von Spiel- und Lernangeboten',
+        'found_authors': 'Michael Kerres, Mark Bormann, Marcel Vervenne',
+        'found_year': '2009',
+        'found_venue': 'MedienPädagogik: Zeitschrift für Theorie und Praxis der Medienbildung',
+    }
+
+    updated = apply_hallucination_verdict(result, assessment, reference=reference)
+
+    assert updated['status'] == 'warning'
+    assert updated['matched_database'] == 'LLM search'
+    warning_types = [warning['error_type'] for warning in updated['warnings']]
+    assert 'title' in warning_types
+    assert 'author' in warning_types
+    assert updated['errors'] == []
+
+
 def test_apply_hallucination_verdict_labels_likely_llm_match_without_existing_source():
     result = {
         'status': 'error',
@@ -1723,6 +1930,91 @@ def test_ungrounded_unlikely_for_academic_reference_is_uncertain():
 
     assert result['verdict'] == 'UNCERTAIN'
     assert 'not grounded in web search results or verified metadata' in result['explanation']
+
+
+def test_ungrounded_unlikely_uses_fallback_web_search_for_grounding():
+    verifier = object.__new__(LLMHallucinationVerifier)
+    verifier.provider = 'google'
+    verifier.model = 'gemini-test'
+    verifier.client = object()
+    verifier.cache_dir = None
+    verifier._call = lambda system_prompt, user_prompt: (
+        'EXPLANATION: The exact paper was found with the same title and authors.\n'
+        'FOUND_TITLE: Large Language Models und ihre Potenziale im Bildungssystem. Impulspapier der Ständigen Wissenschaftlichen Kommission der Kultusministerkonferenz\n'
+        'FOUND_AUTHORS: Ständige Wissenschaftliche Kommission der Kultusministerkonferenz\n'
+        'FOUND_VENUE: Ständige Wissenschaftliche Kommission der Kultusministerkonferenz\n'
+        'FOUND_YEAR: 2024\n'
+        'VERDICT: UNLIKELY',
+        [],
+    )
+    entry = {
+        'error_type': 'unverified',
+        'error_details': 'Reference could not be verified',
+        'ref_title': 'Large Language Models und ihre Potenziale im Bildungssystem. Impulspapier der Ständigen Wissenschaftlichen Kommission der Kultusministerkonferenz',
+        'ref_authors_cited': 'Ständige Wissenschaftliche Kommission der Kultusministerkonferenz',
+        'ref_year_cited': 2024,
+        'original_reference': {
+            'venue': 'Ständige Wissenschaftliche Kommission der Kultusministerkonferenz',
+        },
+    }
+
+    class StubWebSearcher:
+        available = True
+
+        def check_reference_exists(self, error_entry):
+            return {
+                'found': True,
+                'urls': ['https://www.kmk.org/themen/qualitaetssicherung-in-schulen/bildung-in-der-digitalen-welt/large-language-models.html'],
+                'academic_urls': [],
+                'provider': 'stub',
+                'verdict': 'EXISTS',
+            }
+
+    result = verifier.assess(entry, web_searcher=StubWebSearcher())
+
+    assert result['verdict'] == 'UNLIKELY'
+    assert 'not grounded in web search results or verified metadata' not in result['explanation']
+    assert result['web_search']['urls'] == [
+        'https://www.kmk.org/themen/qualitaetssicherung-in-schulen/bildung-in-der-digitalen-welt/large-language-models.html'
+    ]
+
+
+def test_fallback_web_search_logs_discovered_urls(caplog):
+    verifier = object.__new__(LLMHallucinationVerifier)
+    verifier.provider = 'google'
+    verifier.model = 'gemini-test'
+    verifier.client = object()
+    verifier.cache_dir = None
+    verifier._call = lambda system_prompt, user_prompt: (
+        'EXPLANATION: The exact paper was found.\n'
+        'VERDICT: UNLIKELY',
+        [],
+    )
+    entry = {
+        'error_type': 'unverified',
+        'error_details': 'Reference could not be verified',
+        'ref_title': 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+        'ref_authors_cited': 'D. Gür-Seker, P. Hinze',
+    }
+
+    class StubWebSearcher:
+        available = True
+
+        def check_reference_exists(self, error_entry):
+            return {
+                'found': True,
+                'urls': ['https://www.uni-due.de/example-paper'],
+                'academic_urls': [],
+                'provider': 'stub',
+                'verdict': 'EXISTS',
+            }
+
+    with caplog.at_level(logging.INFO, logger='refchecker.llm.hallucination_verifier'):
+        verifier.assess(entry, web_searcher=StubWebSearcher())
+
+    assert 'Fallback web search: checking' in caplog.text
+    assert 'Fallback web search: found 1 URL(s)' in caplog.text
+    assert 'https://www.uni-due.de/example-paper' in caplog.text
 
 
 def test_unlikely_low_overlap_author_mismatch_is_corrected_to_likely():

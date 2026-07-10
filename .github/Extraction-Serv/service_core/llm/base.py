@@ -1,0 +1,526 @@
+"""
+Base classes for LLM-based reference extraction
+"""
+
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
+import logging
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
+logger = logging.getLogger(__name__)
+
+
+class LLMProvider(ABC):
+    """Abstract base class for LLM providers"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.model = config.get("model")
+        self.max_tokens = config.get("max_tokens", 4000)
+        self.temperature = config.get("temperature", 0.1)
+        self.progress_callback = None  # Optional callback: fn(chunk_completed, total_chunks)
+    
+    @abstractmethod
+    def extract_references(self, bibliography_text: str) -> List[str]:
+        """
+        Extract references from bibliography text using LLM
+        
+        Args:
+            bibliography_text: Raw bibliography text
+            
+        Returns:
+            List of extracted references
+        """
+        pass
+    
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if the LLM provider is properly configured and available"""
+        pass
+    
+    def _create_extraction_prompt(self, bibliography_text: str) -> str:
+        """Create the prompt for reference extraction - should be overridden by subclasses"""
+        raise NotImplementedError("Subclasses must implement _create_extraction_prompt")
+    
+    def _call_llm(self, prompt: str) -> str:
+        """Make the actual LLM API call and return the response text - should be overridden by subclasses"""
+        raise NotImplementedError("Subclasses must implement _call_llm")
+    
+    def _chunk_bibliography(self, bibliography_text: str, max_tokens: int = 2000) -> List[str]:
+        """Split bibliography into balanced overlapping chunks to prevent reference loss at boundaries"""
+        
+        # Calculate target chunk size in characters (rough estimate: 1 token ≈ 4 characters)
+        target_chunk_size = max_tokens * 4
+        total_length = len(bibliography_text)
+        
+        # Calculate how many chunks we need for balanced processing
+        num_chunks = max(1, (total_length + target_chunk_size - 1) // target_chunk_size)
+        
+        # Use overlap of ~10% of chunk size to ensure references aren't lost
+        overlap_size = target_chunk_size // 10
+        
+        # Calculate actual chunk size for balanced distribution
+        effective_chunk_size = (total_length + num_chunks - 1) // num_chunks
+        
+        logger.debug(f"Bibliography length: {total_length} chars, target: {target_chunk_size}, "
+                    f"creating {num_chunks} balanced chunks of ~{effective_chunk_size} chars with {overlap_size} overlap")
+        
+        chunks = []
+        start = 0
+        
+        for i in range(num_chunks):
+            if i == num_chunks - 1:
+                # Last chunk gets all remaining content
+                chunk = bibliography_text[start:].strip()
+                if chunk and len(chunk) > 50:
+                    chunks.append(chunk)
+                    logger.debug(f"Chunk {len(chunks)} (final): {len(chunk)} characters")
+                break
+            
+            # Calculate end position for this chunk
+            end = min(start + effective_chunk_size, total_length)
+            
+            # Look for reference boundaries within reasonable distance
+            search_window = effective_chunk_size // 5  # Look within 20% of target size
+            search_start = max(start, end - search_window)
+            search_end = min(total_length, end + search_window)
+            
+            text_section = bibliography_text[search_start:search_end]
+            
+            # Find the latest reference start pattern like "\n[32]" or double-newline paragraph breaks
+            best_break = end
+            ref_boundary_matches = list(re.finditer(r'\n\[\d+\]', text_section))
+            if ref_boundary_matches:
+                # Use the last reference boundary found within the search window
+                last_match = ref_boundary_matches[-1]
+                best_break = search_start + last_match.start() + 1  # +1 to include the \n
+            else:
+                # No numbered markers — try paragraph breaks (blank lines between entries)
+                para_matches = list(re.finditer(r'\n\s*\n', text_section))
+                if para_matches:
+                    last_match = para_matches[-1]
+                    best_break = search_start + last_match.start() + 1
+                else:
+                    # Last resort: break at a sentence-ending period followed by newline
+                    sent_matches = list(re.finditer(r'\. *\n', text_section))
+                    if sent_matches:
+                        last_match = sent_matches[-1]
+                        best_break = search_start + last_match.end()  # After the newline
+            
+            # Extract chunk
+            chunk = bibliography_text[start:best_break].strip()
+            
+            if chunk and len(chunk) > 50:
+                chunks.append(chunk)
+                logger.debug(f"Chunk {len(chunks)}: {len(chunk)} characters, starts with: {chunk[:60]}...")
+            
+            # For next chunk, start with fixed overlap size
+            next_start = max(0, best_break - overlap_size)
+            
+            start = next_start
+        
+        logger.debug(f"Created {len(chunks)} balanced overlapping chunks for parallel processing")
+        return chunks
+
+    def extract_references_with_chunking(self, bibliography_text: str) -> List[str]:
+        """
+        Template method that handles chunking for all providers.
+        Subclasses should implement _call_llm instead of extract_references.
+        """
+        if not self.is_available():
+            raise Exception(f"{self.__class__.__name__} not available")
+        
+        # Get model's max_tokens from configuration - try to get provider-specific config
+        from service_core.config.settings import get_config
+        config = get_config()
+        
+        # Try to get provider-specific max_tokens, fall back to general config
+        provider_name = self.__class__.__name__.lower().replace('provider', '')
+        model_max_tokens = config.get('llm', {}).get(provider_name, {}).get('max_tokens', self.max_tokens)
+        
+        # Check if bibliography is too long and needs chunking
+        estimated_tokens = len(bibliography_text) // 4  # Rough estimate
+        
+        # Account for prompt overhead
+        prompt_overhead = 300  # Conservative estimate for prompt template and system messages
+        # Ensure prompt is < 1/2 the model's total token limit to leave room for response
+        max_input_tokens = (model_max_tokens // 2) - prompt_overhead
+        
+        logger.debug(f"Using model max_tokens: {model_max_tokens}, max_input_tokens: {max_input_tokens}")
+        
+        if estimated_tokens > max_input_tokens:
+            logger.debug(f"Bibliography too long ({estimated_tokens} estimated tokens), splitting into chunks")
+            chunks = self._chunk_bibliography(bibliography_text, max_input_tokens)
+            
+            # Notify total chunks
+            if self.progress_callback:
+                self.progress_callback(0, len(chunks))
+            
+            # Process chunks in parallel
+            all_references = self._process_chunks_parallel(chunks)
+            
+            # Remove duplicates while preserving order based on reference numbers
+            seen_ref_nums = set()
+            unique_references = []
+            for ref in all_references:
+                # Extract reference number for more robust deduplication
+                ref_num_match = re.search(r'\[(\d+)\]', ref)
+                if ref_num_match:
+                    ref_num = ref_num_match.group(1)
+                    if ref_num not in seen_ref_nums:
+                        seen_ref_nums.add(ref_num)
+                        unique_references.append(ref)
+                    else:
+                        logger.debug(f"Skipping duplicate reference [{ref_num}]: {ref[:100]}...")
+                else:
+                    # Fallback to segment-based deduplication for references without numbers
+                    # Split into segments separated by '#' and compare first two (author list and title)
+                    segments = ref.split('#')
+                    if len(segments) >= 2:
+                        # Normalize author names by removing spaces around periods in initials
+                        # This handles cases like "D.Iosifidis" vs "D. Iosifidis"
+                        author_normalized = re.sub(r'\s*\.\s*', '.', segments[0].strip().lower())
+                        title_normalized = segments[1].strip().lower()
+                        
+                        author_title_key = (author_normalized, title_normalized)
+                        if author_title_key not in seen_ref_nums:
+                            seen_ref_nums.add(author_title_key)
+                            unique_references.append(ref)
+                        else:
+                            logger.debug(f"Skipping duplicate reference (same author+title): {ref[:100]}...")
+                    else:
+                        # No segments, fallback to full text deduplication
+                        ref_normalized = ref.strip().lower()
+                        if ref_normalized not in seen_ref_nums:
+                            seen_ref_nums.add(ref_normalized)
+                            unique_references.append(ref)
+            
+            logger.debug(f"Extracted {len(unique_references)} unique references from {len(chunks)} chunks")
+            unique_references = self._repair_truncated_arxiv_dois(unique_references, bibliography_text)
+            return self._restore_et_al(unique_references, bibliography_text)
+        else:
+            # Process normally for short bibliographies
+            prompt = self._create_extraction_prompt(bibliography_text)
+            response_text = self._call_llm_cached(prompt)
+            refs = self._parse_llm_response(response_text)
+            refs = self._repair_truncated_arxiv_dois(refs, bibliography_text)
+            return self._restore_et_al(refs, bibliography_text)
+
+    @staticmethod
+    def _repair_truncated_arxiv_dois(references: List[str], bibliography_text: str) -> List[str]:
+        """Repair LLM-shortened arXiv DOI URLs using the source bibliography text."""
+        if not references or not bibliography_text:
+            return references
+
+        full_doi_matches = list(re.finditer(
+            r'10\.48550/(?:arxiv|ARXIV)\.\d{4}\.\d{4,5}',
+            bibliography_text,
+            re.IGNORECASE,
+        ))
+        if not full_doi_matches:
+            return references
+
+        full_dois = [match.group(0) for match in full_doi_matches]
+        repaired = []
+
+        for ref in references:
+            truncated_matches = list(re.finditer(
+                r'10\.48550/(?:arxiv|ARXIV)\.\d{1,4}(?:\.\d{0,4})?(?![\d.])',
+                ref,
+                re.IGNORECASE,
+            ))
+            if not truncated_matches:
+                repaired.append(ref)
+                continue
+
+            updated_ref = ref
+            for truncated_match in truncated_matches:
+                cited_doi = truncated_match.group(0)
+                if any(cited_doi.lower() == full_doi.lower() for full_doi in full_dois):
+                    continue
+
+                prefix_matches = [full_doi for full_doi in full_dois if full_doi.lower().startswith(cited_doi.lower())]
+                if not prefix_matches:
+                    continue
+
+                replacement = LLMProvider._choose_arxiv_doi_replacement(
+                    ref,
+                    bibliography_text,
+                    full_doi_matches,
+                    prefix_matches,
+                )
+                if replacement:
+                    updated_ref = re.sub(re.escape(cited_doi), replacement, updated_ref, flags=re.IGNORECASE)
+
+            repaired.append(updated_ref)
+
+        return repaired
+
+    @staticmethod
+    def _choose_arxiv_doi_replacement(
+        ref: str,
+        bibliography_text: str,
+        full_doi_matches: List[re.Match],
+        prefix_matches: List[str],
+    ) -> Optional[str]:
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+
+        parts = [part.strip() for part in ref.split('#')]
+        title = parts[1] if len(parts) > 1 else ''
+        title_tokens = [
+            token
+            for token in re.findall(r'[a-z0-9]+', title.lower())
+            if len(token) > 3 and token not in {'paper', 'with', 'from', 'using', 'based'}
+        ][:6]
+        if not title_tokens:
+            return None
+
+        best_doi = None
+        best_score = 0
+        for match in full_doi_matches:
+            candidate = match.group(0)
+            if candidate not in prefix_matches:
+                continue
+            window_start = max(0, match.start() - 800)
+            window_end = min(len(bibliography_text), match.end() + 800)
+            window = bibliography_text[window_start:window_end].lower()
+            score = sum(1 for token in title_tokens if token in window)
+            if score > best_score:
+                best_score = score
+                best_doi = candidate
+
+        return best_doi if best_score >= 2 else None
+
+    @staticmethod
+    def _restore_et_al(references: List[str], bibliography_text: str) -> List[str]:
+        """Restore 'et al.' that the LLM may have silently dropped.
+
+        Many models (especially Gemini) systematically strip 'et al.' from
+        author lists even when explicitly instructed to preserve it.  This
+        post-processing step checks the original bibliography text: if the
+        last named author in the extracted reference is followed by 'et al.'
+        in the source, we re-append '*et al.' to the author field.
+        """
+        if not bibliography_text:
+            return references
+
+        bib_lower = bibliography_text.lower()
+        restored = []
+        for ref in references:
+            parts = ref.split('#')
+            if len(parts) < 2 or '*et al' in parts[0].lower():
+                restored.append(ref)
+                continue
+
+            authors_field = parts[0]
+            author_names = [a.strip() for a in authors_field.split('*') if a.strip()]
+            if not author_names:
+                restored.append(ref)
+                continue
+
+            last_author = author_names[-1]
+            # Search for "LastAuthor ... et al" in the bibliography
+            # Allow for line breaks, commas, "and" between last author and et al
+            pattern = re.escape(last_author.lower()) + r'[\s,]*(?:and\s+)?et\s+al'
+            if re.search(pattern, bib_lower):
+                parts[0] = authors_field + '*et al.'
+                logger.debug("Restored 'et al.' for reference: %s", parts[1][:60] if len(parts) > 1 else '?')
+                restored.append('#'.join(parts))
+            else:
+                restored.append(ref)
+        return restored
+
+    def _process_chunks_parallel(self, chunks: List[str]) -> List[str]:
+        """
+        Process chunks in parallel using ThreadPoolExecutor
+        
+        Args:
+            chunks: List of bibliography text chunks to process
+            
+        Returns:
+            List of all extracted references from all chunks
+        """
+        # Get configuration for parallel processing
+        from service_core.config.settings import get_config
+        config = get_config()
+        
+        # Check if parallel processing is enabled
+        llm_config = config.get('llm', {})
+        parallel_enabled = llm_config.get('parallel_chunks', True)
+        max_workers = llm_config.get('max_chunk_workers', 4)
+        
+        # If parallel processing is disabled, fall back to sequential
+        if not parallel_enabled:
+            logger.info("Parallel chunk processing disabled, using sequential processing")
+            return self._process_chunks_sequential(chunks)
+        
+        # Limit max_workers based on number of chunks
+        effective_workers = min(max_workers, len(chunks))
+        logger.info(f"Processing {len(chunks)} chunks in parallel with {effective_workers} workers")
+        
+        start_time = time.time()
+        all_references = []
+        
+        def process_single_chunk(chunk_data):
+            """Process a single chunk and return results"""
+            chunk_index, chunk_text = chunk_data
+            try:
+                logger.debug(f"Processing chunk {chunk_index + 1}/{len(chunks)}")
+                prompt = self._create_extraction_prompt(chunk_text)
+                response_text = self._call_llm_cached(prompt)
+                chunk_references = self._parse_llm_response(response_text)
+                logger.debug(f"Chunk {chunk_index + 1} extracted {len(chunk_references)} references")
+                return chunk_index, chunk_references
+            except Exception as e:
+                logger.error(f"Failed to process chunk {chunk_index + 1}: {e}")
+                return chunk_index, []
+        
+        # Create indexed chunks for processing
+        indexed_chunks = [(i, chunk) for i, chunk in enumerate(chunks)]
+        
+        # Process chunks in parallel
+        with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="LLMChunk") as executor:
+            # Submit all chunks for processing
+            future_to_chunk = {
+                executor.submit(process_single_chunk, chunk_data): chunk_data[0] 
+                for chunk_data in indexed_chunks
+            }
+            
+            # Collect results as they complete
+            chunk_results = {}
+            completed_count = 0
+            for future in as_completed(future_to_chunk):
+                chunk_index = future_to_chunk[future]
+                try:
+                    result_index, references = future.result()
+                    chunk_results[result_index] = references
+                    completed_count += 1
+                    logger.debug(f"Completed chunk {result_index + 1}/{len(chunks)}")
+                    if self.progress_callback:
+                        self.progress_callback(completed_count, len(chunks))
+                except Exception as e:
+                    logger.error(f"Chunk {chunk_index + 1} processing failed: {e}")
+                    chunk_results[chunk_index] = []
+                    completed_count += 1
+                    if self.progress_callback:
+                        self.progress_callback(completed_count, len(chunks))
+        
+        # Combine results in original order
+        for i in range(len(chunks)):
+            if i in chunk_results:
+                all_references.extend(chunk_results[i])
+        
+        processing_time = time.time() - start_time
+        logger.debug(f"Parallel chunk processing completed in {processing_time:.2f}s, "
+                   f"extracted {len(all_references)} total references")
+        
+        return all_references
+    
+    def _process_chunks_sequential(self, chunks: List[str]) -> List[str]:
+        """
+        Process chunks sequentially (fallback method)
+        
+        Args:
+            chunks: List of bibliography text chunks to process
+            
+        Returns:
+            List of all extracted references from all chunks
+        """
+        logger.info(f"Processing {len(chunks)} chunks sequentially")
+        start_time = time.time()
+        
+        all_references = []
+        for i, chunk in enumerate(chunks):
+            logger.info(f"Processing chunk {i+1}/{len(chunks)}")
+            try:
+                prompt = self._create_extraction_prompt(chunk)
+                response_text = self._call_llm_cached(prompt)
+                chunk_references = self._parse_llm_response(response_text)
+                all_references.extend(chunk_references)
+                logger.debug(f"Chunk {i+1} extracted {len(chunk_references)} references")
+            except Exception as e:
+                logger.error(f"Failed to process chunk {i+1}: {e}")
+            if self.progress_callback:
+                self.progress_callback(i + 1, len(chunks))
+        
+        processing_time = time.time() - start_time
+        logger.info(f"Sequential chunk processing completed in {processing_time:.2f}s, "
+                   f"extracted {len(all_references)} total references")
+        
+        return all_references
+
+
+class ReferenceExtractor:
+    """Main class for LLM-based reference extraction with fallback"""
+    
+    def __init__(self, llm_provider: Optional[LLMProvider] = None, fallback_enabled: bool = True):
+        self.llm_provider = llm_provider
+        self.fallback_enabled = fallback_enabled
+        self.logger = logging.getLogger(__name__)
+    
+    def extract_references(self, bibliography_text: str, fallback_func=None, progress_callback=None) -> List[str]:
+        """
+        Extract references with LLM and fallback to regex if needed
+        
+        Args:
+            bibliography_text: Raw bibliography text
+            fallback_func: Function to call if LLM extraction fails
+            progress_callback: Optional callback fn(chunk_completed, total_chunks)
+            
+        Returns:
+            List of extracted references
+        """
+        if not bibliography_text:
+            return []
+        
+        # Try LLM extraction first
+        if self.llm_provider and self.llm_provider.is_available():
+            try:
+                model_name = self.llm_provider.model or "unknown"
+                self.logger.info(f"Attempting LLM-based reference extraction using {model_name}")
+                if progress_callback:
+                    self.llm_provider.progress_callback = progress_callback
+                references = self.llm_provider.extract_references(bibliography_text)
+                if references:
+                    return references
+                else:
+                    self.logger.warning("LLM returned no references")
+            except Exception as e:
+                self.logger.error(f"LLM reference extraction failed: {e}")
+        
+        # If LLM was specified but failed, check if fallback is allowed
+        if not self.fallback_enabled:
+            self.logger.error("LLM-based reference extraction failed and fallback is disabled")
+            return []
+        
+        # Fallback: use provided fallback function or return empty
+        self.logger.warning("LLM extraction failed, falling back to regex parsing")
+        if fallback_func:
+            return fallback_func(bibliography_text)
+        return []
+
+
+def create_llm_provider(provider_name: str, config: Dict[str, Any]) -> Optional[LLMProvider]:
+    """Factory function to create LLM provider instances"""
+    from .providers import OpenAIProvider, AnthropicProvider, GoogleProvider, AzureProvider, vLLMProvider
+    
+    providers = {
+        "openai": OpenAIProvider,
+        "anthropic": AnthropicProvider,
+        "google": GoogleProvider,
+        "azure": AzureProvider,
+        "vllm": vLLMProvider,
+    }
+    
+    if provider_name not in providers:
+        logger.error(f"Unknown LLM provider: {provider_name}")
+        return None
+    
+    try:
+        return providers[provider_name](config)
+    except Exception as e:
+        logger.error(f"Failed to create {provider_name} provider: {e}")
+        return None

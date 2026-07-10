@@ -748,25 +748,35 @@ class LLMHallucinationVerifier:
             if hit is not None:
                 verdict, explanation, paper_link, found_metadata = self._parse_verdict(hit['text'])
                 web_urls = hit.get('web_urls', [])
+                web_result = self._build_inline_web_result(web_urls)
+                if not web_urls and web_searcher and web_searcher.available:
+                    web_result, verdict, explanation = self._maybe_run_fallback_web_search(
+                        error_entry,
+                        web_searcher,
+                        verdict,
+                        explanation,
+                        web_result,
+                    )
+                grounded_urls = self._collect_grounding_urls(web_urls, web_result)
                 logger.debug(
                     'deep hallucination check cache hit: provider=%s model=%s ref=%r web_urls=%d',
                     self.provider,
                     self.model,
                     error_entry.get('ref_title', ''),
-                    len(web_urls),
+                    len(grounded_urls),
                 )
                 # Apply verified-paper safety net to cached results too
                 verdict, explanation = self._downgrade_ungrounded_unlikely(
-                    verdict, explanation, error_entry, web_urls,
+                    verdict, explanation, error_entry, grounded_urls,
                 )
                 verdict, explanation = self._apply_unlikely_author_mismatch_guard(
-                    verdict, explanation, error_entry, web_urls, found_metadata, paper_link,
+                    verdict, explanation, error_entry, grounded_urls, found_metadata, paper_link,
                 )
                 verdict, explanation = self._apply_citation_evidence_guard(
                     verdict, explanation, error_entry,
                 )
                 verdict, explanation = self._apply_verified_safety_net(
-                    verdict, explanation, error_entry, web_urls,
+                    verdict, explanation, error_entry, grounded_urls,
                 )
                 return {
                     'verdict': verdict,
@@ -777,9 +787,7 @@ class LLMHallucinationVerifier:
                     'found_venue': found_metadata.get('venue'),
                     'found_year': found_metadata.get('year'),
                     'source': 'deep_hallucination_cache',
-                    'web_search': {'found': bool(web_urls),
-                                   'academic_urls': web_urls,
-                                   'provider': self.provider} if web_urls else None,
+                    'web_search': web_result,
                 }
 
         if not self.available:
@@ -807,103 +815,21 @@ class LLMHallucinationVerifier:
             }
 
         # Build web_result from inline web search URLs if the LLM found any
-        web_result = None
-        if web_urls:
-            web_result = {
-                'found': bool(web_urls),
-                'academic_urls': web_urls[:5],
-                'provider': self.provider,
-            }
-            # Note: we do NOT auto-override LIKELY just because web search
-            # returned URLs. The URLs may point to similar-but-different
-            # papers. The LLM's verdict already accounts for web results.
+        web_result = self._build_inline_web_result(web_urls)
 
         # Fallback: use separate web searcher if the LLM didn't do its own
-        # web search (e.g. non-OpenAI endpoint) and verdict is ambiguous
-        if not web_urls and web_searcher and web_searcher.available and verdict != 'UNLIKELY':
-            if self._should_web_search(error_entry):
-                try:
-                    web_result = web_searcher.check_reference_exists(error_entry)
-                    # Let web search influence the verdict — grounded URL
-                    # evidence is stronger than an LLM guess.
-                    web_verdict = web_result.get('verdict', '')
-                    if web_verdict == 'EXISTS' and verdict in ('UNCERTAIN', 'LIKELY'):
-                        verdict = 'UNLIKELY'
-                        explanation += ' (Web search found the paper.)'
-                    elif web_verdict == 'NOT_FOUND' and verdict == 'UNCERTAIN':
-                        # v0.7.59: don't promote UNCERTAIN→LIKELY when
-                        # the venue is a non-English-indexed journal
-                        # (Chinese / Japanese / Korean / Russian /
-                        # Arabic / etc). S2/Crossref/PMC + web search
-                        # all skew toward English-indexed content;
-                        # "not found anywhere" for these venues is
-                        # poor evidence of hallucination. User example
-                        # that broke before this guard: a real paper
-                        # in "Chin J Orthop Trauma" got LIKELY because
-                        # the Chinese-language journal isn't in any
-                        # English index.
-                        venue_text = (
-                            (error_entry.get('ref_venue') or '')
-                            + ' '
-                            + (error_entry.get('ref_venue_correct') or '')
-                        ).lower()
-                        _non_english_markers = (
-                            'chin j', 'chinese j', 'zhonghua', 'zhongguo',
-                            'jpn j', 'japanese j', 'nihon', 'nippon',
-                            'korean j', 'kor j', 'taehan',
-                            'russ j', 'russian j', 'rossii',
-                            'arab j', 'farsi', 'persian',
-                            'rev port', 'rev esp', 'cirugia',  # PT/ES
-                            'rev bras',  # Brazilian Portuguese journals
-                            'turk', 'türk',
-                            'kafkas',  # Turkic-zone titles
-                        )
-                        non_english_venue = any(
-                            marker in venue_text for marker in _non_english_markers
-                        )
-                        # Also detect raw CJK / Cyrillic / Arabic chars
-                        # in venue/title (titles + venues with native
-                        # script almost certainly aren't English-indexed).
-                        title_text = (error_entry.get('ref_title') or '')
-                        scan_text = venue_text + ' ' + title_text
-                        has_non_latin = any(
-                            ord(ch) > 0x2E80 and (
-                                # CJK
-                                0x2E80 <= ord(ch) <= 0x9FFF
-                                # Hiragana/Katakana
-                                or 0x3040 <= ord(ch) <= 0x30FF
-                                # Hangul
-                                or 0xAC00 <= ord(ch) <= 0xD7A3
-                                # Cyrillic
-                                or 0x0400 <= ord(ch) <= 0x04FF
-                                # Arabic
-                                or 0x0600 <= ord(ch) <= 0x06FF
-                                # Hebrew
-                                or 0x0590 <= ord(ch) <= 0x05FF
-                            )
-                            for ch in scan_text
-                        )
-                        if non_english_venue or has_non_latin:
-                            logger.debug(
-                                'Holding UNCERTAIN — venue/title looks '
-                                'non-English-indexed (%r); web NOT_FOUND '
-                                'is poor evidence here',
-                                venue_text.strip()[:60],
-                            )
-                            explanation += (
-                                ' (Note: this looks like a non-English-indexed '
-                                'journal; absence from S2/Crossref/PMC isn\'t '
-                                'reliable evidence of hallucination. Manual '
-                                'review recommended.)'
-                            )
-                            # Leave verdict at UNCERTAIN, which falls
-                            # through to "unverified" downstream rather
-                            # than "hallucinated".
-                        else:
-                            verdict = 'LIKELY'
-                            explanation += ' (Web search also found no evidence this paper exists.)'
-                except Exception as exc:
-                    logger.debug(f'Web search during assessment failed: {exc}')
+        # web search (e.g. non-OpenAI endpoint), including when an initial
+        # UNLIKELY verdict needs grounding before it can be trusted.
+        if not web_urls and web_searcher and web_searcher.available:
+            web_result, verdict, explanation = self._maybe_run_fallback_web_search(
+                error_entry,
+                web_searcher,
+                verdict,
+                explanation,
+                web_result,
+            )
+
+        grounded_urls = self._collect_grounding_urls(web_urls, web_result)
 
         # Post-hoc consistency check: only override LIKELY if the
         # explanation explicitly confirms the EXACT paper was found with
@@ -923,16 +849,16 @@ class LLMHallucinationVerifier:
 
         # Apply verified-paper safety net
         verdict, explanation = self._downgrade_ungrounded_unlikely(
-            verdict, explanation, error_entry, web_urls,
+            verdict, explanation, error_entry, grounded_urls,
         )
         verdict, explanation = self._apply_unlikely_author_mismatch_guard(
-            verdict, explanation, error_entry, web_urls, found_metadata, paper_link,
+            verdict, explanation, error_entry, grounded_urls, found_metadata, paper_link,
         )
         verdict, explanation = self._apply_citation_evidence_guard(
             verdict, explanation, error_entry,
         )
         verdict, explanation = self._apply_verified_safety_net(
-            verdict, explanation, error_entry, web_urls,
+            verdict, explanation, error_entry, grounded_urls,
         )
 
         logger.debug(
@@ -951,6 +877,141 @@ class LLMHallucinationVerifier:
             'source': 'deep_hallucination_live',
             'web_search': web_result,
         }
+
+    def _build_inline_web_result(self, web_urls: List[str]) -> Optional[Dict[str, Any]]:
+        if not web_urls:
+            return None
+        # Keep both the raw URLs and the legacy academic_urls field so callers
+        # can ground academic and non-academic references through one payload.
+        return {
+            'found': True,
+            'urls': web_urls[:5],
+            'academic_urls': web_urls[:5],
+            'provider': self.provider,
+        }
+
+    def _maybe_run_fallback_web_search(
+        self,
+        error_entry: Dict[str, Any],
+        web_searcher: Any,
+        verdict: str,
+        explanation: str,
+        web_result: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[Dict[str, Any]], str, str]:
+        if not self._should_web_search(error_entry):
+            return web_result, verdict, explanation
+
+        try:
+            ref_title = str(error_entry.get('ref_title', '') or '').strip()
+            logger.info(
+                'Fallback web search: checking %r after LLM verdict=%s',
+                ref_title[:120],
+                verdict,
+            )
+            web_result = web_searcher.check_reference_exists(error_entry)
+            discovered_urls = self._collect_grounding_urls([], web_result)
+            if discovered_urls:
+                logger.info(
+                    'Fallback web search: found %d URL(s) for %r: %s',
+                    len(discovered_urls),
+                    ref_title[:120],
+                    ', '.join(discovered_urls[:3]),
+                )
+            else:
+                logger.info(
+                    'Fallback web search: found no URL(s) for %r (search verdict=%s)',
+                    ref_title[:120],
+                    web_result.get('verdict', '') or 'UNSURE',
+                )
+            # Let grounded search influence ambiguous verdicts. For an existing
+            # UNLIKELY verdict, the grounded URLs matter even when no verdict
+            # change is needed because downstream re-verification can now visit
+            # the discovered page.
+            web_verdict = web_result.get('verdict', '')
+            if web_verdict == 'EXISTS' and verdict in ('UNCERTAIN', 'LIKELY'):
+                verdict = 'UNLIKELY'
+                explanation += ' (Web search found the paper.)'
+            elif web_verdict == 'NOT_FOUND' and verdict == 'UNCERTAIN':
+                # v0.7.59: don't promote UNCERTAIN→LIKELY when
+                # the venue is a non-English-indexed journal
+                # (Chinese / Japanese / Korean / Russian /
+                # Arabic / etc). S2/Crossref/PMC + web search
+                # all skew toward English-indexed content;
+                # "not found anywhere" for these venues is
+                # poor evidence of hallucination. User example
+                # that broke before this guard: a real paper
+                # in "Chin J Orthop Trauma" got LIKELY because
+                # the Chinese-language journal isn't in any
+                # English index.
+                venue_text = (
+                    (error_entry.get('ref_venue') or '')
+                    + ' '
+                    + (error_entry.get('ref_venue_correct') or '')
+                ).lower()
+                _non_english_markers = (
+                    'chin j', 'chinese j', 'zhonghua', 'zhongguo',
+                    'jpn j', 'japanese j', 'nihon', 'nippon',
+                    'korean j', 'kor j', 'taehan',
+                    'russ j', 'russian j', 'rossii',
+                    'arab j', 'farsi', 'persian',
+                    'rev port', 'rev esp', 'cirugia',  # PT/ES
+                    'rev bras',  # Brazilian Portuguese journals
+                    'turk', 'türk',
+                    'kafkas',  # Turkic-zone titles
+                )
+                non_english_venue = any(
+                    marker in venue_text for marker in _non_english_markers
+                )
+                title_text = (error_entry.get('ref_title') or '')
+                scan_text = venue_text + ' ' + title_text
+                has_non_latin = any(
+                    ord(ch) > 0x2E80 and (
+                        0x2E80 <= ord(ch) <= 0x9FFF
+                        or 0x3040 <= ord(ch) <= 0x30FF
+                        or 0xAC00 <= ord(ch) <= 0xD7A3
+                        or 0x0400 <= ord(ch) <= 0x04FF
+                        or 0x0600 <= ord(ch) <= 0x06FF
+                        or 0x0590 <= ord(ch) <= 0x05FF
+                    )
+                    for ch in scan_text
+                )
+                if non_english_venue or has_non_latin:
+                    logger.debug(
+                        'Holding UNCERTAIN — venue/title looks '
+                        'non-English-indexed (%r); web NOT_FOUND '
+                        'is poor evidence here',
+                        venue_text.strip()[:60],
+                    )
+                    explanation += (
+                        ' (Note: this looks like a non-English-indexed '
+                        'journal; absence from S2/Crossref/PMC isn\'t '
+                        'reliable evidence of hallucination. Manual '
+                        'review recommended.)'
+                    )
+                else:
+                    verdict = 'LIKELY'
+                    explanation += ' (Web search also found no evidence this paper exists.)'
+        except Exception as exc:
+            logger.debug(f'Web search during assessment failed: {exc}')
+
+        return web_result, verdict, explanation
+
+    @staticmethod
+    def _collect_grounding_urls(
+        web_urls: List[str],
+        web_result: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        grounded_urls: List[str] = []
+        for candidate in web_urls:
+            candidate_str = str(candidate or '').strip()
+            if candidate_str and candidate_str not in grounded_urls:
+                grounded_urls.append(candidate_str)
+        for key in ('urls', 'academic_urls'):
+            for candidate in (web_result or {}).get(key, []) or []:
+                candidate_str = str(candidate or '').strip()
+                if candidate_str and candidate_str not in grounded_urls:
+                    grounded_urls.append(candidate_str)
+        return grounded_urls
 
     @staticmethod
     def _downgrade_ungrounded_unlikely(

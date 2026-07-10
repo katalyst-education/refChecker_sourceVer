@@ -755,12 +755,8 @@ class ArXivCitationChecker:
             authors_match, author_error = compare_authors(cited_authors, authoritative_authors)
             
             if not authors_match:
-                correct_author_names = ', '.join([a.get('name', '') for a in authoritative_authors])
-                errors.append({
-                    'error_type': 'author',
-                    'error_details': author_error,
-                    'ref_authors_correct': correct_author_names
-                })
+                from refchecker.utils.error_utils import create_author_error
+                errors.append(create_author_error(author_error, authoritative_authors))
         
         # Compare year
         authoritative_year = latest_data.get('year')

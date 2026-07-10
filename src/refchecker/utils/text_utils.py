@@ -3367,6 +3367,59 @@ def compare_authors(cited_authors: list, correct_authors: list, normalize_func=N
             for cited_author in cleaned_cited
             for correct_author in correct_names
         )
+
+    def _normalize_author_tokens(name: str) -> List[str]:
+        normalized = normalize_diacritics(clean_author_name(format_author_for_display(name))).lower()
+        normalized = re.sub(r'[^a-z0-9,\s-]+', ' ', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        if ',' in normalized:
+            last_part, first_part = [part.strip() for part in normalized.split(',', 1)]
+            normalized = f"{first_part} {last_part}".strip()
+        return [token for token in re.split(r'[\s-]+', normalized) if token]
+
+    def _within_one_edit(left: str, right: str) -> bool:
+        if left == right:
+            return False
+        if abs(len(left) - len(right)) > 1:
+            return False
+        if len(left) > len(right):
+            left, right = right, left
+        i = j = edits = 0
+        while i < len(left) and j < len(right):
+            if left[i] == right[j]:
+                i += 1
+                j += 1
+                continue
+            edits += 1
+            if edits > 1:
+                return False
+            if len(left) == len(right):
+                i += 1
+                j += 1
+            else:
+                j += 1
+        if j < len(right) or i < len(left):
+            edits += 1
+        return edits == 1
+
+    def _is_potential_author_misspelling(cited_author: str, correct_author: str) -> bool:
+        cited_tokens = _normalize_author_tokens(cited_author)
+        correct_tokens = _normalize_author_tokens(correct_author)
+        if len(cited_tokens) < 2 or len(correct_tokens) < 2:
+            return False
+
+        cited_first, cited_last = cited_tokens[0], cited_tokens[-1]
+        correct_first, correct_last = correct_tokens[0], correct_tokens[-1]
+
+        first_name_compatible = (
+            cited_first == correct_first
+            or (len(cited_first) == 1 and cited_first == correct_first[:1])
+            or (len(correct_first) == 1 and correct_first == cited_first[:1])
+        )
+        if not first_name_compatible:
+            return False
+
+        return _within_one_edit(cited_last, correct_last)
     
     # When "et al" is present, only compare the explicitly listed authors
     # The key insight: if the citation has "et al", we should only verify the listed authors
@@ -3404,6 +3457,13 @@ def compare_authors(cited_authors: list, correct_authors: list, normalize_func=N
 
     if not any_cited_author_matches():
         from refchecker.utils.error_utils import format_no_matching_authors
+        if len(cleaned_cited) == len(correct_names) == 1 and _is_potential_author_misspelling(cleaned_cited[0], correct_names[0]):
+            from refchecker.utils.error_utils import format_potential_author_misspelling
+            return False, format_potential_author_misspelling(
+                1,
+                format_author_for_display(cleaned_cited[0]),
+                format_author_for_display(correct_names[0]),
+            )
         display_cited = [format_author_for_display(author) for author in cleaned_cited]
         return False, format_no_matching_authors(display_cited, correct_names)
     
@@ -3450,7 +3510,11 @@ def compare_authors(cited_authors: list, correct_authors: list, normalize_func=N
         comparison_correct = correct_names
     
     # Use shared three-line formatter (imported lazily to avoid circular imports)
-    from refchecker.utils.error_utils import format_first_author_mismatch, format_author_mismatch
+    from refchecker.utils.error_utils import (
+        format_first_author_mismatch,
+        format_author_mismatch,
+        format_potential_author_misspelling,
+    )
 
     # Compare first author (most important) using the enhanced name matching
     if comparison_cited and comparison_correct:
@@ -3461,6 +3525,8 @@ def compare_authors(cited_authors: list, correct_authors: list, normalize_func=N
             # Use consistent display format for both names
             cited_display = format_author_for_display(cited_first)
             correct_display = format_author_for_display(correct_first)
+            if _is_potential_author_misspelling(cited_first, correct_first):
+                return False, format_potential_author_misspelling(1, cited_display, correct_display)
             return False, format_first_author_mismatch(cited_display, correct_display)
     
     # For complete verification, check all authors if reasonable number
@@ -3470,6 +3536,8 @@ def compare_authors(cited_authors: list, correct_authors: list, normalize_func=N
                 # Use consistent display format for both names
                 cited_display = format_author_for_display(cited_author)
                 correct_display = format_author_for_display(correct_author)
+                if _is_potential_author_misspelling(cited_author, correct_author):
+                    return False, format_potential_author_misspelling(i + 1, cited_display, correct_display)
                 return False, format_author_mismatch(i+1, cited_display, correct_display)
     
     return True, "Authors match"

@@ -575,11 +575,8 @@ class CrossRefReferenceChecker:
                     elif 'family' in author:
                         correct_author_names.append(author['family'])
                 
-                errors.append({
-                    'error_type': 'author',
-                    'error_details': author_error,
-                    'ref_authors_correct': ', '.join(correct_author_names)
-                })
+                from refchecker.utils.error_utils import create_author_error
+                errors.append(create_author_error(author_error, correct_author_names))
         
         # Verify year — prefer print pub date over CrossRef record-
         # creation date so we don't flag bogus year mismatches against

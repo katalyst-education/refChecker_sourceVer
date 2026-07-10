@@ -1285,11 +1285,8 @@ def _compare_reference_with_ss_data(checker: Any, reference: Dict[str, Any], pap
             correct_authors = ', '.join(a.get('name', '') for a in actual_authors[:5])
             if len(actual_authors) > 5:
                 correct_authors += ' et al.'
-            errors.append({
-                'error_type': 'author',
-                'error_details': error_msg,
-                'ref_authors_correct': correct_authors,
-            })
+            from refchecker.utils.error_utils import create_author_error
+            errors.append(create_author_error(error_msg, [correct_authors]))
 
     # Year comparison
     cited_year = reference.get('year')

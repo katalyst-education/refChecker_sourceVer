@@ -177,3 +177,7 @@ output/
 *.db-shm
 *.db-wal
 test_failure.txt
+/.github/Extraction-Serv/
+/.github/Results-Serv/
+/.github/Search-Serv/
+/.github/service_core/

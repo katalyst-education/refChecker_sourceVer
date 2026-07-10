@@ -982,12 +982,9 @@ class NonArxivReferenceChecker:
                         'ref_authors_correct': ', '.join([author.get('name', '') for author in paper_data.get('authors', [])])
                     })
                 else:
-                    # No ArXiv ID match, treat as error
-                    errors.append({
-                        'error_type': 'author',
-                        'error_details': author_error,
-                        'ref_authors_correct': ', '.join([author.get('name', '') for author in paper_data.get('authors', [])])
-                    })
+                    # No ArXiv ID match, treat misspelling-style mismatches as warnings.
+                    from refchecker.utils.error_utils import create_author_error
+                    errors.append(create_author_error(author_error, paper_data.get('authors', [])))
         
         # Verify year using flexible validation
         paper_year = paper_data.get('year')

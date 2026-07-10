@@ -23,8 +23,10 @@ try:
         validate_error_dict,
         format_year_mismatch,
         format_author_mismatch,
+        format_potential_author_misspelling,
         format_first_author_mismatch,
         format_three_line_mismatch,
+        create_author_error,
         sort_issues_for_cli_display,
     )
     ERROR_UTILS_AVAILABLE = True
@@ -387,6 +389,7 @@ class TestAuthorMismatchFormatting:
         # Test that each formatter produces correct new three-line format
         test_cases = [
             (format_author_mismatch(1, "Test Author", "Real Author"), "Author 1 mismatch:"),
+            (format_potential_author_misspelling(1, "Test Author", "Real Author"), "Potential author misspelling for author 1:"),
             (format_first_author_mismatch("Test Author", "Real Author"), "First author mismatch:"),
             (format_three_line_mismatch("Author 1 mismatch", "Test Author", "Real Author"), "Author 1 mismatch:"),
         ]
@@ -430,6 +433,16 @@ class TestAuthorMismatchFormatting:
             # Check values are present
             assert cited in lines[1], f"Cited author not found: {lines[1]}"
             assert correct in lines[2], f"Correct author not found: {lines[2]}"
+
+    def test_create_author_error_downgrades_misspelling_to_warning(self):
+        result = create_author_error(
+            format_potential_author_misspelling(1, "P. Hinze", "Patrick Hintze"),
+            [{"name": "Patrick Hintze"}],
+        )
+
+        assert result["warning_type"] == "author"
+        assert "Potential author misspelling" in result["warning_details"]
+        assert result["ref_authors_correct"] == "Patrick Hintze"
     
     def test_colon_alignment_with_leading_prefix(self):
         """Test that three-line format works correctly with print_labeled_multiline."""

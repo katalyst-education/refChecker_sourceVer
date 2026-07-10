@@ -182,6 +182,31 @@ class TestWebSearchCheckerLogic:
         })
         assert result['found'] is False
         assert result['score_delta'] == DELTA_INCONCLUSIVE
+        assert result['urls'] == ['https://reddit.com/r/ml/post']
+        assert result['academic_urls'] == []
+
+    def test_exists_verdict_uses_url_from_text_when_provider_has_no_citations(self):
+        provider = StubProvider(results=[
+            {
+                'link': '',
+                'title': '',
+                'snippet': '',
+                '_verdict_text': (
+                    'EXISTS\n'
+                    'The exact paper was found on the University of Duisburg-Essen website: '
+                    'https://www.uni-due.de/example-paper'
+                ),
+            },
+        ])
+        checker = WebSearchChecker(provider)
+        result = checker.check_reference_exists({
+            'ref_title': 'Künstliche Intelligenz in Studium und Lehre. Empfehlungen zum Umgang an der UDE',
+            'ref_authors_cited': 'D. Gür-Seker, P. Hinze',
+        })
+
+        assert result['found'] is True
+        assert result['verdict'] == 'EXISTS'
+        assert result['urls'] == ['https://www.uni-due.de/example-paper']
 
     def test_api_error_returns_zero_delta(self):
         provider = StubProvider(error=ConnectionError('boom'))
@@ -226,6 +251,11 @@ class TestFactory:
         os.environ['GOOGLE_API_KEY'] = 'google-key'
         checker = create_web_search_checker(preferred_provider='gemini')
         assert checker._provider_name == 'gemini'
+
+    def test_factory_accepts_explicit_api_key(self, _clean_env, _mock_openai):
+        checker = create_web_search_checker(preferred_provider='openai', api_key='direct-key')
+        assert checker.available
+        assert checker._provider_name == 'openai'
 
     def test_factory_preferred_anthropic(self, _clean_env, _mock_anthropic):
         os.environ['OPENAI_API_KEY'] = 'openai-key'

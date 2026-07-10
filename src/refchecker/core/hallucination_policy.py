@@ -1569,11 +1569,8 @@ def _reverify_with_llm_metadata(
             match, err_msg = compare_authors(cited_authors, llm_author_list)
             if not match:
                 correct_str = ', '.join(a['name'] for a in llm_author_list)
-                new_errors.append({
-                    'error_type': 'author',
-                    'error_details': err_msg,
-                    'ref_authors_correct': correct_str,
-                })
+                from refchecker.utils.error_utils import create_author_error
+                new_errors.append(create_author_error(err_msg, [correct_str]))
 
     # --- Year check ---
     cited_year = reference.get('year', 0)
@@ -1610,81 +1607,166 @@ def _reverify_with_llm_metadata(
     return new_errors
 
 
+def _collect_website_recheck_urls(assessment: Dict[str, Any]) -> List[str]:
+    urls: List[str] = []
+
+    def _add(candidate: Any) -> None:
+        candidate_str = str(candidate or '').strip()
+        if candidate_str.startswith('http') and candidate_str not in urls:
+            urls.append(candidate_str)
+
+    _add(assessment.get('link'))
+
+    web_search = assessment.get('web_search') or {}
+    for candidate in web_search.get('urls') or []:
+        _add(candidate)
+    for candidate in web_search.get('academic_urls') or []:
+        _add(candidate)
+
+    explanation = str(assessment.get('explanation') or '')
+    for match in re.findall(r'https?://\S+', explanation):
+        _add(match.rstrip('.,);]'))
+
+    return urls
+
+
 def _reverify_with_website_metadata(
     reference: Dict[str, Any],
     old_errors: List[Dict[str, Any]],
     assessment: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """Ground an LLM-provided URL by checking the website directly."""
-    website_url = assessment.get('link')
-    if not website_url or not str(website_url).startswith('http'):
+    candidate_urls = _collect_website_recheck_urls(assessment)
+    if not candidate_urls:
         return None
 
-    website_url = str(website_url).strip()
-    website_reference = dict(reference)
-    website_reference['url'] = website_url
-    website_reference['cited_url'] = website_url
+    ref_title = str(reference.get('title', '') or '').strip()
+    logger.info(
+        'Website recheck: probing %d discovered URL(s) for %r',
+        len(candidate_urls),
+        ref_title[:120],
+    )
 
-    issues: Optional[List[Dict[str, Any]]] = None
-    verified_url = website_url
     matched_database = 'Web page'
+    last_failure_reason: Optional[str] = None
+    last_checked_url: Optional[str] = None
 
-    try:
-        from refchecker.checkers.pdf_paper_checker import PDFPaperChecker
+    for website_url in candidate_urls:
+        logger.info('Website recheck: trying %s', website_url)
+        website_reference = dict(reference)
+        website_reference['url'] = website_url
+        website_reference['cited_url'] = website_url
 
-        pdf_checker = PDFPaperChecker()
-        if pdf_checker.can_check_reference(website_reference):
-            verified_data, pdf_issues, checked_url = pdf_checker.verify_reference(website_reference)
-            if verified_data:
-                issues = list(pdf_issues or [])
-                verified_url = checked_url or verified_data.get('url') or website_url
-    except Exception:
-        issues = None
+        issues: Optional[List[Dict[str, Any]]] = None
+        verified_url = website_url
+        failure_reason: Optional[str] = None
 
-    if issues is None:
         try:
-            from refchecker.checkers.webpage_checker import WebPageChecker
+            from refchecker.checkers.pdf_paper_checker import PDFPaperChecker
 
-            webpage_checker = WebPageChecker()
-            grounding_reference = dict(website_reference)
-            grounding_reference['title'] = assessment.get('found_title') or reference.get('title', '')
-            grounding_reference.pop('venue', None)
-            grounding_reference.pop('journal', None)
-            grounding_reference.pop('booktitle', None)
-
-            verified_data, webpage_issues, checked_url = webpage_checker.verify_raw_url_for_unverified_reference(
-                grounding_reference
-            )
-            web_metadata = (verified_data or {}).get('web_metadata') or {}
-            if verified_data and not web_metadata.get('access_blocked'):
-                issues = _reverify_with_llm_metadata(reference, old_errors, assessment)
-                if issues is None:
-                    issues = []
-                verified_url = checked_url or verified_data.get('url') or website_url
+            pdf_checker = PDFPaperChecker()
+            if pdf_checker.can_check_reference(website_reference):
+                verified_data, pdf_issues, checked_url = pdf_checker.verify_reference(website_reference)
+                if verified_data:
+                    issues = list(pdf_issues or [])
+                    verified_url = checked_url or verified_data.get('url') or website_url
+                elif pdf_issues:
+                    failure_reason = next(
+                        (
+                            issue.get('error_details')
+                            or issue.get('warning_details')
+                            or issue.get('info_details')
+                            for issue in pdf_issues
+                            if (
+                                issue.get('error_details')
+                                or issue.get('warning_details')
+                                or issue.get('info_details')
+                            )
+                        ),
+                        None,
+                    )
         except Exception:
-            return None
+            issues = None
 
-    if issues is None:
-        return None
+        if issues is None:
+            try:
+                from refchecker.checkers.webpage_checker import WebPageChecker
 
-    for e in old_errors:
-        if 'info_type' in e and 'error_type' not in e and 'warning_type' not in e:
-            issues.append(e)
+                webpage_checker = WebPageChecker()
+                grounding_reference = dict(website_reference)
+                grounding_reference['title'] = assessment.get('found_title') or reference.get('title', '')
+                grounding_reference.pop('venue', None)
+                grounding_reference.pop('journal', None)
+                grounding_reference.pop('booktitle', None)
 
-    filtered_issues = [
-        e for e in issues
-        if e.get('error_type') != 'unverified'
-        and not (
-            e.get('error_type') == 'url'
-            and 'url references paper' in (e.get('error_details') or '').lower()
-        )
-    ]
+                verified_data, webpage_issues, checked_url = webpage_checker.verify_raw_url_for_unverified_reference(
+                    grounding_reference
+                )
+                web_metadata = (verified_data or {}).get('web_metadata') or {}
+                if verified_data and not web_metadata.get('access_blocked'):
+                    issues = _reverify_with_llm_metadata(reference, old_errors, assessment)
+                    if issues is None:
+                        issues = []
+                    verified_url = checked_url or verified_data.get('url') or website_url
+                    logger.info('Website recheck: verified %r via %s', ref_title[:120], verified_url)
+                elif webpage_issues:
+                    failure_reason = next(
+                        (
+                            issue.get('error_details')
+                            or issue.get('warning_details')
+                            or issue.get('info_details')
+                            for issue in webpage_issues
+                            if (
+                                issue.get('error_details')
+                                or issue.get('warning_details')
+                                or issue.get('info_details')
+                            )
+                        ),
+                        failure_reason,
+                    )
+            except Exception:
+                continue
 
-    return {
-        'issues': filtered_issues,
-        'verified_url': verified_url,
-        'matched_database': matched_database,
-    }
+        if issues is None:
+            if failure_reason:
+                logger.info(
+                    'Website recheck: %s did not verify %r (%s)',
+                    website_url,
+                    ref_title[:120],
+                    failure_reason,
+                )
+                last_failure_reason = failure_reason
+                last_checked_url = website_url
+            continue
+
+        for e in old_errors:
+            if 'info_type' in e and 'error_type' not in e and 'warning_type' not in e:
+                issues.append(e)
+
+        filtered_issues = [
+            e for e in issues
+            if e.get('error_type') != 'unverified'
+            and not (
+                e.get('error_type') == 'url'
+                and 'url references paper' in (e.get('error_details') or '').lower()
+            )
+        ]
+
+        return {
+            'issues': filtered_issues,
+            'verified_url': verified_url,
+            'matched_database': matched_database,
+        }
+
+    if last_failure_reason:
+        return {
+            'issues': None,
+            'verified_url': last_checked_url or candidate_urls[0],
+            'matched_database': matched_database,
+            'failure_reason': last_failure_reason,
+            'checked_url': last_checked_url or candidate_urls[0],
+        }
+    return None
 
 
 def _split_reverified_issues(issues: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -1699,6 +1781,139 @@ def _split_reverified_issues(issues: List[Dict[str, Any]]) -> tuple[List[Dict[st
         else:
             errors.append(issue)
     return errors, warnings
+
+
+def _build_found_metadata_difference_summary(
+    reference: Optional[Dict[str, Any]],
+    assessment: Dict[str, Any],
+) -> str:
+    """Summarize concrete differences between cited and LLM-found metadata."""
+    if reference is None:
+        return ''
+
+    issues = _reverify_with_llm_metadata(reference, [], assessment) or []
+    if not issues:
+        return ''
+
+    parts: List[str] = []
+    for issue in issues:
+        issue_type = issue.get('error_type') or issue.get('warning_type')
+        if issue_type == 'title' and issue.get('ref_title_correct'):
+            parts.append(f"found title: {issue['ref_title_correct']}")
+        elif issue_type == 'author' and issue.get('ref_authors_correct'):
+            parts.append(f"found authors: {issue['ref_authors_correct']}")
+        elif issue_type == 'venue' and issue.get('ref_venue_correct'):
+            parts.append(f"found venue: {issue['ref_venue_correct']}")
+        elif issue_type == 'year':
+            details = issue.get('error_details', '')
+            if details:
+                parts.append(details[:1].lower() + details[1:])
+
+    if not parts:
+        return ''
+
+    return ' Found metadata differs from the citation (' + '; '.join(parts) + ').'
+
+
+def _found_authors_substantially_match(
+    cited_authors: List[str],
+    found_authors: str,
+) -> bool:
+    if not cited_authors or not found_authors:
+        return False
+
+    from refchecker.utils.text_utils import enhanced_name_match
+
+    found_author_names = _parse_llm_author_names(found_authors, cited_authors)
+    if not found_author_names:
+        return False
+
+    matched_count = sum(
+        1
+        for cited_author in cited_authors
+        if any(enhanced_name_match(cited_author, found_author) for found_author in found_author_names)
+    )
+    required_matches = len(cited_authors) if len(cited_authors) <= 2 else len(cited_authors) - 1
+    return matched_count >= required_matches
+
+
+def _convert_issues_to_warning_entries(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    warnings: List[Dict[str, Any]] = []
+    for issue in issues:
+        warning = dict(issue)
+        warning_type = warning.pop('warning_type', None) or warning.pop('error_type', None) or 'metadata'
+        warning_details = warning.pop('warning_details', None) or warning.pop('error_details', None) or ''
+        warning['error_type'] = warning_type
+        warning['error_details'] = warning_details
+        warnings.append(warning)
+    return warnings
+
+
+def _build_close_match_warning_result(
+    result: Dict[str, Any],
+    assessment: Dict[str, Any],
+    reference: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if reference is None:
+        return None
+
+    found_title = assessment.get('found_title')
+    found_authors = assessment.get('found_authors')
+    if not found_title or not found_authors:
+        return None
+
+    from refchecker.utils.text_utils import (
+        compare_titles_with_latex_cleaning,
+        normalize_paper_title,
+        strip_latex_commands,
+    )
+    from refchecker.utils.error_utils import format_title_mismatch
+
+    title_similarity = compare_titles_with_latex_cleaning(reference.get('title', ''), found_title)
+    if title_similarity < 0.4:
+        return None
+
+    if not _found_authors_substantially_match(reference.get('authors', []), found_authors):
+        return None
+
+    issues = _reverify_with_llm_metadata(reference, [], assessment) or []
+    if not issues:
+        return None
+
+    has_title_issue = any(
+        (issue.get('error_type') == 'title')
+        or (issue.get('warning_type') == 'title')
+        for issue in issues
+    )
+    cited_title = reference.get('title', '')
+    if (
+        cited_title
+        and found_title
+        and not has_title_issue
+        and normalize_paper_title(cited_title) != normalize_paper_title(found_title)
+    ):
+        issues.insert(0, {
+            'error_type': 'title',
+            'error_details': format_title_mismatch(
+                strip_latex_commands(cited_title),
+                found_title,
+            ),
+            'ref_title_correct': found_title,
+        })
+
+    warning_entries = _convert_issues_to_warning_entries(issues)
+    if not warning_entries:
+        return None
+
+    updated = dict(result)
+    updated['errors'] = [
+        e for e in updated.get('errors', [])
+        if e.get('error_type') != 'unverified'
+    ]
+    updated['warnings'] = warning_entries
+    updated['status'] = 'warning'
+    updated['matched_database'] = updated.get('matched_database') or 'LLM search'
+    return updated
 
 
 _MAX_HALLUCINATION_ASSESSMENT_ROUNDS = 1
@@ -1904,6 +2119,30 @@ def apply_hallucination_verdict(
         website_reverified = _reverify_with_website_metadata(
             reference, result.get('errors', []), assessment,
         )
+        if website_reverified is not None:
+            if website_reverified.get('issues') is None:
+                failure_reason = str(website_reverified.get('failure_reason') or '').strip()
+                checked_url = website_reverified.get('checked_url') or ha_link
+                if failure_reason:
+                    corrected_assessment = dict(assessment)
+                    if checked_url and checked_url.startswith('http'):
+                        failure_message = (
+                            f'The URL returned by the LLM could not be validated '
+                            f'({failure_reason}: {checked_url}).'
+                        )
+                    else:
+                        failure_message = (
+                            f'The URL returned by the LLM could not be validated '
+                            f'({failure_reason}).'
+                        )
+                    if failure_message not in (corrected_assessment.get('explanation') or ''):
+                        corrected_assessment['explanation'] = (
+                            f"{corrected_assessment.get('explanation', '').rstrip()} "
+                            f"{failure_message}"
+                        ).strip()
+                    result['hallucination_assessment'] = corrected_assessment
+                    assessment = corrected_assessment
+                website_reverified = None
         if website_reverified is not None:
             website_errors, website_warnings = _split_reverified_issues(
                 website_reverified['issues']
@@ -2127,12 +2366,20 @@ def apply_hallucination_verdict(
                 result['status'] = 'error' if remaining_errors else 'verified'
 
     elif verdict != 'LIKELY' and (is_unverified or has_unverified_error):
+        close_match_warning = _build_close_match_warning_result(result, assessment, reference)
+        if close_match_warning is not None:
+            return close_match_warning
+
         # UNCERTAIN or UNLIKELY-but-not-upgradeable: annotate the
         # unverified error with the explanation if available.
         if ha_explanation:
+            mismatch_summary = _build_found_metadata_difference_summary(reference, assessment)
+            final_explanation = ha_explanation
+            if mismatch_summary and mismatch_summary.strip() not in final_explanation:
+                final_explanation = f"{final_explanation}{mismatch_summary}"
             result['errors'] = [
                 {**e, 'error_details':
-                 f"Reference could not be verified — {ha_explanation}"}
+                 f"Reference could not be verified — {final_explanation}"}
                 if e.get('error_type') == 'unverified' else e
                 for e in result.get('errors', [])
             ]

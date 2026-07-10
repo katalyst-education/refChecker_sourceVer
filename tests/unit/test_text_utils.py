@@ -262,6 +262,17 @@ class TestNameMatching:
         # Should NOT contain comma format
         assert "Brown, Alice" not in error_multi
 
+    def test_compare_authors_flags_potential_misspelling(self):
+        match, error = compare_authors(
+            ["P. Hinze"],
+            [{"name": "Patrick Hintze"}],
+        )
+
+        assert not match
+        assert "Potential author misspelling for author 1:" in error
+        assert "cited:  P. Hinze" in error
+        assert "actual: Patrick Hintze" in error
+
 
 class TestAuthorNameProcessing:
     """Test author name processing functions."""

@@ -430,6 +430,7 @@ class WebSearchChecker:
             found         – whether credible academic hits were found
             score_delta   – adjustment to hallucination score
             academic_urls – matching academic URLs (up to 5)
+            urls          – all discovered result URLs (up to 5)
             query         – the search query used
             provider      – name of the search provider used
             verdict       – LLM verdict (EXISTS / NOT_FOUND / UNSURE)
@@ -464,6 +465,11 @@ class WebSearchChecker:
         for r in raw_results:
             verdict_text = r.pop('_verdict_text', '') or verdict_text
 
+        result_urls = _extract_result_urls_from_results(raw_results)
+        verdict_urls = _extract_urls_from_text(verdict_text)
+        for url in verdict_urls:
+            if url not in result_urls:
+                result_urls.append(url)
         verdict = _parse_verdict(verdict_text)
         academic_urls = _extract_academic_urls_from_results(raw_results)
 
@@ -471,36 +477,40 @@ class WebSearchChecker:
         if verdict == 'EXISTS' and academic_urls:
             delta = DELTA_STRONG_HIT if len(academic_urls) >= 2 else DELTA_MODERATE_HIT
             return _result(True, delta, academic_urls[:5], query, self._provider_name,
-                           verdict=verdict, explanation=verdict_text)
+                           verdict=verdict, explanation=verdict_text, urls=result_urls[:5])
 
         if verdict == 'EXISTS':
             # LLM says exists but no academic URLs extracted
             return _result(True, DELTA_MODERATE_HIT, [], query, self._provider_name,
-                           verdict=verdict, explanation=verdict_text)
+                           verdict=verdict, explanation=verdict_text, urls=result_urls[:5])
 
         if verdict == 'NOT_FOUND':
             return _result(False, DELTA_NO_RESULTS, [], query, self._provider_name,
-                           verdict=verdict, explanation=verdict_text)
+                           verdict=verdict, explanation=verdict_text, urls=result_urls[:5])
 
         # UNSURE or unparseable — fall back to URL-based heuristic
         if academic_urls:
             delta = DELTA_STRONG_HIT if len(academic_urls) >= 2 else DELTA_MODERATE_HIT
             return _result(True, delta, academic_urls[:5], query, self._provider_name,
-                           verdict=verdict, explanation=verdict_text)
+                           verdict=verdict, explanation=verdict_text, urls=result_urls[:5])
 
         if not raw_results or all(not r.get('link') for r in raw_results):
             return _result(False, DELTA_NO_RESULTS, [], query, self._provider_name,
-                           verdict=verdict, explanation=verdict_text)
+                           verdict=verdict, explanation=verdict_text, urls=result_urls[:5])
 
         return _result(False, DELTA_INCONCLUSIVE, [], query, self._provider_name,
-                       verdict=verdict, explanation=verdict_text)
+                       verdict=verdict, explanation=verdict_text, urls=result_urls[:5])
 
     @property
     def _provider_name(self) -> str:
         return self.provider.name if self.provider else 'none'
 
 
-def create_web_search_checker(preferred_provider: Optional[str] = None) -> WebSearchChecker:
+def create_web_search_checker(
+    preferred_provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    endpoint: Optional[str] = None,
+) -> WebSearchChecker:
     """Factory: auto-detect available provider from environment variables.
 
     Parameters
@@ -521,7 +531,12 @@ def create_web_search_checker(preferred_provider: Optional[str] = None) -> WebSe
     if preferred_provider:
         for cls in _PROVIDER_CLASSES:
             if cls.name == preferred_provider:
-                provider = cls()
+                provider_kwargs: Dict[str, Any] = {}
+                if api_key is not None:
+                    provider_kwargs['api_key'] = api_key
+                if endpoint is not None and cls.name == 'openai':
+                    provider_kwargs['endpoint'] = endpoint
+                provider = cls(**provider_kwargs)
                 if provider.available:
                     return WebSearchChecker(provider)
                 logger.debug(f'{cls.name} provider requested but not available')
@@ -529,7 +544,12 @@ def create_web_search_checker(preferred_provider: Optional[str] = None) -> WebSe
 
     # Fall through to auto-detect if preferred wasn't available
     for cls in _PROVIDER_CLASSES:
-        provider = cls()
+        provider_kwargs: Dict[str, Any] = {}
+        if api_key is not None:
+            provider_kwargs['api_key'] = api_key
+        if endpoint is not None and cls.name == 'openai':
+            provider_kwargs['endpoint'] = endpoint
+        provider = cls(**provider_kwargs)
         if provider.available:
             logger.debug(f'Auto-selected web search provider: {cls.name}')
             return WebSearchChecker(provider)
@@ -549,11 +569,13 @@ def _result(
     provider: str = '',
     verdict: str = '',
     explanation: str = '',
+    urls: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     return {
         'found': found,
         'score_delta': score_delta,
         'academic_urls': academic_urls,
+        'urls': urls or [],
         'query': query,
         'provider': provider,
         'verdict': verdict,
@@ -585,3 +607,34 @@ def is_academic_url(url: str) -> bool:
 def _extract_academic_urls_from_results(results: List[Dict[str, str]]) -> List[str]:
     """Filter search results to those on academic domains."""
     return [r['link'] for r in results if is_academic_url(r.get('link', ''))]
+
+
+def _extract_result_urls_from_results(results: List[Dict[str, str]]) -> List[str]:
+    """Return all discovered HTTP(S) result URLs, preserving order and uniqueness."""
+    urls: List[str] = []
+    seen = set()
+    for result in results:
+        url = str(result.get('link', '') or '').strip()
+        if not url.startswith(('http://', 'https://')) or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _extract_urls_from_text(text: str) -> List[str]:
+    """Extract HTTP(S) URLs from free-form verdict text, preserving order."""
+    urls: List[str] = []
+    seen = set()
+    if not text:
+        return urls
+
+    markdown_matches = re.findall(r'\[.*?\]\((https?://\S+?)\)', text)
+    plain_matches = re.findall(r'(https?://\S+)', text)
+    for raw_url in [*markdown_matches, *plain_matches]:
+        url = raw_url.rstrip('.,);]')
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls

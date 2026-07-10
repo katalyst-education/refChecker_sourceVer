@@ -10,6 +10,8 @@ Covers:
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from refchecker.core.hallucination_policy import (
     run_hallucination_check,
     should_check_hallucination,
@@ -132,6 +134,72 @@ def test_webui_records_direct_webpage_checker_success_source():
     assert result['authoritative_urls'] == [
         {'type': 'verified_url', 'url': cited_url}
     ]
+
+
+def test_backend_only_reuses_settled_cached_results():
+    from backend.refchecker_wrapper import ProgressRefChecker
+
+    assert ProgressRefChecker._can_reuse_cached_result({
+        'status': 'verified',
+        'errors': [],
+        'warnings': [],
+    }) is True
+
+    assert ProgressRefChecker._can_reuse_cached_result({
+        'status': 'unverified',
+        'errors': [{'error_type': 'unverified', 'error_details': 'Reference could not be verified'}],
+        'hallucination_assessment': {'verdict': 'UNCERTAIN'},
+    }) is False
+
+
+@pytest.mark.asyncio
+async def test_backend_skips_stale_unverified_cache_entries(monkeypatch):
+    from backend import database as db_module
+    from backend.refchecker_wrapper import ProgressRefChecker
+
+    wrapper = object.__new__(ProgressRefChecker)
+
+    async def fake_lookup(_reference):
+        return {
+            'result': {
+                'status': 'unverified',
+                'errors': [{'error_type': 'unverified', 'error_details': 'Stale cached result'}],
+                'warnings': [],
+                'hallucination_assessment': {'verdict': 'UNCERTAIN'},
+            }
+        }
+
+    calls = {'verify': 0}
+
+    def fake_verify(reference):
+        calls['verify'] += 1
+        return ({'title': reference['title']}, [], 'https://example.com/fresh')
+
+    def fake_format(reference, index, verified_data, errors, url):
+        return {
+            'index': index,
+            'title': reference['title'],
+            'status': 'verified',
+            'errors': errors,
+            'warnings': [],
+            'authoritative_urls': [{'type': 'verified_url', 'url': url}],
+            'fresh': True,
+        }
+
+    monkeypatch.setattr(db_module.db, 'lookup_verified_reference', fake_lookup)
+    wrapper._verify_reference = fake_verify
+    wrapper._format_verification_result = fake_format
+
+    result = await wrapper._check_reference({
+        'title': 'Monitor Digitalisierung 360 Arbeitspapier Nr. 67',
+        'authors': ['J. Hense', 'L. Goertz'],
+        'year': 2023,
+    }, 8)
+
+    assert calls['verify'] == 1
+    assert result['status'] == 'verified'
+    assert result['fresh'] is True
+    assert result.get('from_cache') is not True
 
 
 # ------------------------------------------------------------------

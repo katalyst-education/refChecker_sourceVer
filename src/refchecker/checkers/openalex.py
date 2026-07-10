@@ -392,11 +392,8 @@ class OpenAlexReferenceChecker:
                     if display_name:
                         correct_author_names.append(display_name)
                 
-                errors.append({
-                    'error_type': 'author',
-                    'error_details': author_error,
-                    'ref_authors_correct': ', '.join(correct_author_names)
-                })
+                from refchecker.utils.error_utils import create_author_error
+                errors.append(create_author_error(author_error, correct_author_names))
         
         # Verify year
         work_year = work_data.get('publication_year')
