@@ -27,6 +27,9 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   } = useSettingsStore()
   const panelRef = useRef(null)
   const [activeSection, setActiveSection] = useState('General')
+  const [dbClearLoading, setDbClearLoading] = useState(false)
+  const [dbClearSuccess, setDbClearSuccess] = useState(false)
+  const [dbClearError, setDbClearError] = useState(null)
 
   // Honor deep-links from the onboarding banner (and anywhere else that
   // calls openSettings(section)) by jumping to the requested pane.
@@ -252,6 +255,25 @@ export default function SettingsPanel({ theme, onThemeChange }) {
       setDbPathError(err.message || 'Failed to save')
     } finally {
       setDbPathSaving(false)
+    }
+  }
+
+  const handleClearDatabase = async () => {
+    if (!window.confirm(
+        'This will permanently delete all check history and the verification cache.\n\n' +
+        'You will need to re-run checks to see results again.\n\nAre you sure?'
+    )) return
+    setDbClearLoading(true)
+    setDbClearSuccess(false)
+    setDbClearError(null)
+    try {
+      await api.clearDatabase()
+      setDbClearSuccess(true)
+      setTimeout(() => setDbClearSuccess(false), 4000)
+    } catch (err) {
+      setDbClearError(err?.response?.data?.detail || err.message || 'Failed to clear database')
+    } finally {
+      setDbClearLoading(false)
     }
   }
 
@@ -1274,6 +1296,66 @@ export default function SettingsPanel({ theme, onThemeChange }) {
               }}
             >{diagnosticsToText(diagReport)}</pre>
           </details>
+        )}
+      </div>
+      {/* ── Danger Zone ─────────────────────────────────── */}
+      <div style={{
+        marginTop: 32,
+        borderTop: '1px solid var(--color-error, #ef4444)',
+        paddingTop: 20,
+      }}>
+        <div style={{
+          fontSize: '0.75rem',
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: 'var(--color-error, #ef4444)',
+          marginBottom: 12,
+        }}>
+          Danger Zone
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 2 }}>
+              Clear Check History &amp; Cache
+            </div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)' }}>
+              Deletes all past check results and the verification cache from the local database.
+              Use this if old results are displaying incorrectly after an update.
+            </div>
+          </div>
+
+          <button
+              onClick={handleClearDatabase}
+              disabled={dbClearLoading}
+              style={{
+                flexShrink: 0,
+                padding: '6px 14px',
+                borderRadius: 8,
+                fontSize: '0.85rem',
+                fontWeight: 500,
+                cursor: dbClearLoading ? 'not-allowed' : 'pointer',
+                background: 'transparent',
+                border: '1px solid var(--color-error, #ef4444)',
+                color: 'var(--color-error, #ef4444)',
+                opacity: dbClearLoading ? 0.6 : 1,
+                transition: 'opacity 0.15s',
+              }}
+          >
+            {dbClearLoading ? 'Clearing…' : 'Clear Database'}
+          </button>
+        </div>
+
+        {dbClearSuccess && (
+            <div style={{ marginTop: 8, fontSize: '0.8rem', color: 'var(--color-success, #22c55e)' }}>
+              ✓ Database cleared successfully. Re-run your checks to populate fresh results.
+            </div>
+        )}
+        {dbClearError && (
+            <div style={{ marginTop: 8, fontSize: '0.8rem', color: 'var(--color-error, #ef4444)' }}>
+              {dbClearError}
+            </div>
         )}
       </div>
     </div>
