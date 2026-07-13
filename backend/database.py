@@ -2406,10 +2406,24 @@ class Database:
                     s = (s or "").split(",")[0].split(";")[0].strip()
                     parts = s.split()
                     return parts[-1].lower() if parts else ""
-                if _first_surname(r["authors"] or "") != _first_surname(ref_authors_str):
+                def _to_authors_str(val) -> str:
+                    """Normalize authors value to a plain comma-separated string."""
+                    if not val:
+                        return ""
+                    # If it's a JSON-encoded list (e.g. '["A. Smith", "B. Jones"]'), decode it first
+                    if isinstance(val, str) and val.startswith("["):
+                        try:
+                            decoded = json.loads(val)
+                            if isinstance(decoded, list):
+                                return ", ".join(str(a) for a in decoded)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    return str(val)
+
+                if _first_surname(_to_authors_str(r["authors"])) != _first_surname(ref_authors_str):
                     diffs.append({
                         "field": "authors",
-                        "cached": (r["authors"] or "")[:120],
+                        "cached": _to_authors_str(r["authors"])[:120],
                         "cited": ref_authors_str[:120],
                     })
             cached_venue = (r["venue"] or "").strip().lower()
