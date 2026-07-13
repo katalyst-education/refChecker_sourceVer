@@ -87,10 +87,11 @@ export default function SeenReferencesView() {
       const res = await backfillSeenReferences()
       const d = res?.data || {}
       setBackfillStatus(
-        `Backfill complete: walked ${d.walked_checks ?? 0} checks `
-        + `(${d.walked_refs ?? 0} refs) → +${d.inserted ?? 0} new, `
-        + `${d.updated ?? 0} already known, ${d.skipped_no_identity ?? 0} skipped (no identity)`
-        + (d.duration_seconds != null ? ` · ${d.duration_seconds}s` : '')
+          `Backfill complete: walked ${d.walked_checks ?? 0} checks `
+          + `(${d.walked_refs ?? 0} refs) → +${d.inserted ?? 0} new, `
+          + `${d.updated ?? 0} already known, ${d.skipped_no_identity ?? 0} skipped (no identity)`
+          + (d.errors ? `, ${d.errors} errors` : '')   // ← add this
+          + (d.duration_seconds != null ? ` · ${d.duration_seconds}s` : '')
       )
       await load({ offset: 0 })
       setOffset(0)
