@@ -1494,7 +1494,41 @@ export default function SettingsPanel({ theme, onThemeChange }) {
           </div>
         )}
       </div>
-
+      {/* Semantic Scholar Rate Limit */}
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
+              Semantic Scholar Rate Limit
+            </div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Minimum delay between API requests (seconds). Must be ≥ 1.0 s. Default: 1.1 s.
+            </div>
+          </div>
+          <div className="flex items-center gap-2 ml-4">
+            <input
+                type="number"
+                min="1.0"
+                max="10.0"
+                step="0.1"
+                value={settings?.ss_rate_limit_delay?.value ?? 1.1}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  if (!isNaN(val) && val >= 1.0) {
+                    updateSetting('ss_rate_limit_delay', val);
+                  }
+                }}
+                className="w-20 px-2 py-1 text-sm rounded border text-right"
+                style={{
+                  backgroundColor: 'var(--color-bg-primary)',
+                  borderColor: 'var(--color-border)',
+                  color: 'var(--color-text-primary)',
+                }}
+            />
+            <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>s</span>
+          </div>
+        </div>
+      </div>
         {/* Paperclip API Key — OPTIONAL biomedical full-text +
           arXiv secondary verification tier. In multi-user mode the
           key stays in the browser cache and is sent per request; in

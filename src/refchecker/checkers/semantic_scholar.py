@@ -34,6 +34,7 @@ from refchecker.utils.url_utils import construct_semantic_scholar_url
 from refchecker.utils.text_utils import normalize_text, clean_title_basic, find_best_match, is_name_match, are_venues_substantially_different, calculate_title_similarity, compare_authors, clean_title_for_search, strip_latex_commands, compare_titles_with_latex_cleaning
 from refchecker.utils.error_utils import format_title_mismatch
 from refchecker.utils.arxiv_rate_limiter import ArXivRateLimiter, arxiv_cached_get
+from refchecker.utils.semantic_scholar_rate_limiter import SemanticScholarRateLimiter
 from refchecker.utils.venue_utils import get_semantic_scholar_venue, resolve_venue_for_validation
 from refchecker.config.settings import get_config
 
@@ -81,6 +82,9 @@ class NonArxivReferenceChecker:
         self.arxiv_rate_limiter = ArXivRateLimiter.get_instance()
         self.arxiv_abs_url = "https://arxiv.org/abs"
         self.arxiv_timeout = 30
+
+        # Proactive rate limiter — shared singleton enforcing ≤1 req/s
+        self._ss_limiter = SemanticScholarRateLimiter.get_instance()
     
     def search_paper(self, query: str, year: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -121,6 +125,7 @@ class NonArxivReferenceChecker:
         # Make the request with retries and backoff
         for attempt in range(max_retries_for_this_query):
             try:
+                self._ss_limiter.wait()
                 response = self._session.get(endpoint, params=params, timeout=30)
                 
                 # Check for rate limiting
@@ -167,6 +172,7 @@ class NonArxivReferenceChecker:
         # Make the request with retries and backoff
         for attempt in range(self.max_retries):
             try:
+                self._ss_limiter.wait()
                 response = self._session.get(endpoint, params=params, timeout=30)
                 
                 # Check for rate limiting
@@ -666,6 +672,7 @@ class NonArxivReferenceChecker:
                 
                 for attempt in range(self.max_retries):
                     try:
+                        self._ss_limiter.wait()
                         response = self._session.get(endpoint, params=params, timeout=30)
                         
                         if response.status_code == 429:

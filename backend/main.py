@@ -1001,6 +1001,16 @@ async def _run_startup_tasks() -> None:
             logger.info(f"Cancelled {stale} stale in-progress checks on startup")
     except Exception as e:
         logger.error(f"Failed to cancel stale checks: {e}")
+
+    try:
+        stored_delay = await db.get_setting("ss_rate_limit_delay")
+        if stored_delay:
+            from refchecker.utils.semantic_scholar_rate_limiter import SemanticScholarRateLimiter
+            SemanticScholarRateLimiter.get_instance().set_delay(float(stored_delay))
+            logger.info(f"Initialized Semantic Scholar rate limiter with delay={stored_delay}s")
+    except Exception as e:
+        logger.warning(f"Failed to load SS rate limit setting, using default: {e}")
+
     logger.info("Database initialized")
 
 
@@ -4134,6 +4144,18 @@ async def get_all_settings(current_user: UserInfo = Depends(require_user)):
                 "options": ["cascade", "llm-only"],
                 "section": "Performance"
             },
+            "ss_rate_limit_delay": {
+                "value": float(await db.get_setting("ss_rate_limit_delay") or 1.1),
+                "default": 1.1,
+                "type": "number",
+                "label": "Semantic Scholar Rate Limit (seconds)",
+                "description": "Minimum delay between Semantic Scholar API requests. "
+                               "Must be ≥ 1.0 s (API policy). Default: 1.1 s.",
+                "section": "API Keys",
+                "min": 1.0,
+                "max": 10.0,
+                "step": 0.1,
+            }
         }
 
         # db_path and cache_dir are only available in single-user mode (server-local resources)
@@ -4178,6 +4200,7 @@ async def get_all_settings(current_user: UserInfo = Depends(require_user)):
             if config["type"] == "number":
                 settings[key]["min"] = config.get("min")
                 settings[key]["max"] = config.get("max")
+                settings[key]["step"] = config.get("step")
             if key == "db_path":
                 resolved_db_path = await _get_configured_semantic_scholar_db_path()
                 settings[key]["current_snapshot"] = _read_semantic_scholar_db_snapshot(resolved_db_path)
@@ -4198,9 +4221,28 @@ async def update_setting(
     try:
         _require_admin(current_user)
         # Validate the setting key
-        valid_keys = {"max_concurrent_checks", "db_path", "cache_dir", "extraction_mode"}
+        valid_keys = {
+            "max_concurrent_checks",
+            "db_path",
+            "cache_dir",
+            "extraction_mode",
+            "ss_rate_limit_delay"
+        }
         if setting_key not in valid_keys:
             raise HTTPException(status_code=400, detail=f"Unknown setting: {setting_key}")
+
+        if setting_key == "ss_rate_limit_delay":
+            try:
+                delay = float(update.value)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="ss_rate_limit_delay must be a number")
+            if delay < 1.0:
+                raise HTTPException(status_code=400, detail="ss_rate_limit_delay must be >= 1.0 seconds")
+            await db.set_setting("ss_rate_limit_delay", str(delay))
+            # Update the live singleton immediately — no restart needed
+            from refchecker.utils.semantic_scholar_rate_limiter import SemanticScholarRateLimiter
+            SemanticScholarRateLimiter.get_instance().set_delay(delay)
+            return {"key": setting_key, "value": delay, "message": "Setting updated"}
         
         # Apply setting-specific validation
         if setting_key == "max_concurrent_checks":
