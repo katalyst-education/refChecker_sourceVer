@@ -100,6 +100,11 @@ def test_history_recomputes_display_stats_from_results_json(tmp_path):
         assert history_item[key] == value
         assert detail_item[key] == value
 
+    # History cards need the same reference objects as the detail view so
+    # frontend citation-style/cosmetic filtering cannot change their badges
+    # merely because the user clicked the row.
+    assert history_item["results"] == detail_item["results"] == results
+
 
 def test_in_progress_history_counts_processed_unverified_refs_pending_hallucination(tmp_path):
     db = Database(str(tmp_path / "history.db"))

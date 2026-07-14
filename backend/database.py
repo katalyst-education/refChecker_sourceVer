@@ -942,17 +942,18 @@ class Database:
     async def get_history(self, limit: int = 50, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get recent check history, optionally filtered by user.
 
-        v0.7.46: results_json is pulled but bounded by ``limit`` (50 by
-        default) to keep /history snappy. v0.7.46's blanket removal of
-        results_json broke the recompute path: ``processed_refs`` and
-        the stat buckets all live in results_json (the persisted column
-        values reflect the LAST upsert and can be stale during an
-        in-progress run, or carry sentinel 99s during partial writes).
-        v0.7.65 restores the recompute so history rows match the
-        Summary view and the unit tests' processed_refs expectation.
-        The 800-paper-batch case that motivated v0.7.46 is unaffected
-        because the FE still requests LIMIT 50 — fewer rows means
-        bounded JSON parse cost.
+        ``results_json`` is pulled and returned as ``results``, bounded by
+        ``limit`` (50 by default).  History cards use those references to
+        apply the same citation-style/cosmetic-issue filtering as the
+        selected-check Summary.  Returning only persisted aggregate columns
+        made a cold page load show different buckets until the user clicked
+        the row and the detail endpoint supplied its references.
+
+        The result data is also used to recompute persisted counters, which
+        may be stale during an in-progress run or after older application
+        versions.  The 800-paper-batch case that originally motivated a
+        compact history response remains bounded because the frontend asks
+        for at most 50 rows.
         """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout=5000")
@@ -1000,6 +1001,12 @@ class Database:
                         except Exception:
                             parsed_results = []
                         if isinstance(parsed_results, list) and parsed_results:
+                            # Keep the references on the history item.  The
+                            # frontend deliberately derives all visible
+                            # summary buckets from reference objects when
+                            # available; this makes a cold load identical to
+                            # the detail state loaded after selecting a row.
+                            item['results'] = parsed_results
                             buckets = _compute_reference_buckets_from_results(
                                 parsed_results,
                                 is_complete=item.get('status') in {'completed', 'cancelled', 'error'},
