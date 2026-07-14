@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getPaperclipKeyStatus: vi.fn(),
   setPaperclipKey: vi.fn(),
   deletePaperclipKey: vi.fn(),
+  getAIDetectionModelStatus: vi.fn(),
 }))
 
 vi.mock('../../stores/useSettingsStore', () => ({
@@ -54,6 +55,9 @@ vi.mock('../../utils/api', () => ({
   getPaperclipKeyStatus: mocks.getPaperclipKeyStatus,
   setPaperclipKey: mocks.setPaperclipKey,
   deletePaperclipKey: mocks.deletePaperclipKey,
+  getAIDetectionModelStatus: mocks.getAIDetectionModelStatus,
+  downloadAIDetectionModel: vi.fn(),
+  deleteAIDetectionModel: vi.fn(),
 }))
 
 vi.mock('../../utils/logger', () => ({
@@ -61,6 +65,7 @@ vi.mock('../../utils/logger', () => ({
 }))
 
 import SettingsPanel from './SettingsPanel'
+import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 
 async function saveSemanticScholarKey() {
   render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
@@ -98,6 +103,24 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     mocks.getPaperclipKeyStatus.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
     mocks.setPaperclipKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
     mocks.deletePaperclipKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
+    mocks.getAIDetectionModelStatus.mockResolvedValue({
+      data: {
+        installed: true,
+        deps_available: true,
+        cpu_available: true,
+        cuda_available: true,
+        cuda_device_name: 'NVIDIA Test GPU',
+        size_bytes: 1024,
+        repo: 'desklib/test',
+      },
+    })
+    useAiDetectionStore.setState({
+      enabled: true,
+      backend: 'local',
+      device: 'cpu',
+      modelStatus: null,
+      modelError: null,
+    })
   })
 
   it('stores Semantic Scholar keys in the browser cache in multi-user mode', async () => {
@@ -135,5 +158,17 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
 
     expect(mocks.setPaperclipKey).toHaveBeenCalledWith('pc-key')
     expect(mocks.deleteKey).toHaveBeenCalledWith('paperclip')
+  })
+
+  it('persists the selected local AI-detection compute device', async () => {
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'AI Detection' }))
+
+    const selector = await screen.findByLabelText('Compute device')
+    await waitFor(() => expect(screen.getByRole('option', { name: /NVIDIA Test GPU/ })).toBeEnabled())
+    fireEvent.change(selector, { target: { value: 'cuda' } })
+
+    expect(useAiDetectionStore.getState().device).toBe('cuda')
+    expect(selector).toHaveValue('cuda')
   })
 })

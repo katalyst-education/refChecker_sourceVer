@@ -911,6 +911,7 @@ class ProgressRefChecker:
                  hallucination_endpoint: Optional[str] = None,
                  ai_detection_enabled: bool = False,
                  ai_detection_backend: str = "local",
+                 ai_detection_device: str = "cpu",
                  ai_detection_api_key: Optional[str] = None,
                  ai_detection_consent: bool = False,
                  ai_detection_service: str = "pangram",
@@ -946,6 +947,7 @@ class ProgressRefChecker:
         # `_run_ai_detection`. Off by default; never blocks the check.
         self.ai_detection_enabled = bool(ai_detection_enabled)
         self.ai_detection_backend = (ai_detection_backend or "local").lower()
+        self.ai_detection_device = (ai_detection_device or "cpu").lower()
         self.ai_detection_api_key = ai_detection_api_key
         self.ai_detection_consent = bool(ai_detection_consent)
         self.ai_detection_service = (ai_detection_service or "pangram").lower()
@@ -2497,7 +2499,9 @@ class ProgressRefChecker:
 
         backend = self.ai_detection_backend or DEFAULT_BACKEND
         opts: Dict[str, Any] = {}
-        if backend in ("llm-judge", "llm"):
+        if backend == "local":
+            opts = {"device": self.ai_detection_device}
+        elif backend in ("llm-judge", "llm"):
             opts = {
                 "provider": self.hallucination_provider or self.llm_provider,
                 "api_key": self.hallucination_api_key or self.api_key,

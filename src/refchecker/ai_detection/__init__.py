@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "local"
 VALID_BACKENDS = ("local", "llm-judge", "api")
+DEFAULT_DEVICE = "cpu"
+VALID_DEVICES = ("cpu", "cuda")
 
 
 def build_detector(backend: str, *, check_id=None, **opts) -> Optional[DetectionBackend]:
@@ -44,7 +46,10 @@ def build_detector(backend: str, *, check_id=None, **opts) -> Optional[Detection
     backend = (backend or DEFAULT_BACKEND).lower()
     if backend == "local":
         from .local_backend import LocalDetectorBackend
-        return LocalDetectorBackend(check_id=check_id)
+        return LocalDetectorBackend(
+            check_id=check_id,
+            device=opts.get("device", DEFAULT_DEVICE),
+        )
     if backend in ("llm-judge", "llm"):
         from .llm_backend import LLMJudgeBackend
         return LLMJudgeBackend(
@@ -99,6 +104,8 @@ __all__ = [
     "MEDIUM_THRESHOLD",
     "DEFAULT_BACKEND",
     "VALID_BACKENDS",
+    "DEFAULT_DEVICE",
+    "VALID_DEVICES",
     "build_detector",
     "run_detection",
     "model_manager",

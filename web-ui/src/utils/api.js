@@ -153,8 +153,8 @@ export const fetchCitationGraph = ({ references, paper_title }) =>
 // One-hop expand: a paper's outgoing references for the graph view.
 // `title` is optional — the backend uses it to do a title-search
 // fallback when /paper/<id>/references returns nothing for the DOI.
-export const expandPaper = ({ paper_id, limit = 8, title = null, ai_detection = false }) =>
-  api.post('/papers/expand', { paper_id, limit, title, ai_detection })
+export const expandPaper = ({ paper_id, limit = 8, title = null, ai_detection = false, ai_detection_device = 'cpu' }) =>
+  api.post('/papers/expand', { paper_id, limit, title, ai_detection, ai_detection_device })
 
 // Per-check edit endpoints (Add/Remove citation, regenerate health stats)
 export const addReferenceToCheck = (checkId, payload) =>

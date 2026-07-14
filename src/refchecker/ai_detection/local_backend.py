@@ -44,11 +44,20 @@ logger = logging.getLogger(__name__)
 
 _MAX_TOKENS = 768  # per-window truncation for the encoder
 
-# Module-level model cache so we load weights once per process. Guarded by a
-# lock because concurrent batch checks call _get_engine() from multiple
-# asyncio.to_thread worker threads.
-_engine = None
+# Module-level model cache so we load weights once per device per process.
+# Keeping CPU and CUDA entries separate prevents the first request's device
+# from silently determining all later checks.
+_engines = {}
 _engine_lock = threading.Lock()
+
+_VALID_DEVICES = ("cpu", "cuda")
+
+
+def _normalize_device(device: Optional[str]) -> str:
+    value = (device or "cpu").strip().lower()
+    if value == "gpu":
+        value = "cuda"
+    return value
 
 
 def _ai_positive_index(id2label: Optional[Dict]) -> Optional[int]:
@@ -73,29 +82,51 @@ def _ai_positive_index(id2label: Optional[Dict]) -> Optional[int]:
 class LocalDetectorBackend(DetectionBackend):
     name = "local"
 
-    def __init__(self, check_id=None):
+    def __init__(self, check_id=None, device: str = "cpu"):
         self.model_version = f"local:{model_manager.MODEL_REPO}"
         self.check_id = check_id
+        self.device = _normalize_device(device)
 
     @property
     def available(self) -> bool:
-        return model_manager.is_model_installed() and model_manager.deps_available()
+        return (
+            self.device in _VALID_DEVICES
+            and model_manager.is_model_installed()
+            and model_manager.deps_available()
+            and model_manager.device_available(self.device)
+        )
 
     def detect(self, text: str, *, title: Optional[str] = None) -> AIDetectionResult:
         body, wc = prepared_text(text)
         if not model_manager.is_model_installed():
-            return make_unavailable("model_not_installed", self.name, wc)
+            result = make_unavailable("model_not_installed", self.name, wc)
+            result.device_used = self.device
+            return result
         if not model_manager.deps_available():
-            return make_unavailable("deps_not_installed", self.name, wc)
+            result = make_unavailable("deps_not_installed", self.name, wc)
+            result.device_used = self.device
+            return result
+        if self.device not in _VALID_DEVICES:
+            result = make_unavailable("invalid_device", self.name, wc)
+            result.device_used = self.device
+            return result
+        if not model_manager.device_available(self.device):
+            result = make_unavailable("device_unavailable", self.name, wc)
+            result.device_used = self.device
+            return result
         reason = should_abstain(body)
         if reason:
-            return make_inconclusive(reason, self.name, wc)
+            result = make_inconclusive(reason, self.name, wc)
+            result.device_used = self.device
+            return result
 
         try:
-            engine = _get_engine()
+            engine = _get_engine(self.device)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Local detector load failed: %s", exc)
-            return make_unavailable("model_load_failed", self.name, wc)
+            result = make_unavailable("model_load_failed", self.name, wc)
+            result.device_used = self.device
+            return result
 
         # Only score windows that independently clear the SAME reliability
         # floors the document had to clear (>= MIN_WORDS prose, non-prose
@@ -115,7 +146,9 @@ class LocalDetectorBackend(DetectionBackend):
             probs = [engine.score(w) for w in windows]
         except Exception as exc:  # noqa: BLE001
             logger.warning("Local detector inference failed: %s", exc)
-            return make_unavailable("inference_failed", self.name, wc)
+            result = make_unavailable("inference_failed", self.name, wc)
+            result.device_used = self.device
+            return result
 
         doc_score = round(sum(probs) / len(probs), 3)
         raw_band = band_from_probability(doc_score)
@@ -146,6 +179,7 @@ class LocalDetectorBackend(DetectionBackend):
             spans=spans,
             backend_used=self.name,
             model_version=self.model_version,
+            device_used=self.device,
             operating_point=OPERATING_POINT,
             word_count=wc,
             disclaimer=DISCLAIMER,
@@ -196,49 +230,87 @@ def _summary(band: str, score, n_windows: int) -> str:
 
 # ── Inference engine (lazy) ───────────────────────────────────────────────
 
-def _get_engine():
-    global _engine
-    if _engine is not None:
-        return _engine
+def _get_engine(device: str = "cpu"):
+    device = _normalize_device(device)
+    if device not in _VALID_DEVICES:
+        raise ValueError(f"Unsupported local AI-detection device: {device}")
+    if device in _engines:
+        return _engines[device]
     # Double-checked locking: under a cold-start batch, several worker threads
     # can reach here at once; without the lock each would load DeBERTa weights
     # (hundreds of MB) in parallel — a memory spike that defeats "load once".
     with _engine_lock:
-        if _engine is not None:
-            return _engine
+        if device in _engines:
+            return _engines[device]
         path = str(model_manager.model_path())
         onnx_file = model_manager.model_path() / "model.onnx"
         built = None
         if onnx_file.is_file():
             try:
-                built = _OnnxEngine(path, str(onnx_file))
+                built = _OnnxEngine(path, str(onnx_file), device=device)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ONNX engine unavailable, falling back to torch: %s", exc)
         if built is None:
-            built = _TorchEngine(path)
-        _engine = built
-        return _engine
+            built = _TorchEngine(path, device=device)
+        _engines[device] = built
+        return built
 
 
 class _TorchEngine:
     """transformers + torch runtime for the desklib custom model."""
 
-    def __init__(self, model_dir: str):
+    def __init__(self, model_dir: str, device: str = "cpu"):
         import torch
         from transformers import AutoTokenizer, AutoConfig, AutoModel, PreTrainedModel
         import torch.nn as nn
 
         self.torch = torch
+        self.device = torch.device(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
         class _DesklibModel(PreTrainedModel):
             config_class = AutoConfig
+
+            @property
+            def all_tied_weights_keys(self):
+                return self._tied_weights_keys or {}
 
             def __init__(self, config):
                 super().__init__(config)
                 self.model = AutoModel.from_config(config)
                 self.classifier = nn.Linear(config.hidden_size, 1)
                 self.init_weights()
+
+            @classmethod
+            def from_pretrained(cls, model_dir, **kwargs):
+                """Load with key remapping: checkpoint uses 'model.*' / 'deberta.*',
+                our wrapper uses 'model.*' via AutoModel — remap 'deberta.*' → 'model.*'."""
+                import torch
+                from pathlib import Path
+                from safetensors.torch import load_file
+
+                # Load raw weights
+                sf_path = Path(model_dir) / "model.safetensors"
+                if sf_path.exists():
+                    state_dict = load_file(str(sf_path))
+                else:
+                    pt_path = Path(model_dir) / "pytorch_model.bin"
+                    state_dict = torch.load(str(pt_path), map_location="cpu")
+
+                # Remap 'deberta.*' → 'model.*' to match our wrapper's structure
+                remapped = {}
+                for k, v in state_dict.items():
+                    if k.startswith("deberta."):
+                        remapped["model." + k[len("deberta."):]] = v
+                    else:
+                        remapped[k] = v
+
+                from transformers import AutoConfig as _AutoConfig
+                config = _AutoConfig.from_pretrained(model_dir)
+                model = cls(config)
+                missing, unexpected = model.load_state_dict(remapped, strict=False)
+                model.eval()
+                return model, {"missing_keys": missing, "unexpected_keys": unexpected}
 
             def forward(self, input_ids, attention_mask=None, **_):
                 outputs = self.model(input_ids, attention_mask=attention_mask)
@@ -252,7 +324,9 @@ class _TorchEngine:
         self._ai_index: Optional[int] = None
         _info = None
         try:
-            self.model, _info = _DesklibModel.from_pretrained(model_dir, output_loading_info=True)
+            self.model, _info = _DesklibModel.from_pretrained(
+                model_dir, output_loading_info=True
+            )
         except Exception:  # noqa: BLE001
             # Fall back to a standard sequence-classification head if the
             # installed model isn't the desklib custom architecture.
@@ -260,6 +334,7 @@ class _TorchEngine:
             self._std = AutoModelForSequenceClassification.from_pretrained(model_dir)
             self.model = None
             self._std.eval()
+            self._std.to(self.device)
             num_labels = int(getattr(self._std.config, "num_labels", 1) or 1)
             if num_labels > 1:
                 self._ai_index = _ai_positive_index(getattr(self._std.config, "id2label", None))
@@ -273,9 +348,8 @@ class _TorchEngine:
                     )
         else:
             # If the checkpoint didn't actually contain the classifier head,
-            # from_pretrained leaves it at random init and does NOT raise —
-            # scoring would then return sigmoid over garbage. Refuse rather
-            # than fabricate scores (a random head could band human text high).
+            # loading with strict=False leaves it at random init and does not
+            # raise. Refuse rather than fabricate scores.
             missing = set((_info or {}).get("missing_keys") or [])
             if any(k.startswith("classifier") for k in missing):
                 raise ValueError(
@@ -283,6 +357,7 @@ class _TorchEngine:
                     "(would score with a random head); refusing to run."
                 )
             self.model.eval()
+            self.model.to(self.device)
             self._std = None
 
     def score(self, text: str) -> float:
@@ -290,6 +365,7 @@ class _TorchEngine:
         enc = self.tokenizer(
             text, truncation=True, max_length=_MAX_TOKENS, return_tensors="pt"
         )
+        enc = {key: value.to(self.device) for key, value in enc.items()}
         with torch.no_grad():
             if self.model is not None:
                 logit = self.model(enc["input_ids"], attention_mask=enc["attention_mask"])
@@ -304,14 +380,20 @@ class _TorchEngine:
 class _OnnxEngine:
     """onnxruntime runtime (used only if a model.onnx with a head exists)."""
 
-    def __init__(self, model_dir: str, onnx_path: str):
+    def __init__(self, model_dir: str, onnx_path: str, device: str = "cpu"):
         import onnxruntime as ort
         from transformers import AutoTokenizer, AutoConfig
         import numpy as np
 
         self.np = np
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        self.session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        if device == "cuda":
+            if "CUDAExecutionProvider" not in ort.get_available_providers():
+                raise RuntimeError("ONNX Runtime CUDA provider is not available")
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+        self.session = ort.InferenceSession(onnx_path, providers=providers)
         self.input_names = {i.name for i in self.session.get_inputs()}
         # Resolve the AI-positive class index from the config for multi-class
         # heads (single-logit heads use sigmoid and ignore this).

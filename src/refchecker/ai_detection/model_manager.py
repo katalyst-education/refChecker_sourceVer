@@ -95,23 +95,90 @@ def model_status() -> Dict[str, object]:
         "path": str(model_path()),
         "size_bytes": size,
         "deps_available": deps_available(),
+        **device_status(),
     }
 
 
-def deps_available() -> bool:
-    """Whether an inference runtime (onnxruntime OR torch+transformers) exists."""
+def _onnx_deps_available() -> bool:
     try:
         import onnxruntime  # noqa: F401
         import transformers  # noqa: F401
         return True
     except Exception:  # noqa: BLE001
-        pass
+        return False
+
+
+def _torch_deps_available() -> bool:
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def deps_available() -> bool:
+    """Whether the installed/downloadable weights have a usable runtime.
+
+    ONNX Runtime can only load an actual ``model.onnx`` artifact. The managed
+    desklib repository currently ships PyTorch safetensors, so before download
+    (and for a safetensors-only install) require torch + transformers instead
+    of reporting an ONNX-only environment as ready and failing during load.
+    """
+    p = model_path()
+    if (p / "model.onnx").is_file() and _onnx_deps_available():
+        return True
+    if any((p / name).is_file() for name in ("model.safetensors", "pytorch_model.bin")):
+        return _torch_deps_available()
+    # The known managed download is safetensors-only.
+    return _torch_deps_available()
+
+
+def device_status() -> Dict[str, object]:
+    """Return local-inference device capabilities for API/UI selection."""
+    cuda_available = False
+    cuda_device_name = None
+    p = model_path()
+
+    # Prefer the runtime matching installed weights. The managed checkpoint is
+    # safetensors-only, so CUDA-enabled PyTorch is the normal GPU path.
+    if any((p / name).is_file() for name in ("model.safetensors", "pytorch_model.bin")) \
+            or not is_model_installed():
+        try:
+            import torch
+            cuda_available = bool(torch.cuda.is_available())
+            if cuda_available:
+                cuda_device_name = torch.cuda.get_device_name(0)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # A manually supplied ONNX model may use ONNX Runtime's CUDA provider.
+    if not cuda_available and (p / "model.onnx").is_file():
+        try:
+            import onnxruntime as ort
+            cuda_available = "CUDAExecutionProvider" in ort.get_available_providers()
+            if cuda_available:
+                cuda_device_name = "ONNX Runtime CUDA"
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "cpu_available": deps_available(),
+        "cuda_available": cuda_available,
+        "cuda_device_name": cuda_device_name,
+    }
+
+
+def device_available(device: str) -> bool:
+    normalized = (device or "cpu").strip().lower()
+    if normalized == "gpu":
+        normalized = "cuda"
+    status = device_status()
+    if normalized == "cpu":
+        return bool(status["cpu_available"])
+    if normalized == "cuda":
+        return bool(status["cuda_available"])
+    return False
 
 
 def _download_worker() -> None:

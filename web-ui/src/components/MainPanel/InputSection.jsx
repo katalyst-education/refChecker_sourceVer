@@ -26,6 +26,7 @@ function aiDetectionValues() {
   const s = useAiDetectionStore.getState()
   if (!s.enabled) return null
   const out = { ai_detection_enabled: true, ai_detection_backend: s.backend }
+  if (s.backend === 'local') out.ai_detection_device = s.device
   if (s.backend === 'api') {
     out.ai_detection_service = s.service
     out.ai_detection_consent = !!s.consent

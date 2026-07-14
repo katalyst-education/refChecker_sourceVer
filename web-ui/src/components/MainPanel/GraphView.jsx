@@ -2,6 +2,7 @@ import { useMemo, useRef, useEffect, useState, lazy, Suspense } from 'react'
 import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import { fetchCitationGraph, expandPaper } from '../../utils/api'
 import { openExternal } from '../../utils/tauriBridge'
+import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 
 // Lazy-load the heavy graph lib so the rest of the app stays light when
 // the user never opens the Graph tab.
@@ -71,6 +72,7 @@ function graphToCanvasPoint(transform, x, y) {
  * that paper's top outgoing references and add them as new nodes).
  */
 export default function GraphView({ references, paperTitle }) {
+  const aiDetectionDevice = useAiDetectionStore((state) => state.device)
   const containerRef = useRef(null)
   const fgRef = useRef(null)
   const autoFittingRef = useRef(false)
@@ -316,7 +318,7 @@ export default function GraphView({ references, paperTitle }) {
       // Pass title so the backend can fall back to title-search when
       // the DOI/arXiv-keyed /references lookup returns empty.
       const refTitle = node.ref?.title || node.label || null
-      const res = await expandPaper({ paper_id: node.paperId, limit: 6, title: refTitle, ai_detection: aiGenMode })
+      const res = await expandPaper({ paper_id: node.paperId, limit: 6, title: refTitle, ai_detection: aiGenMode, ai_detection_device: aiDetectionDevice })
       const items = res.data?.items || []
       const additions = items
         .filter(it => it.paperId)
@@ -431,7 +433,7 @@ export default function GraphView({ references, paperTitle }) {
           try {
             // Pass title so the backend can fall back to title-search
             // when /references comes back empty for this DOI/arXiv.
-            const res = await expandPaper({ paper_id: node.paperId, limit: 8, title: node.title, ai_detection: aiGenMode })
+            const res = await expandPaper({ paper_id: node.paperId, limit: 8, title: node.title, ai_detection: aiGenMode, ai_detection_device: aiDetectionDevice })
             const items = res.data?.items || []
             const additions = items
               .filter(it => it.paperId)

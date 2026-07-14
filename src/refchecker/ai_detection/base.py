@@ -109,6 +109,7 @@ class AIDetectionResult:
     spans: List[SuspectSpan] = field(default_factory=list)
     backend_used: Optional[str] = None
     model_version: Optional[str] = None
+    device_used: Optional[str] = None
     operating_point: Optional[str] = None
     abstain_reason: Optional[str] = None
     word_count: int = 0
@@ -123,6 +124,7 @@ class AIDetectionResult:
             "spans": [s.to_dict() for s in self.spans],
             "backend_used": self.backend_used,
             "model_version": self.model_version,
+            "device_used": self.device_used,
             "operating_point": self.operating_point,
             "abstain_reason": self.abstain_reason,
             "word_count": self.word_count,

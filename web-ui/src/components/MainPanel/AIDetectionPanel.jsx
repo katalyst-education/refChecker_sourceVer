@@ -26,6 +26,8 @@ const ABSTAIN_REASONS = {
   insufficient_signal: 'There was not enough reliable signal to produce a score.',
   model_not_installed: 'The local detection model is not downloaded. Download it in Settings → AI Detection.',
   deps_not_installed: 'The local detection runtime is not installed. See Settings → AI Detection.',
+  device_unavailable: 'The selected GPU is unavailable to the backend. Choose CPU or install a CUDA-enabled runtime.',
+  invalid_device: 'The selected local detection device is invalid. Choose CPU or GPU in Settings → AI Detection.',
   model_load_failed: 'The local detection model failed to load.',
   inference_failed: 'The local detection model failed to run.',
   llm_not_configured: 'No LLM is configured for the LLM-judge backend — set one up in Settings → LLM.',
@@ -75,6 +77,7 @@ export default function AIDetectionPanel({ detection }) {
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
             AI text check
             {detection.backend_used ? ` · ${detection.backend_used}` : ''}
+            {detection.device_used ? ` · ${detection.device_used === 'cuda' ? 'GPU' : detection.device_used.toUpperCase()}` : ''}
             {detection.model_version ? ` · ${detection.model_version}` : ''}
           </span>
         </div>

@@ -14,6 +14,7 @@ const STORAGE_KEY = 'refchecker.aiDetection.v1'
 const DEFAULTS = {
   enabled: false,
   backend: 'local',     // 'local' | 'llm-judge' | 'api'
+  device: 'cpu',        // 'cpu' | 'cuda' for the local backend
   service: 'pangram',   // for backend === 'api': 'pangram' | 'gptzero'
   consent: false,       // explicit consent required for the API backend
 }
@@ -21,7 +22,11 @@ const DEFAULTS = {
 function load() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return { ...DEFAULTS, ...JSON.parse(raw) }
+    if (raw) {
+      const loaded = { ...DEFAULTS, ...JSON.parse(raw) }
+      if (!['cpu', 'cuda'].includes(loaded.device)) loaded.device = DEFAULTS.device
+      return loaded
+    }
   } catch (e) {
     logger.warn('AiDetectionStore', 'Failed to load preferences', e)
   }
@@ -33,6 +38,7 @@ function persist(state) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       enabled: state.enabled,
       backend: state.backend,
+      device: state.device,
       service: state.service,
       consent: state.consent,
     }))
@@ -51,6 +57,7 @@ export const useAiDetectionStore = create((set, get) => ({
 
   setEnabled: (enabled) => { set({ enabled }); persist(get()) },
   setBackend: (backend) => { set({ backend }); persist(get()) },
+  setDevice: (device) => { set({ device }); persist(get()) },
   setService: (service) => { set({ service }); persist(get()) },
   setConsent: (consent) => { set({ consent }); persist(get()) },
 

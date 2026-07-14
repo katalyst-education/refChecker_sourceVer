@@ -11,7 +11,7 @@ import sys
 import tempfile
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 from urllib.parse import urlparse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Body, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,6 +126,7 @@ MAX_BATCH_UPLOAD_TOTAL_BYTES = int(os.environ.get("MAX_BATCH_UPLOAD_TOTAL_BYTES"
 MAX_BATCH_ARCHIVE_BYTES = int(os.environ.get("MAX_BATCH_ARCHIVE_BYTES", str(250 * 1024 * 1024)))
 MAX_BATCH_SIZE = int(os.environ.get("MAX_BATCH_SIZE", "1000"))
 LLMConfigId = Union[int, str]
+AIDetectionDevice = Literal["cpu", "cuda"]
 ENV_LLM_CONFIG_ID_PREFIX = "env:"
 
 
@@ -955,6 +956,7 @@ class BatchUrlsRequest(BaseModel):
     paperclip_api_key: Optional[str] = None
     ai_detection_enabled: bool = False
     ai_detection_backend: str = "local"
+    ai_detection_device: AIDetectionDevice = "cpu"
     ai_detection_api_key: Optional[str] = None
     ai_detection_consent: bool = False
     ai_detection_service: str = "pangram"
@@ -1440,6 +1442,7 @@ async def start_check(
     paperclip_api_key: Optional[str] = Form(None),
     ai_detection_enabled: bool = Form(False),
     ai_detection_backend: str = Form("local"),
+    ai_detection_device: AIDetectionDevice = Form("cpu"),
     ai_detection_api_key: Optional[str] = Form(None),
     ai_detection_consent: bool = Form(False),
     ai_detection_service: str = Form("pangram"),
@@ -1480,6 +1483,7 @@ async def start_check(
         paperclip_api_key = _form_default_value(paperclip_api_key)
         ai_detection_enabled = _form_default_value(ai_detection_enabled)
         ai_detection_backend = _form_default_value(ai_detection_backend)
+        ai_detection_device = _form_default_value(ai_detection_device)
         ai_detection_api_key = _form_default_value(ai_detection_api_key)
         ai_detection_consent = _form_default_value(ai_detection_consent)
         ai_detection_service = _form_default_value(ai_detection_service)
@@ -1675,6 +1679,7 @@ async def start_check(
                 hallucination_endpoint=resolved_hallucination_endpoint,
                 ai_detection_enabled=ai_detection_enabled,
                 ai_detection_backend=ai_detection_backend,
+                ai_detection_device=ai_detection_device,
                 ai_detection_api_key=ai_detection_api_key,
                 ai_detection_consent=ai_detection_consent,
                 ai_detection_service=ai_detection_service,
@@ -1721,6 +1726,7 @@ async def run_check(
     hallucination_endpoint: Optional[str] = None,
     ai_detection_enabled: bool = False,
     ai_detection_backend: str = "local",
+    ai_detection_device: str = "cpu",
     ai_detection_api_key: Optional[str] = None,
     ai_detection_consent: bool = False,
     ai_detection_service: str = "pangram",
@@ -1843,6 +1849,7 @@ async def run_check(
             hallucination_endpoint=hallucination_endpoint,
             ai_detection_enabled=ai_detection_enabled,
             ai_detection_backend=ai_detection_backend,
+            ai_detection_device=ai_detection_device,
             ai_detection_api_key=ai_detection_api_key,
             ai_detection_consent=ai_detection_consent,
             ai_detection_service=ai_detection_service,
@@ -2943,6 +2950,7 @@ async def start_batch_check(
                     hallucination_endpoint=resolved_hallucination_endpoint,
                     ai_detection_enabled=request.ai_detection_enabled,
                     ai_detection_backend=request.ai_detection_backend,
+                    ai_detection_device=request.ai_detection_device,
                     ai_detection_api_key=request.ai_detection_api_key,
                     ai_detection_consent=request.ai_detection_consent,
                     ai_detection_service=request.ai_detection_service,
@@ -2996,6 +3004,7 @@ async def start_batch_check_files(
     paperclip_api_key: Optional[str] = Form(None),
     ai_detection_enabled: bool = Form(False),
     ai_detection_backend: str = Form("local"),
+    ai_detection_device: AIDetectionDevice = Form("cpu"),
     ai_detection_api_key: Optional[str] = Form(None),
     ai_detection_consent: bool = Form(False),
     ai_detection_service: str = Form("pangram"),
@@ -3022,6 +3031,7 @@ async def start_batch_check_files(
         paperclip_api_key = _form_default_value(paperclip_api_key)
         ai_detection_enabled = _form_default_value(ai_detection_enabled)
         ai_detection_backend = _form_default_value(ai_detection_backend)
+        ai_detection_device = _form_default_value(ai_detection_device)
         ai_detection_api_key = _form_default_value(ai_detection_api_key)
         ai_detection_consent = _form_default_value(ai_detection_consent)
         ai_detection_service = _form_default_value(ai_detection_service)
@@ -3212,6 +3222,7 @@ async def start_batch_check_files(
                     hallucination_endpoint=resolved_hallucination_endpoint,
                     ai_detection_enabled=ai_detection_enabled,
                     ai_detection_backend=ai_detection_backend,
+                    ai_detection_device=ai_detection_device,
                     ai_detection_api_key=ai_detection_api_key,
                     ai_detection_consent=ai_detection_consent,
                     ai_detection_service=ai_detection_service,
@@ -6279,6 +6290,7 @@ class _ExpandRequest(BaseModel):
     # Abstracts are short, so most come back "inconclusive" — this is an
     # advisory signal, never proof, and it never incurs API/LLM cost.
     ai_detection: bool = False
+    ai_detection_device: AIDetectionDevice = "cpu"
 
 
 @app.post("/api/papers/expand")
@@ -6524,7 +6536,8 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
                     return
                 async with _ai_sem:
                     res = await asyncio.to_thread(
-                        run_detection, abstract, title=it.get("title"), backend="local"
+                        run_detection, abstract, title=it.get("title"), backend="local",
+                        device=req.ai_detection_device,
                     )
                 it["ai_detection_band"] = res.band
                 it["ai_detection_score"] = res.overall_score
@@ -6886,9 +6899,9 @@ async def ai_detection_model_download(current_user: UserInfo = Depends(require_u
             status_code=400,
             detail=(
                 "Local detection runtime not installed. Install the optional "
-                "dependencies (onnxruntime + transformers, or torch + "
-                "transformers) to use the local model, or pick the LLM-judge "
-                "or API backend in Settings."
+                "dependencies (torch + transformers) for the managed model, "
+                "or pick the LLM-judge or API backend in Settings. ONNX Runtime "
+                "can be used only when the model directory contains model.onnx."
             ),
         )
     return model_manager.start_download()

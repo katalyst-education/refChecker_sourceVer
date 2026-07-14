@@ -277,6 +277,7 @@ class ArxivReferenceChecker:
                  llm_config=None, debug_mode=False, enable_parallel=True, max_workers=6,
                  report_file=None, report_format='json', cache_dir=None,
                  db_paths=None, database_directory=None,
+                 ai_detection_enabled=False, ai_detection_device='cpu',
                  # Deprecated parameters kept for backward compatibility
                  scan_mode='standard', only_flagged=False):
         # Initialize the reference checker for non-arXiv references
@@ -297,6 +298,10 @@ class ArxivReferenceChecker:
         self.report_file = report_file
         self.report_format = report_format
         self.last_bibliography_extraction_method = None
+        self.ai_detection_enabled = bool(ai_detection_enabled)
+        self.ai_detection_device = (ai_detection_device or 'cpu').lower()
+        self.ai_detection_results = []
+        self.last_paper_text = ''
 
         # Initialize optional LLM hallucination verifier
         # If a separate hallucination provider is specified, use it; otherwise
@@ -590,7 +595,53 @@ class ArxivReferenceChecker:
 
     def _build_structured_report_payload(self):
         """Build the structured summary, paper rollups, and records payload."""
-        return self.report_builder.build_structured_report_payload(self.errors, self._get_report_stats())
+        payload = self.report_builder.build_structured_report_payload(
+            self.errors, self._get_report_stats()
+        )
+        if getattr(self, 'ai_detection_enabled', False):
+            payload['ai_detection'] = list(getattr(self, 'ai_detection_results', []))
+        return payload
+
+    def _paper_text_for_ai_detection(self, paper):
+        """Reuse extraction output, fetching text only after a bibliography-cache hit."""
+        if self.last_paper_text:
+            return self.last_paper_text
+        if getattr(paper, 'is_text_refs', False) or getattr(paper, 'is_bibtex', False):
+            return ''
+        try:
+            if getattr(paper, 'is_latex', False):
+                return self.extract_text_from_latex(paper.file_path) or ''
+            pdf_content = self.download_pdf(paper)
+            return self.extract_text_from_pdf(pdf_content) if pdf_content else ''
+        except Exception as exc:
+            logger.warning("Could not extract manuscript text for AI detection: %s", exc)
+            return ''
+
+    def _run_ai_detection_for_paper(self, paper):
+        """Run the same shared local detector used by WebUI and bulk requests."""
+        from refchecker.ai_detection import run_detection
+
+        result = run_detection(
+            self._paper_text_for_ai_detection(paper),
+            title=getattr(paper, 'title', None),
+            backend='local',
+            device=self.ai_detection_device,
+        )
+        entry = {
+            'paper': self._build_current_paper_info(paper),
+            **result.to_dict(),
+        }
+        self.ai_detection_results.append(entry)
+        score = (
+            f" · score {result.overall_score:.3f}"
+            if result.overall_score is not None else ''
+        )
+        reason = f" · {result.abstain_reason}" if result.abstain_reason else ''
+        print(
+            f"   AI text check: {result.band} · {result.device_used or self.ai_detection_device}"
+            f"{score}{reason}"
+        )
+        return result
 
     def _build_hallucination_console_lines(self, payload=None, max_papers=5):
         """Build a compact bulk triage summary for hallucination scans."""
@@ -4358,6 +4409,9 @@ class ArxivReferenceChecker:
                         bibliography = self._deduplicate_bibliography_entries(bibliography)
                         if len(bibliography) < original_count:
                             logger.debug(f"Deduplicated {original_count} references to {len(bibliography)} unique references")
+
+                    if self.ai_detection_enabled and not self.fatal_error:
+                        self._run_ai_detection_for_paper(paper)
                                         
                     # Update statistics
                     self.total_papers_processed += 1
@@ -6603,6 +6657,7 @@ class ArxivReferenceChecker:
         paper_id = paper.get_short_id()
         logger.debug(f"Extracting bibliography for paper {paper_id}: {paper.title}")
         self.last_bibliography_extraction_method = None
+        self.last_paper_text = ''
         pdf_content = None
         from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
 
@@ -6756,6 +6811,7 @@ class ArxivReferenceChecker:
         elif hasattr(paper, 'is_latex') and paper.is_latex:
             # Extract text from LaTeX file
             text = self.extract_text_from_latex(paper.file_path)
+            self.last_paper_text = text or ''
             
             # Try programmatic LaTeX extraction first
             latex_format = detect_latex_bibliography_format(text)
@@ -6807,6 +6863,7 @@ class ArxivReferenceChecker:
             
             # Extract text from PDF
             text = self.extract_text_from_pdf(pdf_content)
+            self.last_paper_text = text or ''
             self.last_bibliography_extraction_method = 'pdf'
         
         if not text:
@@ -6877,6 +6934,9 @@ class ArxivReferenceChecker:
                 return grobid_references
             logger.warning(f"Could not find bibliography section for {paper_id}")
             return []
+
+        # A pdftotext retry may have replaced the initial extraction.
+        self.last_paper_text = text or self.last_paper_text
         
         # Save the bibliography text for debugging
         if debug_mode:
@@ -7837,6 +7897,10 @@ def main():
                         help="Disable parallel processing and run sequentially")
     parser.add_argument("--max-workers", type=int, default=6,
                         help="Maximum number of worker threads for parallel processing (default: 6)")
+    parser.add_argument("--ai-detection", action="store_true",
+                        help="Also run advisory local AI-generated-text detection on each paper")
+    parser.add_argument("--ai-detection-device", choices=["cpu", "cuda"], default="cpu",
+                        help="Compute device for local AI detection (default: cpu)")
 
     args = parser.parse_args()
 
@@ -7970,6 +8034,8 @@ def main():
             report_file=args.report_file,
             report_format=report_format,
             cache_dir=args.cache,
+            ai_detection_enabled=args.ai_detection,
+            ai_detection_device=args.ai_detection_device,
         )
         
         if checker.fatal_error:

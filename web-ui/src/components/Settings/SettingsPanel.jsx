@@ -627,7 +627,29 @@ export default function SettingsPanel({ theme, onThemeChange }) {
 
         {/* Local model management */}
         {backend === 'local' && (
-          <div className="rounded-lg p-3 border" style={{ borderColor: 'var(--color-border)' }}>
+          <div className="rounded-lg p-3 border space-y-3" style={{ borderColor: 'var(--color-border)' }}>
+            <div>
+              <label htmlFor="ai-detection-device" className="font-medium block mb-1" style={{ color: 'var(--color-text-primary)' }}>
+                Compute device
+              </label>
+              <select
+                id="ai-detection-device"
+                value={aiDetection.device}
+                onChange={(e) => aiDetection.setDevice(e.target.value)}
+                className="px-2 py-1.5 rounded border text-sm"
+                style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-secondary)', color: 'var(--color-text-primary)' }}
+              >
+                <option value="cpu">CPU</option>
+                <option value="cuda" disabled={ms != null && !ms.cuda_available}>
+                  GPU (CUDA){ms?.cuda_device_name ? ` — ${ms.cuda_device_name}` : ''}
+                </option>
+              </select>
+              <div className="text-xs mt-1" style={{ color: 'var(--color-text-muted, #94a3b8)' }}>
+                {ms?.cuda_available
+                  ? `CUDA is available${ms.cuda_device_name ? ` on ${ms.cuda_device_name}` : ''}. GPU is faster for long papers and batches.`
+                  : 'CUDA is not available to this backend process. CPU remains supported.'}
+              </div>
+            </div>
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>Local detection model</div>
@@ -636,7 +658,7 @@ export default function SettingsPanel({ theme, onThemeChange }) {
                   {ms && ms.installed && `Installed${ms.size_bytes ? ` · ${fmtMB(ms.size_bytes)}` : ''} · ${ms.repo}`}
                   {ms && !ms.installed && ms.deps_available && 'Not downloaded yet.'}
                   {ms && !ms.installed && !ms.deps_available &&
-                    'Runtime not installed. Install onnxruntime + transformers (or torch + transformers), or use another engine.'}
+                    'Runtime not installed. The managed model requires torch + transformers. ONNX Runtime works only with a model.onnx artifact.'}
                 </div>
                 {aiDetection.modelError && (
                   <div className="text-xs mt-1" style={{ color: 'var(--color-error, #ef4444)' }}>{aiDetection.modelError}</div>

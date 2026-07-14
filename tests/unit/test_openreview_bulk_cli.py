@@ -252,3 +252,36 @@ def test_main_openreview_list_only_exits_after_fetch(monkeypatch, tmp_path, caps
 
     assert exit_code == 0
     assert 'Fetched 2 accepted OpenReview papers for ICLR 2024 into' in captured.out
+
+
+def test_main_threads_ai_detection_device_to_single_and_bulk_checker(monkeypatch):
+    captured = {}
+
+    class FakeChecker:
+        fatal_error = False
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, **kwargs):
+            captured['run'] = kwargs
+
+    monkeypatch.setattr(refchecker_module, 'ArxivReferenceChecker', FakeChecker)
+    monkeypatch.setattr(
+        refchecker_module, 'resolve_input_spec', lambda _spec: ('paper-id', None)
+    )
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        [
+            'academic-refchecker',
+            '--paper', 'paper-id',
+            '--ai-detection',
+            '--ai-detection-device', 'cuda',
+        ],
+    )
+
+    assert refchecker_module.main() is None
+    assert captured['ai_detection_enabled'] is True
+    assert captured['ai_detection_device'] == 'cuda'
+    assert captured['run']['specific_paper_id'] == 'paper-id'

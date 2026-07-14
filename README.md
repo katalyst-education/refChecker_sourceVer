@@ -392,6 +392,20 @@ When enabled (Settings → AI Detection), each checked article's **body text** i
 | **LLM judge** | Reuses your configured LLM provider (OpenAI/Anthropic/Google/Azure) with an anti-false-positive rubric | LLM tokens | Uncalibrated, so it is **hard-capped at "medium"** — it can never raise a standalone "high" |
 | **External API** | Pangram or GPTZero | Per-word $ | Requires an API key **and** explicit consent (your manuscript text is sent to a third party) |
 
+For the local model, choose **CPU** or **GPU (CUDA)** under Settings → AI Detection.
+CPU is the compatibility default. GPU uses CUDA-enabled PyTorch (or an ONNX CUDA
+provider when a `model.onnx` artifact is installed) and is especially useful for
+long papers and batches. An explicit GPU selection never silently falls back to
+CPU; if CUDA is unavailable, the result reports that the selected device could
+not run.
+
+The same choice is available for single-paper and bulk CLI runs:
+
+```bash
+python run_refchecker.py --paper paper.pdf --ai-detection --ai-detection-device cuda
+python run_refchecker.py --paper-list papers.txt --ai-detection --ai-detection-device cpu
+```
+
 ### Usage & cost tracking
 
 AI-detection work is metered in the same per-check token/$ badge under an **"AI-generated-text detection"** flow: the **local** model records the processed word count at **$0**; the **API** backends record words sent plus an estimated dollar cost; the **LLM-judge** records real input/output tokens and their cost.
