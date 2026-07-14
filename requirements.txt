@@ -56,8 +56,8 @@ huggingface_hub>=1.12.0
 # llm-judge and api backends need none of these. The managed desklib download
 # currently contains PyTorch safetensors, so torch is required for that model.
 # An ONNX-only installation works only when the model directory has model.onnx.
-# pip install torch transformers
-# pip install onnxruntime transformers        # for a model.onnx artifact
+# pip install torch (Version: 2.11.0+cu128) transformers (Version: 5.13.1)
+# pip install onnxruntime (Version: 1.27.0) transformers (Version: 5.13.1)       # for a model.onnx artifact
 
 # Development dependencies
 pytest>=9.0.3

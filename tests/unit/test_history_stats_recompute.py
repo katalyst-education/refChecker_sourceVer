@@ -56,6 +56,13 @@ def test_history_recomputes_display_stats_from_results_json(tmp_path):
             "suggestions": [],
         },
     ]
+    ai_detection = {
+        "overall_score": 0.73,
+        "band": "high",
+        "backend_used": "local",
+        "device_used": "cuda",
+        "word_count": 1842,
+    }
 
     check_id = _run(db.create_pending_check(
         paper_title="Towards a Formal Theory of Representational Compositionality",
@@ -78,6 +85,7 @@ def test_history_recomputes_display_stats_from_results_json(tmp_path):
         status="completed",
         refs_with_suggestions_only=99,
         hallucination_count=99,
+        ai_detection=ai_detection,
     ))
 
     history_item = _run(db.get_history(limit=1))[0]
@@ -104,6 +112,9 @@ def test_history_recomputes_display_stats_from_results_json(tmp_path):
     # frontend citation-style/cosmetic filtering cannot change their badges
     # merely because the user clicked the row.
     assert history_item["results"] == detail_item["results"] == results
+    assert history_item["ai_detection"] == detail_item["ai_detection"] == ai_detection
+    assert history_item["ai_detection_score"] == detail_item["ai_detection_score"] == 0.73
+    assert history_item["ai_detection_band"] == detail_item["ai_detection_band"] == "high"
 
 
 def test_in_progress_history_counts_processed_unverified_refs_pending_hallucination(tmp_path):

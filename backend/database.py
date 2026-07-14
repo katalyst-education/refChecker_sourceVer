@@ -965,7 +965,8 @@ class Database:
                 "refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified, "
                 "llm_provider, llm_model, hallucination_provider, hallucination_model, "
                 "status, source_type, batch_id, batch_label, "
-                "bibliography_source_kind, original_filename, results_json"
+                "bibliography_source_kind, original_filename, results_json, "
+                "ai_detection_json, ai_detection_score, ai_detection_band"
             )
             if user_id is not None:
                 query = f"""
@@ -990,7 +991,18 @@ class Database:
                 for row in rows:
                     item = dict(row)
                     raw_results = item.pop('results_json', None)
+                    raw_ai_detection = item.pop('ai_detection_json', None)
                     item.setdefault('refs_with_suggestions_only', 0)
+                    if raw_ai_detection:
+                        try:
+                            parsed_ai_detection = json.loads(raw_ai_detection)
+                        except (ValueError, TypeError):
+                            parsed_ai_detection = None
+                        if isinstance(parsed_ai_detection, dict):
+                            # Match get_check_by_id's public response shape so
+                            # a history row and its detail response hydrate the
+                            # AI panel identically after a page reload.
+                            item['ai_detection'] = parsed_ai_detection
                     # v0.7.65: recompute display stats from results_json
                     # so processed_refs / unverified_count reflect the
                     # actual reference array (the persisted aggregate
