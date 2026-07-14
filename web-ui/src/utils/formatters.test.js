@@ -1,8 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue } from './formatters'
 
 describe('formatters', () => {
   describe('formatDate', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
     it('should format ISO date string', () => {
       const result = formatDate('2024-01-08T10:30:00')
       expect(result).toBeTruthy()
@@ -13,6 +17,23 @@ describe('formatters', () => {
       const now = new Date()
       const result = formatDate(now)
       expect(result).toContain('Today')
+    })
+
+    it('labels the previous calendar date as yesterday even when it is less than 24 hours ago', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 6, 14, 9, 0, 0))
+
+      const result = formatDate(new Date(2026, 6, 13, 16, 0, 0))
+
+      expect(result).toContain('Yesterday')
+      expect(result).not.toContain('Today')
+    })
+
+    it('labels an earlier time on the same calendar date as today', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(2026, 6, 14, 23, 30, 0))
+
+      expect(formatDate(new Date(2026, 6, 14, 0, 15, 0))).toContain('Today')
     })
 
     it('should handle invalid dates', () => {

@@ -17,14 +17,20 @@ export function formatDate(date) {
   }
   const d = new Date(input)
   const now = new Date()
-  const diffMs = now - d
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+  // "Today" and "Yesterday" are calendar labels, not elapsed-time
+  // buckets.  Comparing `now - d` made (for example) yesterday at 16:00
+  // appear as Today until 16:00 the following day.  Normalize both values
+  // to local midnight; rounding also keeps the calculation stable across
+  // 23/25-hour daylight-saving transitions.
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const dateDay = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const diffDays = Math.round((today - dateDay) / (1000 * 60 * 60 * 24))
   
   if (diffDays === 0) {
     return `Today at ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
   } else if (diffDays === 1) {
     return `Yesterday at ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-  } else if (diffDays < 7) {
+  } else if (diffDays > 1 && diffDays < 7) {
     return d.toLocaleDateString([], { weekday: 'long', hour: '2-digit', minute: '2-digit' })
   } else {
     return d.toLocaleDateString([], { 
