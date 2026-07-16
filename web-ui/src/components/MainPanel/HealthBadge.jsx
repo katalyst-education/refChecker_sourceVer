@@ -16,7 +16,7 @@ import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
  * dropdown. Matches what the Corrections view shows.
  */
 
-function computeScore(references, style) {
+export function computeScore(references, style) {
   const list = Array.isArray(references) ? references : []
   const total = list.length
   if (total === 0) return { score: null, total: 0 }
@@ -40,7 +40,13 @@ function computeScore(references, style) {
       ? r
       : { ...r, errors: styleFilteredErrors, warnings: styleFilteredWarnings }
     const effective = getEffectiveReferenceStatus(filteredRef, true)
-    if (effective === 'verified') verified += 1
+    // Keep the health numerator aligned with computeReferenceStats: web-URL
+    // verification is verified evidence, and a suggestion-only reference is
+    // also verified (the suggestion is an optional improvement, not a failed
+    // verification). Their distinct statuses remain available for display.
+    if (effective === 'verified' || effective === 'website_verified' || effective === 'suggestion') {
+      verified += 1
+    }
     if (effective === 'hallucination' || effective === 'hallucinated' ||
         r?.hallucination_assessment?.verdict?.toUpperCase?.() === 'LIKELY') {
       halluc += 1
