@@ -161,7 +161,7 @@ export default function InputSection() {
     try {
       // Get selected LLM configs
       const config = getSelectedExtractionConfig?.() || getSelectedConfig()
-      const hallucinationConfig = getSelectedHallucinationConfig?.() || config
+      const hallucinationConfig = getSelectedHallucinationConfig?.() ?? null
       
       // Sanitize URL input to handle duplicated URLs (e.g., from double paste)
       const sanitizedUrl = inputMode === 'url' ? sanitizeUrlInput(inputValue) : null
@@ -298,7 +298,7 @@ export default function InputSection() {
 
     try {
       const config = getSelectedExtractionConfig?.() || getSelectedConfig()
-      const hallucinationConfig = getSelectedHallucinationConfig?.() || config
+      const hallucinationConfig = getSelectedHallucinationConfig?.() ?? null
       const { addToHistory } = useHistoryStore.getState()
       const keyStore = useKeyStore.getState()
       const llmKey = getConfigApiKey(keyStore, config)
