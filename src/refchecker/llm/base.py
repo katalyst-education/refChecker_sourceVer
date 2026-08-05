@@ -19,6 +19,7 @@ class LLMProvider(ABC):
         self.config = config
         self.model = config.get("model")
         self.max_tokens = config.get("max_tokens", 4000)
+        self.context_length = config.get("context_length")
         self.temperature = config.get("temperature", 0.1)
         self.progress_callback = None  # Optional callback: fn(chunk_completed, total_chunks)
     
@@ -132,23 +133,30 @@ class LLMProvider(ABC):
         if not self.is_available():
             raise Exception(f"{self.__class__.__name__} not available")
         
-        # Get model's max_tokens from configuration - try to get provider-specific config
-        from refchecker.config.settings import get_config
-        config = get_config()
-        
-        # Try to get provider-specific max_tokens, fall back to general config
-        provider_name = self.__class__.__name__.lower().replace('provider', '')
-        model_max_tokens = config.get('llm', {}).get(provider_name, {}).get('max_tokens', self.max_tokens)
-        
         # Check if bibliography is too long and needs chunking
         estimated_tokens = len(bibliography_text) // 4  # Rough estimate
         
         # Account for prompt overhead
         prompt_overhead = 300  # Conservative estimate for prompt template and system messages
-        # Ensure prompt is < 1/2 the model's total token limit to leave room for response
-        max_input_tokens = (model_max_tokens // 2) - prompt_overhead
+        output_budget = int(self.max_tokens)
+        if self.context_length:
+            # Chat-completion context is shared by prompt and completion. Reference
+            # extraction produces roughly as much text as it consumes, so also cap
+            # input at the output budget to avoid a truncated reference list.
+            context_input_budget = int(self.context_length) - output_budget - prompt_overhead
+            max_input_tokens = min(output_budget, context_input_budget)
+        else:
+            # Preserve the legacy conservative behavior for providers whose context
+            # window is unknown.
+            max_input_tokens = (output_budget // 2) - prompt_overhead
+        max_input_tokens = max(128, max_input_tokens)
         
-        logger.debug(f"Using model max_tokens: {model_max_tokens}, max_input_tokens: {max_input_tokens}")
+        logger.debug(
+            "Using output budget %d, context length %s, max input tokens %d",
+            output_budget,
+            self.context_length or "unknown",
+            max_input_tokens,
+        )
         
         if estimated_tokens > max_input_tokens:
             logger.debug(f"Bibliography too long ({estimated_tokens} estimated tokens), splitting into chunks")
@@ -545,7 +553,14 @@ class ReferenceExtractor:
 
 def create_llm_provider(provider_name: str, config: Dict[str, Any]) -> Optional[LLMProvider]:
     """Factory function to create LLM provider instances"""
-    from .providers import OpenAIProvider, AnthropicProvider, GoogleProvider, AzureProvider, vLLMProvider
+    from .providers import (
+        AnthropicProvider,
+        AzureProvider,
+        GoogleProvider,
+        LMStudioProvider,
+        OpenAIProvider,
+        vLLMProvider,
+    )
     
     providers = {
         "openai": OpenAIProvider,
@@ -553,6 +568,7 @@ def create_llm_provider(provider_name: str, config: Dict[str, Any]) -> Optional[
         "google": GoogleProvider,
         "azure": AzureProvider,
         "vllm": vLLMProvider,
+        "lmstudio": LMStudioProvider,
     }
     
     if provider_name not in providers:

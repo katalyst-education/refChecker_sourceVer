@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic.fields import FieldInfo
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import logging
 from refchecker.__version__ import __version__
 from refchecker.utils.database_config import DATABASE_BUILD_DEPENDENCIES, DATABASE_FILE_ALIASES, DATABASE_LABELS, DATABASE_UPDATE_ORDER, resolve_database_paths
@@ -477,10 +477,10 @@ async def _schedule_database_refreshes() -> Dict[str, asyncio.Task]:
 def _ensure_allowed_web_llm_provider(provider_name: Optional[str]) -> None:
     """Reject web-only providers that are unsafe in multi-user deployments."""
     normalized = (provider_name or "").strip().lower()
-    if is_multiuser_mode() and normalized == "vllm":
+    if is_multiuser_mode() and normalized in {"vllm", "lmstudio"}:
         raise HTTPException(
             status_code=403,
-            detail="vLLM is only supported in single-user local deployments",
+            detail=f"{provider_name} is only supported in single-user local deployments",
         )
 
 
@@ -506,7 +506,7 @@ def _env_llm_config_for_provider(provider_name: str) -> Optional[Dict[str, Any]]
     from refchecker.config.settings import DEFAULT_EXTRACTION_MODELS, resolve_api_key, resolve_endpoint
 
     provider = _normalize_llm_provider_name(provider_name)
-    if provider == "vllm" or provider not in DEFAULT_EXTRACTION_MODELS:
+    if provider in {"vllm", "lmstudio"} or provider not in DEFAULT_EXTRACTION_MODELS:
         return None
     if not resolve_api_key(provider):
         return None
@@ -602,13 +602,26 @@ async def _resolve_llm_config_for_request(
     llm_model: Optional[str],
     api_key: Optional[str],
     require_hallucination_capable: bool = False,
-) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """Resolve provider/model/key/endpoint from form fields plus a saved config."""
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+]:
+    """Resolve provider/model/key/endpoint and generation settings."""
     if not use_llm:
-        return llm_provider, llm_model, api_key, None
+        return llm_provider, llm_model, api_key, None, None, None, None, None
 
     effective_api_key = api_key
     endpoint = None
+    reasoning_effort = None
+    max_tokens = None
+    context_length = None
+    timeout_seconds = None
     provider = llm_provider
     model = llm_model
 
@@ -620,6 +633,10 @@ async def _resolve_llm_config_for_request(
             if not effective_api_key:
                 effective_api_key = config.get('api_key')
             endpoint = config.get('endpoint')
+            reasoning_effort = config.get('reasoning_effort')
+            max_tokens = config.get('max_tokens')
+            context_length = config.get('context_length')
+            timeout_seconds = config.get('timeout_seconds')
             provider = config.get('provider', provider)
             model = config.get('model') or model
             logger.info(f"Using LLM config {llm_config_id}: {provider}/{model}")
@@ -644,7 +661,16 @@ async def _resolve_llm_config_for_request(
     if require_hallucination_capable:
         _ensure_hallucination_capable_provider(provider)
 
-    return provider, model, effective_api_key, endpoint
+    return (
+        provider,
+        model,
+        effective_api_key,
+        endpoint,
+        reasoning_effort,
+        max_tokens,
+        context_length,
+        timeout_seconds,
+    )
 
 
 async def _reuse_provider_key_for_new_config(
@@ -694,6 +720,10 @@ async def _validate_llm_connection_or_raise(
     model: Optional[str],
     api_key: Optional[str],
     endpoint: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    context_length: Optional[int] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> None:
     """Validate an LLM provider/model/key combination before persisting it."""
     _ensure_allowed_web_llm_provider(provider)
@@ -708,6 +738,14 @@ async def _validate_llm_connection_or_raise(
             llm_config['api_key'] = api_key
         if endpoint:
             llm_config['endpoint'] = endpoint
+        if reasoning_effort:
+            llm_config['reasoning_effort'] = reasoning_effort
+        if max_tokens:
+            llm_config['max_tokens'] = max_tokens
+        if context_length:
+            llm_config['context_length'] = context_length
+        if timeout_seconds:
+            llm_config['timeout_seconds'] = timeout_seconds
 
         llm_provider = create_llm_provider(provider, llm_config)
         if not llm_provider:
@@ -913,6 +951,10 @@ class LLMConfigCreate(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     endpoint: Optional[str] = None
+    reasoning_effort: Optional[Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    max_tokens: Optional[int] = Field(default=None, ge=128, le=262144)
+    context_length: Optional[int] = Field(default=None, ge=1024, le=1048576)
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=604800)
 
 
 class LLMConfigUpdate(BaseModel):
@@ -921,6 +963,10 @@ class LLMConfigUpdate(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     endpoint: Optional[str] = None
+    reasoning_effort: Optional[Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    max_tokens: Optional[int] = Field(default=None, ge=128, le=262144)
+    context_length: Optional[int] = Field(default=None, ge=1024, le=1048576)
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=604800)
 
 
 class LLMConfigValidate(BaseModel):
@@ -929,6 +975,10 @@ class LLMConfigValidate(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     endpoint: Optional[str] = None
+    reasoning_effort: Optional[Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    max_tokens: Optional[int] = Field(default=None, ge=128, le=262144)
+    context_length: Optional[int] = Field(default=None, ge=1024, le=1048576)
+    timeout_seconds: Optional[int] = Field(default=None, ge=10, le=604800)
 
 
 class CheckLabelUpdate(BaseModel):
@@ -1499,7 +1549,16 @@ async def start_check(
 
         # API keys from form (browser storage) take precedence over stored keys.
         logger.info(f"API key from form: {'present' if api_key else 'MISSING'}, use_llm={use_llm}, provider={llm_provider}")
-        llm_provider, llm_model, effective_api_key, endpoint = await _resolve_llm_config_for_request(
+        (
+            llm_provider,
+            llm_model,
+            effective_api_key,
+            endpoint,
+            llm_reasoning_effort,
+            llm_max_tokens,
+            llm_context_length,
+            llm_timeout_seconds,
+        ) = await _resolve_llm_config_for_request(
             user_id=user_id,
             use_llm=use_llm,
             llm_config_id=llm_config_id,
@@ -1517,6 +1576,10 @@ async def start_check(
                 resolved_hallucination_model,
                 resolved_hallucination_api_key,
                 resolved_hallucination_endpoint,
+                _resolved_hallucination_reasoning_effort,
+                _resolved_hallucination_max_tokens,
+                _resolved_hallucination_context_length,
+                _resolved_hallucination_timeout_seconds,
             ) = await _resolve_llm_config_for_request(
                 user_id=user_id,
                 use_llm=use_llm,
@@ -1677,6 +1740,10 @@ async def start_check(
                 hallucination_model=resolved_hallucination_model,
                 hallucination_api_key=resolved_hallucination_api_key,
                 hallucination_endpoint=resolved_hallucination_endpoint,
+                reasoning_effort=llm_reasoning_effort,
+                max_tokens=llm_max_tokens,
+                context_length=llm_context_length,
+                timeout_seconds=llm_timeout_seconds,
                 ai_detection_enabled=ai_detection_enabled,
                 ai_detection_backend=ai_detection_backend,
                 ai_detection_device=ai_detection_device,
@@ -1731,6 +1798,10 @@ async def run_check(
     ai_detection_consent: bool = False,
     ai_detection_service: str = "pangram",
     paperclip_api_key: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    context_length: Optional[int] = None,
+    timeout_seconds: Optional[int] = None,
 ):
     """
     Run reference check in background and emit progress updates
@@ -1833,6 +1904,10 @@ async def run_check(
             llm_model=llm_model,
             api_key=api_key,
             endpoint=endpoint,
+            reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens,
+            context_length=context_length,
+            timeout_seconds=timeout_seconds,
             use_llm=use_llm,
             progress_callback=progress_callback,
             cancel_event=cancel_event,
@@ -2814,7 +2889,16 @@ async def start_batch_check(
             request.semantic_scholar_api_key
         )
 
-        llm_provider, llm_model, effective_api_key, endpoint = await _resolve_llm_config_for_request(
+        (
+            llm_provider,
+            llm_model,
+            effective_api_key,
+            endpoint,
+            llm_reasoning_effort,
+            llm_max_tokens,
+            llm_context_length,
+            llm_timeout_seconds,
+        ) = await _resolve_llm_config_for_request(
             user_id=user_id,
             use_llm=request.use_llm,
             llm_config_id=request.llm_config_id,
@@ -2832,6 +2916,10 @@ async def start_batch_check(
                 resolved_hallucination_model,
                 resolved_hallucination_api_key,
                 resolved_hallucination_endpoint,
+                _resolved_hallucination_reasoning_effort,
+                _resolved_hallucination_max_tokens,
+                _resolved_hallucination_context_length,
+                _resolved_hallucination_timeout_seconds,
             ) = await _resolve_llm_config_for_request(
                 user_id=user_id,
                 use_llm=request.use_llm,
@@ -2948,6 +3036,10 @@ async def start_batch_check(
                     hallucination_model=resolved_hallucination_model,
                     hallucination_api_key=resolved_hallucination_api_key,
                     hallucination_endpoint=resolved_hallucination_endpoint,
+                    reasoning_effort=llm_reasoning_effort,
+                    max_tokens=llm_max_tokens,
+                    context_length=llm_context_length,
+                    timeout_seconds=llm_timeout_seconds,
                     ai_detection_enabled=request.ai_detection_enabled,
                     ai_detection_backend=request.ai_detection_backend,
                     ai_detection_device=request.ai_detection_device,
@@ -3092,7 +3184,16 @@ async def start_batch_check_files(
             semantic_scholar_api_key
         )
 
-        llm_provider, llm_model, effective_api_key, endpoint = await _resolve_llm_config_for_request(
+        (
+            llm_provider,
+            llm_model,
+            effective_api_key,
+            endpoint,
+            llm_reasoning_effort,
+            llm_max_tokens,
+            llm_context_length,
+            llm_timeout_seconds,
+        ) = await _resolve_llm_config_for_request(
             user_id=user_id,
             use_llm=use_llm,
             llm_config_id=llm_config_id,
@@ -3110,6 +3211,10 @@ async def start_batch_check_files(
                 resolved_hallucination_model,
                 resolved_hallucination_api_key,
                 resolved_hallucination_endpoint,
+                _resolved_hallucination_reasoning_effort,
+                _resolved_hallucination_max_tokens,
+                _resolved_hallucination_context_length,
+                _resolved_hallucination_timeout_seconds,
             ) = await _resolve_llm_config_for_request(
                 user_id=user_id,
                 use_llm=use_llm,
@@ -3220,6 +3325,10 @@ async def start_batch_check_files(
                     hallucination_model=resolved_hallucination_model,
                     hallucination_api_key=resolved_hallucination_api_key,
                     hallucination_endpoint=resolved_hallucination_endpoint,
+                    reasoning_effort=llm_reasoning_effort,
+                    max_tokens=llm_max_tokens,
+                    context_length=llm_context_length,
+                    timeout_seconds=llm_timeout_seconds,
                     ai_detection_enabled=ai_detection_enabled,
                     ai_detection_backend=ai_detection_backend,
                     ai_detection_device=ai_detection_device,
@@ -3618,18 +3727,27 @@ async def create_llm_config(
                 provider=config.provider,
                 user_id=user_id,
             )
-        if store_key and not is_multiuser_mode():
+        is_local_provider = _normalize_llm_provider_name(config.provider) in {"vllm", "lmstudio"}
+        if not is_multiuser_mode() and (store_key or is_local_provider):
             await _validate_llm_connection_or_raise(
                 provider=config.provider,
                 model=config.model,
                 api_key=store_key,
                 endpoint=config.endpoint,
+                reasoning_effort=config.reasoning_effort,
+                max_tokens=config.max_tokens,
+                context_length=config.context_length,
+                timeout_seconds=config.timeout_seconds,
             )
         config_id = await db.create_llm_config(
             name=config.name,
             provider=config.provider,
             model=config.model,
             endpoint=config.endpoint,
+            reasoning_effort=config.reasoning_effort,
+            max_tokens=config.max_tokens,
+            context_length=config.context_length,
+            timeout_seconds=config.timeout_seconds,
             api_key=store_key,
             user_id=user_id,
         )
@@ -3639,6 +3757,10 @@ async def create_llm_config(
             "provider": config.provider,
             "model": config.model,
             "endpoint": config.endpoint,
+            "reasoning_effort": config.reasoning_effort,
+            "max_tokens": config.max_tokens,
+            "context_length": config.context_length,
+            "timeout_seconds": config.timeout_seconds,
             "is_default": False,
             "has_key": bool(store_key),
         }
@@ -3670,17 +3792,75 @@ async def update_llm_config(
         validation_provider = config.provider or existing_config.get('provider')
         validation_model = config.model if config.model is not None else existing_config.get('model')
         validation_endpoint = config.endpoint if config.endpoint is not None else existing_config.get('endpoint')
+        validation_reasoning_effort = (
+            config.reasoning_effort
+            if config.reasoning_effort is not None
+            else existing_config.get('reasoning_effort')
+        )
+        max_tokens_supplied = "max_tokens" in config.model_fields_set
+        context_length_supplied = "context_length" in config.model_fields_set
+        timeout_seconds_supplied = "timeout_seconds" in config.model_fields_set
+        validation_max_tokens = (
+            config.max_tokens
+            if max_tokens_supplied
+            else existing_config.get('max_tokens')
+        )
+        validation_context_length = (
+            config.context_length
+            if context_length_supplied
+            else existing_config.get('context_length')
+        )
+        validation_timeout_seconds = (
+            config.timeout_seconds
+            if timeout_seconds_supplied
+            else existing_config.get('timeout_seconds')
+        )
         validation_key = store_key or existing_config.get('api_key')
         provider_changed = config.provider is not None and config.provider != existing_config.get('provider')
         model_changed = config.model is not None and config.model != existing_config.get('model')
         endpoint_changed = config.endpoint is not None and config.endpoint != existing_config.get('endpoint')
+        reasoning_changed = (
+            config.reasoning_effort is not None
+            and config.reasoning_effort != existing_config.get('reasoning_effort')
+        )
+        max_tokens_changed = (
+            max_tokens_supplied
+            and config.max_tokens != existing_config.get('max_tokens')
+        )
+        context_length_changed = (
+            context_length_supplied
+            and config.context_length != existing_config.get('context_length')
+        )
+        timeout_seconds_changed = (
+            timeout_seconds_supplied
+            and config.timeout_seconds != existing_config.get('timeout_seconds')
+        )
         key_changed = bool(store_key)
-        if validation_key and not is_multiuser_mode() and (provider_changed or model_changed or endpoint_changed or key_changed):
+        is_local_provider = _normalize_llm_provider_name(validation_provider) in {"vllm", "lmstudio"}
+        should_validate = (
+            not is_multiuser_mode()
+            and (validation_key or is_local_provider)
+            and (
+                provider_changed
+                or model_changed
+                or endpoint_changed
+                or reasoning_changed
+                or max_tokens_changed
+                or context_length_changed
+                or timeout_seconds_changed
+                or key_changed
+            )
+        )
+        if should_validate:
             await _validate_llm_connection_or_raise(
                 provider=validation_provider,
                 model=validation_model,
                 api_key=validation_key,
                 endpoint=validation_endpoint,
+                reasoning_effort=validation_reasoning_effort,
+                max_tokens=validation_max_tokens,
+                context_length=validation_context_length,
+                timeout_seconds=validation_timeout_seconds,
             )
         success = await db.update_llm_config(
             config_id=config_id,
@@ -3688,6 +3868,13 @@ async def update_llm_config(
             provider=config.provider,
             model=config.model,
             endpoint=config.endpoint,
+            reasoning_effort=config.reasoning_effort,
+            max_tokens=config.max_tokens,
+            context_length=config.context_length,
+            timeout_seconds=config.timeout_seconds,
+            clear_max_tokens=max_tokens_supplied and config.max_tokens is None,
+            clear_context_length=context_length_supplied and config.context_length is None,
+            clear_timeout_seconds=timeout_seconds_supplied and config.timeout_seconds is None,
             api_key=store_key,
             user_id=user_id,
         )
@@ -3795,6 +3982,14 @@ async def validate_llm_config(
             llm_config['api_key'] = config.api_key
         if config.endpoint:
             llm_config['endpoint'] = config.endpoint
+        if config.reasoning_effort:
+            llm_config['reasoning_effort'] = config.reasoning_effort
+        if config.max_tokens:
+            llm_config['max_tokens'] = config.max_tokens
+        if config.context_length:
+            llm_config['context_length'] = config.context_length
+        if config.timeout_seconds:
+            llm_config['timeout_seconds'] = config.timeout_seconds
         
         # Try to create provider
         provider = create_llm_provider(config.provider, llm_config)
@@ -5415,6 +5610,14 @@ async def suggest_alternative_reference(
                 llm_config["api_key"] = default_cfg["api_key"]
             if default_cfg.get("endpoint"):
                 llm_config["endpoint"] = default_cfg["endpoint"]
+            if default_cfg.get("reasoning_effort"):
+                llm_config["reasoning_effort"] = default_cfg["reasoning_effort"]
+            if default_cfg.get("max_tokens"):
+                llm_config["max_tokens"] = default_cfg["max_tokens"]
+            if default_cfg.get("context_length"):
+                llm_config["context_length"] = default_cfg["context_length"]
+            if default_cfg.get("timeout_seconds"):
+                llm_config["timeout_seconds"] = default_cfg["timeout_seconds"]
             provider = create_llm_provider(default_cfg["provider"], llm_config)
             if provider and (not hasattr(provider, "is_available") or provider.is_available()):
                 authors = target.get("authors")
@@ -5741,6 +5944,14 @@ async def _find_similar_papers_impl(req: _SimilarPapersRequest, current_user: Us
                 llm_config["api_key"] = default_cfg["api_key"]
             if default_cfg.get("endpoint"):
                 llm_config["endpoint"] = default_cfg["endpoint"]
+            if default_cfg.get("reasoning_effort"):
+                llm_config["reasoning_effort"] = default_cfg["reasoning_effort"]
+            if default_cfg.get("max_tokens"):
+                llm_config["max_tokens"] = default_cfg["max_tokens"]
+            if default_cfg.get("context_length"):
+                llm_config["context_length"] = default_cfg["context_length"]
+            if default_cfg.get("timeout_seconds"):
+                llm_config["timeout_seconds"] = default_cfg["timeout_seconds"]
             provider = create_llm_provider(default_cfg["provider"], llm_config)
             if provider and (not hasattr(provider, "is_available") or provider.is_available()):
                 # Prime with up to 15 bibliography rows so the LLM can
@@ -6664,6 +6875,7 @@ _STATIC_MODEL_FALLBACK = {
         "meta-llama/Llama-3.3-70B-Instruct", "meta-llama/Llama-3.1-8B-Instruct",
         "mistralai/Mistral-7B-Instruct-v0.3", "Qwen/Qwen2.5-7B-Instruct",
     ],
+    "lmstudio": [],
 }
 
 
@@ -6680,6 +6892,7 @@ async def list_llm_models(req: _ListModelsRequest, current_user: UserInfo = Depe
     provider = (req.provider or "").lower().strip()
     if provider in ("gemini",):
         provider = "google"
+    _ensure_allowed_web_llm_provider(provider)
     api_key = (req.api_key or "").strip() or None
     endpoint = (req.endpoint or "").strip() or None
     if not api_key or not endpoint:
@@ -6690,6 +6903,7 @@ async def list_llm_models(req: _ListModelsRequest, current_user: UserInfo = Depe
 
     source = "fallback"
     models: list[str] = []
+    model_details: dict[str, dict[str, Any]] = {}
     error: Optional[str] = None
     try:
         if provider == "openai" and api_key:
@@ -6724,9 +6938,35 @@ async def list_llm_models(req: _ListModelsRequest, current_user: UserInfo = Depe
                         seen.add(name)
                 models = sorted(seen)
                 source = "live"
+        elif provider == "lmstudio" and endpoint:
+            import httpx
+            base_url = endpoint.rstrip("/")
+            if base_url.endswith("/v1"):
+                base_url = base_url[:-3].rstrip("/")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            r = await asyncio.to_thread(
+                httpx.get, f"{base_url}/api/v1/models", headers=headers, timeout=6.0
+            )
+            if r.status_code == 200:
+                for model in r.json().get("models", []):
+                    model_id = model.get("key")
+                    if not model_id:
+                        continue
+                    loaded_instances = model.get("loaded_instances") or []
+                    loaded_instance = loaded_instances[0] if loaded_instances else {}
+                    loaded_config = loaded_instance.get("config") or {}
+                    model_details[model_id] = {
+                        "loaded": bool(loaded_instances),
+                        "instance_id": loaded_instance.get("id"),
+                        "context_length": loaded_config.get("context_length"),
+                        "max_context_length": model.get("max_context_length"),
+                    }
+                models = sorted(model_details)
+                source = "live"
         elif provider == "vllm" and endpoint:
             import httpx
-            url = endpoint.rstrip("/") + "/v1/models"
+            base_url = endpoint.rstrip("/")
+            url = base_url + ("/models" if base_url.endswith("/v1") else "/v1/models")
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             r = await asyncio.to_thread(httpx.get, url, headers=headers, timeout=6.0)
             if r.status_code == 200:
@@ -6739,7 +6979,13 @@ async def list_llm_models(req: _ListModelsRequest, current_user: UserInfo = Depe
     if not models:
         models = list(_STATIC_MODEL_FALLBACK.get(provider, []))
 
-    return {"provider": provider, "source": source, "models": models, "error": error}
+    return {
+        "provider": provider,
+        "source": source,
+        "models": models,
+        "model_details": model_details,
+        "error": error,
+    }
 
 
 class _AutoPathRequest(BaseModel):

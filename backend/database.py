@@ -411,6 +411,10 @@ class Database:
                     provider TEXT NOT NULL,
                     model TEXT,
                     endpoint TEXT,
+                    reasoning_effort TEXT,
+                    max_tokens INTEGER,
+                    context_length INTEGER,
+                    timeout_seconds INTEGER,
                     api_key_encrypted TEXT,
                     is_default BOOLEAN DEFAULT 0,
                     user_id INTEGER REFERENCES users(id),
@@ -647,6 +651,14 @@ class Database:
             await db.execute("ALTER TABLE llm_configs ADD COLUMN user_id INTEGER REFERENCES users(id)")
         if "api_key_encrypted" not in llm_columns:
             await db.execute("ALTER TABLE llm_configs ADD COLUMN api_key_encrypted TEXT")
+        if "reasoning_effort" not in llm_columns:
+            await db.execute("ALTER TABLE llm_configs ADD COLUMN reasoning_effort TEXT")
+        if "max_tokens" not in llm_columns:
+            await db.execute("ALTER TABLE llm_configs ADD COLUMN max_tokens INTEGER")
+        if "context_length" not in llm_columns:
+            await db.execute("ALTER TABLE llm_configs ADD COLUMN context_length INTEGER")
+        if "timeout_seconds" not in llm_columns:
+            await db.execute("ALTER TABLE llm_configs ADD COLUMN timeout_seconds INTEGER")
 
         # Ensure is_admin column in users
         async with db.execute("PRAGMA table_info(users)") as cursor:
@@ -1437,7 +1449,8 @@ class Database:
             db.row_factory = aiosqlite.Row
             if user_id is not None:
                 query = """
-                    SELECT id, name, provider, model, endpoint, is_default, created_at,
+                    SELECT id, name, provider, model, endpoint, reasoning_effort,
+                           max_tokens, context_length, timeout_seconds, is_default, created_at,
                            (api_key_encrypted IS NOT NULL AND api_key_encrypted != '') AS has_key
                     FROM llm_configs
                     WHERE user_id = ?
@@ -1446,7 +1459,8 @@ class Database:
                 params = (user_id,)
             else:
                 query = """
-                    SELECT id, name, provider, model, endpoint, is_default, created_at,
+                    SELECT id, name, provider, model, endpoint, reasoning_effort,
+                           max_tokens, context_length, timeout_seconds, is_default, created_at,
                            (api_key_encrypted IS NOT NULL AND api_key_encrypted != '') AS has_key
                     FROM llm_configs
                     ORDER BY created_at DESC
@@ -1481,13 +1495,25 @@ class Database:
                                  model: Optional[str] = None,
                                  endpoint: Optional[str] = None,
                                  api_key: Optional[str] = None,
-                                 user_id: Optional[int] = None) -> int:
+                                 user_id: Optional[int] = None,
+                                 reasoning_effort: Optional[str] = None,
+                                 max_tokens: Optional[int] = None,
+                                 context_length: Optional[int] = None,
+                                 timeout_seconds: Optional[int] = None) -> int:
         """Create a new LLM configuration"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
-                INSERT INTO llm_configs (name, provider, model, endpoint, api_key_encrypted, user_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (name, provider, model, endpoint, encrypt_secret(api_key), user_id))
+                INSERT INTO llm_configs (
+                    name, provider, model, endpoint, reasoning_effort, max_tokens,
+                    context_length, timeout_seconds,
+                    api_key_encrypted, user_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                name, provider, model, endpoint, reasoning_effort, max_tokens,
+                context_length, timeout_seconds,
+                encrypt_secret(api_key), user_id,
+            ))
             await db.commit()
             return cursor.lastrowid
 
@@ -1498,7 +1524,14 @@ class Database:
                                  model: Optional[str] = None,
                                  endpoint: Optional[str] = None,
                                  api_key: Optional[str] = None,
-                                 user_id: Optional[int] = None) -> bool:
+                                 user_id: Optional[int] = None,
+                                 reasoning_effort: Optional[str] = None,
+                                 max_tokens: Optional[int] = None,
+                                 context_length: Optional[int] = None,
+                                 timeout_seconds: Optional[int] = None,
+                                 clear_max_tokens: bool = False,
+                                 clear_context_length: bool = False,
+                                 clear_timeout_seconds: bool = False) -> bool:
         """Update an existing LLM configuration"""
         updates = []
         params = []
@@ -1515,6 +1548,24 @@ class Database:
         if endpoint is not None:
             updates.append("endpoint = ?")
             params.append(endpoint)
+        if reasoning_effort is not None:
+            updates.append("reasoning_effort = ?")
+            params.append(reasoning_effort)
+        if clear_max_tokens:
+            updates.append("max_tokens = NULL")
+        elif max_tokens is not None:
+            updates.append("max_tokens = ?")
+            params.append(max_tokens)
+        if clear_context_length:
+            updates.append("context_length = NULL")
+        elif context_length is not None:
+            updates.append("context_length = ?")
+            params.append(context_length)
+        if clear_timeout_seconds:
+            updates.append("timeout_seconds = NULL")
+        elif timeout_seconds is not None:
+            updates.append("timeout_seconds = ?")
+            params.append(timeout_seconds)
         if api_key is not None:
             updates.append("api_key_encrypted = ?")
             params.append(encrypt_secret(api_key))

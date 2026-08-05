@@ -47,6 +47,55 @@ def test_llm_config_keys_are_encrypted_at_rest(database_module, tmp_path):
     assert config["api_key"] == "super-secret-key"
 
 
+def test_llm_config_persists_lmstudio_runtime_settings(database_module, tmp_path):
+    db = database_module.Database(str(tmp_path / "reasoning.db"))
+    _run(db.init_db())
+
+    config_id = _run(db.create_llm_config(
+        name="LM Studio",
+        provider="lmstudio",
+        model="qwen/test",
+        endpoint="http://localhost:1234",
+        reasoning_effort="none",
+        max_tokens=4000,
+        context_length=8192,
+        timeout_seconds=300,
+    ))
+
+    saved = _run(db.get_llm_config_by_id(config_id))
+    listed = _run(db.get_llm_configs())
+    assert saved["reasoning_effort"] == "none"
+    assert saved["max_tokens"] == 4000
+    assert saved["context_length"] == 8192
+    assert saved["timeout_seconds"] == 300
+    assert listed[0]["reasoning_effort"] == "none"
+    assert listed[0]["max_tokens"] == 4000
+    assert listed[0]["context_length"] == 8192
+    assert listed[0]["timeout_seconds"] == 300
+
+    assert _run(db.update_llm_config(
+        config_id,
+        reasoning_effort="low",
+        max_tokens=6000,
+        context_length=16384,
+        timeout_seconds=21600,
+    ))
+    updated = _run(db.get_llm_config_by_id(config_id))
+    assert updated["reasoning_effort"] == "low"
+    assert updated["max_tokens"] == 6000
+    assert updated["context_length"] == 16384
+    assert updated["timeout_seconds"] == 21600
+
+    assert _run(db.update_llm_config(
+        config_id,
+        clear_context_length=True,
+        clear_timeout_seconds=True,
+    ))
+    cleared = _run(db.get_llm_config_by_id(config_id))
+    assert cleared["context_length"] is None
+    assert cleared["timeout_seconds"] is None
+
+
 def test_app_settings_are_encrypted_at_rest(database_module, tmp_path):
     db_path = tmp_path / "settings.db"
     db = database_module.Database(str(db_path))

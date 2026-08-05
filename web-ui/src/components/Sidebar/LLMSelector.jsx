@@ -39,7 +39,7 @@ export default function LLMSelector({ mode = 'extraction' }) {
   //   multi-user: the current tab has a key for that provider
   const configHasKey = (config) => {
     if (!config) return false
-    if (config.provider === 'vllm') return true
+    if (['vllm', 'lmstudio'].includes(config.provider)) return true
     if (config.key_source === 'environment' || config.env_key_available) return true
     if (hasKeyInBrowser(`llm:${config.id}`)) return true
     if (hasKeyInBrowser(config.provider)) return true
@@ -248,7 +248,7 @@ export default function LLMSelector({ mode = 'extraction' }) {
                       {config.provider}{config.model ? ` / ${config.model}` : ''}
                       {config.key_source === 'environment' ? ' / server env key' : ''}
                       {!selectable ? ' / key needed' : ''}
-                      {config.provider === 'vllm' ? ' / extraction only' : ''}
+                      {['vllm', 'lmstudio'].includes(config.provider) ? ' / extraction only' : ''}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">

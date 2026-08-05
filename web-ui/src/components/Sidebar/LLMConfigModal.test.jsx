@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   updateConfig: vi.fn(),
   multiuser: false,
   validateLLMConfig: vi.fn(),
+  listLLMModels: vi.fn(),
   configs: [],
   hasKey: vi.fn(),
   getKey: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock('../../stores/useKeyStore', () => {
 
 vi.mock('../../utils/api', () => ({
   validateLLMConfig: mocks.validateLLMConfig,
-  listLLMModels: vi.fn(),
+  listLLMModels: mocks.listLLMModels,
 }))
 
 vi.mock('../../utils/logger', () => ({
@@ -50,6 +51,9 @@ describe('LLMConfigModal', () => {
     mocks.hasKey.mockReturnValue(false)
     mocks.getKey.mockReturnValue(null)
     mocks.validateLLMConfig.mockResolvedValue({ data: { valid: true } })
+    mocks.listLLMModels.mockResolvedValue({
+      data: { models: [], model_details: {}, source: 'live' },
+    })
     mocks.addConfig.mockResolvedValue({ id: 9, provider: 'anthropic', model: 'claude-sonnet-4-6' })
   })
 
@@ -107,5 +111,105 @@ describe('LLMConfigModal', () => {
         api_key: undefined,
       }))
     })
+  })
+
+  it('saves LM Studio with the selected reasoning effort', async () => {
+    render(<LLMConfigModal isOpen={true} onClose={vi.fn()} />)
+
+    fireEvent.change(screen.getByLabelText('Provider'), {
+      target: { value: 'lmstudio' },
+    })
+    fireEvent.change(screen.getByLabelText('Model'), {
+      target: { value: 'qwen/qwen3.6-35b-a3b' },
+    })
+    fireEvent.change(screen.getByLabelText('Reasoning effort'), {
+      target: { value: 'low' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Add Configuration/i }))
+
+    await waitFor(() => {
+      expect(mocks.validateLLMConfig).toHaveBeenCalledWith(expect.objectContaining({
+        provider: 'lmstudio',
+        model: 'qwen/qwen3.6-35b-a3b',
+        endpoint: 'http://localhost:1234',
+        reasoning_effort: 'low',
+        max_tokens: 4000,
+        timeout_seconds: 300,
+      }))
+      expect(mocks.addConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'lmstudio',
+          reasoning_effort: 'low',
+          max_tokens: 4000,
+          context_length: null,
+          timeout_seconds: 300,
+        }),
+        { selectFor: 'extraction' },
+      )
+    })
+  })
+
+  it('reads LM Studio context metadata and estimates reference-page input', async () => {
+    mocks.listLLMModels.mockResolvedValue({
+      data: {
+        models: ['qwen/qwen3.6-35b-a3b'],
+        model_details: {
+          'qwen/qwen3.6-35b-a3b': {
+            loaded: true,
+            context_length: 8192,
+            max_context_length: 262144,
+          },
+        },
+        source: 'live',
+      },
+    })
+    render(<LLMConfigModal isOpen={true} onClose={vi.fn()} />)
+
+    fireEvent.change(screen.getByLabelText('Provider'), {
+      target: { value: 'lmstudio' },
+    })
+    fireEvent.change(screen.getByLabelText('Model'), {
+      target: { value: 'qwen/qwen3.6-35b-a3b' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Fetch' }))
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Loaded model context').value).toBe('8192')
+      expect(screen.getByText(/Safe bibliography input per extraction call/).textContent)
+        .toMatch(/3[,.]892 tokens/)
+      expect(screen.getByText(/Safe bibliography input per extraction call/).textContent)
+        .toContain('4–6 reference pages')
+    })
+
+    fireEvent.change(screen.getByLabelText('Loaded model context'), {
+      target: { value: '16384' },
+    })
+    fireEvent.change(screen.getByLabelText('Maximum output tokens'), {
+      target: { value: '6000' },
+    })
+    fireEvent.change(screen.getByLabelText('Generation timeout (seconds)'), {
+      target: { value: '21600' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Add Configuration/i }))
+
+    await waitFor(() => {
+      expect(mocks.addConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'lmstudio',
+          max_tokens: 6000,
+          context_length: 16384,
+          timeout_seconds: 21600,
+        }),
+        { selectFor: 'extraction' },
+      )
+    })
+  })
+
+  it('hides local providers in multiuser mode', () => {
+    mocks.multiuser = true
+    render(<LLMConfigModal isOpen={true} onClose={vi.fn()} />)
+
+    expect(screen.queryByRole('option', { name: 'LM Studio (Local)' })).toBeNull()
+    expect(screen.queryByRole('option', { name: 'vLLM (Local)' })).toBeNull()
   })
 })

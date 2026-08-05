@@ -76,15 +76,15 @@ def get_llm_api_key_interactive(provider: str) -> str:
     then prompting interactively if not found.
     
     Args:
-        provider: LLM provider name (openai, anthropic, google, azure, vllm)
+        provider: LLM provider name (openai, anthropic, google, azure, vllm, lmstudio)
     
     Returns:
         API key string or None if not available
     """
     from refchecker.config.settings import _PROVIDER_ENV_VARS, resolve_api_key
 
-    # vLLM doesn't need an API key
-    if provider == 'vllm':
+    # Local providers don't need an API key
+    if provider in {'vllm', 'lmstudio'}:
         return None
 
     # Check environment variables via shared resolver
@@ -711,6 +711,14 @@ class ArxivReferenceChecker:
                 provider_config['api_key'] = self.llm_config_override['api_key']
             if self.llm_config_override.get('endpoint'):
                 provider_config['endpoint'] = self.llm_config_override['endpoint']
+            if self.llm_config_override.get('reasoning_effort'):
+                provider_config['reasoning_effort'] = self.llm_config_override['reasoning_effort']
+            if self.llm_config_override.get('max_tokens') is not None:
+                provider_config['max_tokens'] = self.llm_config_override['max_tokens']
+            if self.llm_config_override.get('context_length') is not None:
+                provider_config['context_length'] = self.llm_config_override['context_length']
+            if self.llm_config_override.get('timeout_seconds') is not None:
+                provider_config['timeout_seconds'] = self.llm_config_override['timeout_seconds']
                 
             # Update global LLM config with parallel processing overrides
             if 'parallel_chunks' in self.llm_config_override:
@@ -7872,12 +7880,32 @@ def main():
                         help="Report format (default: json)")
     
     # LLM configuration arguments
-    parser.add_argument("--llm-provider", type=str, choices=["openai", "anthropic", "google", "azure", "vllm"],
-                        help="Enable LLM with specified provider (openai, anthropic, google, azure, vllm)")
+    parser.add_argument("--llm-provider", type=str, choices=["openai", "anthropic", "google", "azure", "vllm", "lmstudio"],
+                        help="Enable LLM with specified provider (openai, anthropic, google, azure, vllm, lmstudio)")
     parser.add_argument("--llm-model", type=str,
                         help="LLM model to use (overrides default for the provider)")
     parser.add_argument("--llm-endpoint", type=str,
                         help="Endpoint for the LLM provider (overrides default endpoint)")
+    parser.add_argument(
+        "--llm-reasoning-effort",
+        choices=["default", "none", "minimal", "low", "medium", "high", "xhigh"],
+        help="Reasoning effort for providers that support it (LM Studio default: none)",
+    )
+    parser.add_argument(
+        "--llm-max-tokens",
+        type=int,
+        help="Maximum output tokens for LLM calls (LM Studio default: 4000)",
+    )
+    parser.add_argument(
+        "--llm-context-length",
+        type=int,
+        help="Loaded LM Studio model context length; reloads the selected model when changed",
+    )
+    parser.add_argument(
+        "--llm-timeout",
+        type=int,
+        help="Generation request timeout in seconds (LM Studio default: 300)",
+    )
     parser.add_argument("--llm-parallel-chunks", action="store_true", default=None,
                         help="Enable parallel processing of LLM chunks (default: enabled)")
     parser.add_argument("--llm-no-parallel-chunks", action="store_true",
@@ -7985,15 +8013,38 @@ def main():
     if args.llm_provider:
         # Get API key interactively if needed for LLM provider
         api_key = get_llm_api_key_interactive(args.llm_provider)
-        if api_key is None and args.llm_provider != 'vllm':
+        if api_key is None and args.llm_provider not in {'vllm', 'lmstudio'}:
             print(f"Error: API key is required for {args.llm_provider} provider.")
+            return 1
+        if args.llm_provider == 'lmstudio' and not args.llm_model:
+            print("Error: --llm-model is required for the lmstudio provider.")
+            return 1
+        if args.llm_max_tokens is not None and args.llm_max_tokens < 128:
+            print("Error: --llm-max-tokens must be at least 128.")
+            return 1
+        if args.llm_context_length is not None and args.llm_context_length < 1024:
+            print("Error: --llm-context-length must be at least 1024.")
+            return 1
+        if args.llm_timeout is not None and args.llm_timeout < 10:
+            print("Error: --llm-timeout must be at least 10 seconds.")
+            return 1
+        if (
+            args.llm_max_tokens is not None
+            and args.llm_context_length is not None
+            and args.llm_max_tokens >= args.llm_context_length
+        ):
+            print("Error: --llm-max-tokens must be smaller than --llm-context-length.")
             return 1
         
         llm_config = {
             'provider': args.llm_provider,
             'model': args.llm_model,
             'api_key': api_key,
-            'endpoint': args.llm_endpoint
+            'endpoint': args.llm_endpoint,
+            'reasoning_effort': args.llm_reasoning_effort,
+            'max_tokens': args.llm_max_tokens,
+            'context_length': args.llm_context_length,
+            'timeout_seconds': args.llm_timeout,
         }
         
         # Handle parallel chunk processing arguments

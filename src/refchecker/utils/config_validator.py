@@ -30,7 +30,7 @@ class ConfigValidator:
     
     def __init__(self):
         self.required_sections = ['llm', 'processing', 'apis']
-        self.llm_providers = ['openai', 'anthropic', 'google', 'azure', 'vllm']
+        self.llm_providers = ['openai', 'anthropic', 'google', 'azure', 'vllm', 'lmstudio']
         
     def validate_config(self, config: Dict[str, Any]) -> ValidationResult:
         """
@@ -128,6 +128,32 @@ class ConfigValidator:
                 errors.append("vLLM download_path must be a string")
             if 'auto_download' in config and not isinstance(config['auto_download'], bool):
                 errors.append("vLLM auto_download must be a boolean")
+        elif provider == 'lmstudio':
+            if 'server_url' in config and not isinstance(config['server_url'], str):
+                errors.append("LM Studio server_url must be a string")
+            if 'server_url' in config and not config['server_url'].startswith(('http://', 'https://')):
+                errors.append("LM Studio server_url must be a valid URL")
+            if config.get('reasoning_effort') not in {
+                None, 'default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'
+            }:
+                errors.append("LM Studio reasoning_effort is not supported")
+            context_length = config.get('context_length')
+            max_tokens = config.get('max_tokens')
+            timeout_seconds = config.get('timeout_seconds', config.get('timeout'))
+            if context_length is not None and (
+                not isinstance(context_length, int) or context_length < 1024
+            ):
+                errors.append("LM Studio context_length must be an integer of at least 1024")
+            if (
+                isinstance(context_length, int)
+                and isinstance(max_tokens, int)
+                and max_tokens >= context_length
+            ):
+                errors.append("LM Studio max_tokens must be smaller than context_length")
+            if timeout_seconds is not None and (
+                not isinstance(timeout_seconds, int) or timeout_seconds < 10
+            ):
+                errors.append("LM Studio timeout_seconds must be an integer of at least 10")
         
         return ValidationResult(len(errors) == 0, errors, warnings)
     

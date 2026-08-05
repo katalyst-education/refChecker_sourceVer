@@ -11,7 +11,7 @@ The Web UI provides a real-time interface for checking references in single pape
 - If an extraction LLM provider is configured, RefChecker uses it for higher-quality extraction from PDFs and unusual bibliography formats.
 - If no extraction LLM is configured, PDF extraction can fall back to GROBID.
 - Hallucination checks use a separate hallucination LLM selection when one is configured. The hallucination provider must be web-search capable: OpenAI, Anthropic, Google, or Azure.
-- Local vLLM can be selected for extraction, but it is not offered for hallucination checks because local models cannot perform live web search.
+- Local vLLM and LM Studio can be selected for extraction, but they are not offered for hallucination checks because local models cannot perform live web search. LM Studio configurations expose reasoning effort, maximum output tokens, loaded-model context length, and generation timeout; `none` reasoning is recommended for extraction.
 
 GROBID details:
 
@@ -121,7 +121,7 @@ When a local database is present, the Web UI uses it first and falls back to the
 
 ### Environment Variables
 
-LLM providers are optional for extraction but required for deep hallucination checks. The UI stores an extraction selection and a hallucination selection separately in the browser. Extraction may use OpenAI, Anthropic, Google, Azure, or vLLM. Hallucination checks only use OpenAI, Anthropic, Google, or Azure.
+LLM providers are optional for extraction but required for deep hallucination checks. The UI stores an extraction selection and a hallucination selection separately in the browser. Extraction may use OpenAI, Anthropic, Google, Azure, vLLM, or LM Studio. Hallucination checks only use OpenAI, Anthropic, Google, or Azure.
 
 ```bash
 export ANTHROPIC_API_KEY=your_key_here
@@ -131,7 +131,11 @@ export OPENAI_API_KEY=your_key_here
 export GOOGLE_API_KEY=your_key_here
 ```
 
-Saved LLM configurations include provider, model, optional endpoint, and API key state. When LLM provider keys are present in the server environment, the Web UI shows those providers as selectable server-environment configs and uses the server-side key without returning the secret to the browser. In single-user mode, user-entered API keys may be stored server-side in the local SQLite settings database. In multi-user mode, user-entered keys stay in the browser and are sent with each request; the server stores per-user configuration metadata but not browser-only keys.
+For LM Studio, `REFCHECKER_LMSTUDIO_CONTEXT_LENGTH`, `REFCHECKER_LMSTUDIO_MAX_TOKENS`, and `REFCHECKER_LMSTUDIO_TIMEOUT` provide the corresponding defaults outside saved Web UI configurations.
+
+Saved LLM configurations include provider, model, optional endpoint, reasoning/output/context settings, and API key state. When LLM provider keys are present in the server environment, the Web UI shows those providers as selectable server-environment configs and uses the server-side key without returning the secret to the browser. In single-user mode, user-entered API keys may be stored server-side in the local SQLite settings database. In multi-user mode, user-entered keys stay in the browser and are sent with each request; the server stores per-user configuration metadata but not browser-only keys.
+
+For an LM Studio configuration, click **Fetch** after entering the endpoint and model. RefChecker shows the currently loaded context and the model maximum. Editing the context and then testing or saving reloads only that LM Studio model instance, so local inference may be interrupted briefly. The generation timeout is measured in seconds and applies to each extraction request; use values such as `3600` (one hour) or `21600` (six hours) for very large completion budgets. The displayed reference-page estimate uses 600–900 tokens per dense bibliography page, reserves the configured output tokens plus roughly 300 prompt tokens, and reflects the safe input budget for one call. Longer bibliographies are chunked automatically.
 
 For a run, the Web UI sends both:
 
@@ -253,4 +257,4 @@ web-ui/
 
 - configure a hallucination-capable provider in Settings: OpenAI, Anthropic, Google, or Azure
 - make sure the selected hallucination configuration has an API key in the current mode
-- extraction can succeed through GROBID or vLLM without enabling deep hallucination verification
+- extraction can succeed through GROBID, vLLM, or LM Studio without enabling deep hallucination verification

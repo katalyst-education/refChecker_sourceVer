@@ -13,8 +13,14 @@ const PROVIDERS = [
   { id: 'anthropic', name: 'Anthropic', defaultModel: 'claude-sonnet-4-6', requiresKey: true, hallucinationCapable: true },
   { id: 'google', name: 'Google', defaultModel: 'gemini-3.1-flash-lite-preview', requiresKey: true, hallucinationCapable: true },
   { id: 'azure', name: 'Azure OpenAI', defaultModel: 'gpt-4.1', requiresKey: true, requiresEndpoint: true, hallucinationCapable: true },
-  { id: 'vllm', name: 'vLLM (Local)', defaultModel: 'meta-llama/Llama-3.1-8B-Instruct', requiresKey: false, requiresEndpoint: true, hallucinationCapable: false },
+  { id: 'vllm', name: 'vLLM (Local)', defaultModel: 'meta-llama/Llama-3.1-8B-Instruct', requiresKey: false, requiresEndpoint: true, isLocal: true, hallucinationCapable: false },
+  { id: 'lmstudio', name: 'LM Studio (Local)', defaultModel: '', requiresKey: false, requiresEndpoint: true, requiresModel: true, reasoningConfigurable: true, isLocal: true, hallucinationCapable: false },
 ]
+
+const LMSTUDIO_DEFAULT_MAX_TOKENS = 4000
+const LMSTUDIO_DEFAULT_TIMEOUT_SECONDS = 300
+const EXTRACTION_PROMPT_OVERHEAD_TOKENS = 300
+const REFERENCE_PAGE_TOKEN_RANGE = [600, 900]
 
 /**
  * Modal for adding/editing LLM configurations
@@ -31,10 +37,15 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
     model: '',
     api_key: '',
     endpoint: '',
+    reasoning_effort: 'none',
+    max_tokens: String(LMSTUDIO_DEFAULT_MAX_TOKENS),
+    context_length: '',
+    timeout_seconds: String(LMSTUDIO_DEFAULT_TIMEOUT_SECONDS),
   })
 
   // Live model lookup state
   const [modelOptions, setModelOptions] = useState([]) // string[]
+  const [modelDetails, setModelDetails] = useState({})
   const [modelSource, setModelSource] = useState(null) // 'live' | 'fallback' | null
   const [modelFetching, setModelFetching] = useState(false)
   const [modelError, setModelError] = useState(null)
@@ -55,16 +66,33 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
         model: source?.model || '',
         api_key: '',
         endpoint: source?.endpoint || '',
+        reasoning_effort: source?.reasoning_effort || 'none',
+        max_tokens: String(source?.max_tokens || LMSTUDIO_DEFAULT_MAX_TOKENS),
+        context_length: source?.context_length ? String(source.context_length) : '',
+        timeout_seconds: String(source?.timeout_seconds || LMSTUDIO_DEFAULT_TIMEOUT_SECONDS),
       })
+      setModelDetails({})
       setError(null)
     }
   }, [isOpen, editConfig, prefillConfig])
 
   const availableProviders = useMemo(
-    () => (multiuser ? PROVIDERS.filter(p => p.id !== 'vllm') : PROVIDERS),
+    () => (multiuser ? PROVIDERS.filter(p => !p.isLocal) : PROVIDERS),
     [multiuser],
   )
   const selectedProvider = availableProviders.find(p => p.id === formData.provider)
+  const selectedModelDetails = modelDetails[formData.model] || {}
+  const lmStudioBudget = useMemo(() => {
+    if (formData.provider !== 'lmstudio') return null
+    const contextLength = Number.parseInt(formData.context_length, 10)
+    const maxTokens = Number.parseInt(formData.max_tokens, 10)
+    if (!Number.isInteger(contextLength) || !Number.isInteger(maxTokens)) return null
+    const contextBudget = contextLength - maxTokens - EXTRACTION_PROMPT_OVERHEAD_TOKENS
+    const inputTokens = Math.max(0, Math.min(maxTokens, contextBudget))
+    const minPages = Math.floor(inputTokens / REFERENCE_PAGE_TOKEN_RANGE[1])
+    const maxPages = Math.floor(inputTokens / REFERENCE_PAGE_TOKEN_RANGE[0])
+    return { inputTokens, minPages, maxPages }
+  }, [formData.context_length, formData.max_tokens, formData.provider])
   const existingProviderConfig = configs.find(config => (
     config.provider === formData.provider &&
     config.id !== editConfig?.id &&
@@ -79,20 +107,27 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
 
   useEffect(() => {
     if (!multiuser) return
-    if (formData.provider === 'vllm') {
+    if (PROVIDERS.find(p => p.id === formData.provider)?.isLocal) {
       const fallbackProvider = availableProviders[0]
       setFormData(prev => ({
         ...prev,
         provider: fallbackProvider?.id || 'anthropic',
         model: '',
         endpoint: '',
+        reasoning_effort: 'none',
       }))
     }
   }, [availableProviders, formData.provider, multiuser])
 
   const handleChange = (e) => {
     const { name, value } = e.target
-    setFormData(prev => ({ ...prev, [name]: value }))
+    setFormData(prev => {
+      const next = { ...prev, [name]: value }
+      if (name === 'model' && modelDetails[value]?.context_length) {
+        next.context_length = String(modelDetails[value].context_length)
+      }
+      return next
+    })
     setError(null)
   }
 
@@ -102,10 +137,23 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
       ...prev,
       provider,
       model: '', // Reset model when provider changes
-      endpoint: provider === 'vllm' ? 'http://localhost:8000' : prev.endpoint,
+      endpoint: provider === 'vllm'
+        ? 'http://localhost:8000'
+        : provider === 'lmstudio'
+          ? 'http://localhost:1234'
+          : prev.endpoint,
+      reasoning_effort: provider === 'lmstudio' ? 'none' : prev.reasoning_effort,
+      max_tokens: provider === 'lmstudio'
+        ? String(LMSTUDIO_DEFAULT_MAX_TOKENS)
+        : prev.max_tokens,
+      context_length: provider === 'lmstudio' ? '' : prev.context_length,
+      timeout_seconds: provider === 'lmstudio'
+        ? String(LMSTUDIO_DEFAULT_TIMEOUT_SECONDS)
+        : prev.timeout_seconds,
     }))
     setError(null)
     setModelOptions([])
+    setModelDetails({})
     setModelSource(null)
     setModelError(null)
     setTestResult(null)
@@ -124,11 +172,21 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
         formData.endpoint.trim() || undefined,
       )
       setModelOptions(res.data.models || [])
+      const details = res.data.model_details || {}
+      setModelDetails(details)
       setModelSource(res.data.source || 'fallback')
+      const currentDetails = details[formData.model]
+      if (!formData.context_length && currentDetails?.context_length) {
+        setFormData(prev => ({
+          ...prev,
+          context_length: String(currentDetails.context_length),
+        }))
+      }
       if (res.data.error) setModelError(res.data.error)
     } catch (err) {
       setModelError(err.response?.data?.detail || err.message || 'Lookup failed')
       setModelOptions([])
+      setModelDetails({})
       setModelSource(null)
     } finally {
       setModelFetching(false)
@@ -147,6 +205,17 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
       setTestResult({ ok: false, message: 'Endpoint URL is required.' })
       return
     }
+    if (selectedProvider?.requiresModel && !formData.model.trim()) {
+      setTestResult({ ok: false, message: 'Select or enter a loaded model first.' })
+      return
+    }
+    if (formData.provider === 'lmstudio') {
+      const tokenError = validateLMStudioTokens()
+      if (tokenError) {
+        setTestResult({ ok: false, message: tokenError })
+        return
+      }
+    }
     setTesting(true)
     try {
       const payload = {
@@ -154,6 +223,14 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
         model: formData.model.trim() || selectedProvider?.defaultModel || null,
         api_key: formData.api_key.trim() || reusableProviderKey || undefined,
         endpoint: formData.endpoint.trim() || undefined,
+        reasoning_effort: selectedProvider?.reasoningConfigurable ? formData.reasoning_effort : undefined,
+        max_tokens: formData.provider === 'lmstudio' ? Number(formData.max_tokens) : undefined,
+        context_length: formData.provider === 'lmstudio' && formData.context_length
+          ? Number(formData.context_length)
+          : undefined,
+        timeout_seconds: formData.provider === 'lmstudio'
+          ? Number(formData.timeout_seconds)
+          : undefined,
       }
       const res = await validateLLMConfig(payload)
       if (res.data?.valid) {
@@ -171,6 +248,33 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
     }
   }
 
+  const validateLMStudioTokens = () => {
+    const maxTokens = Number(formData.max_tokens)
+    if (!Number.isInteger(maxTokens) || maxTokens < 128) {
+      return 'Maximum output tokens must be an integer of at least 128.'
+    }
+    if (formData.context_length) {
+      const contextLength = Number(formData.context_length)
+      if (!Number.isInteger(contextLength) || contextLength < 1024) {
+        return 'Loaded model context must be an integer of at least 1,024 tokens.'
+      }
+      if (maxTokens >= contextLength) {
+        return 'Maximum output tokens must be smaller than the loaded model context.'
+      }
+      if (
+        selectedModelDetails.max_context_length
+        && contextLength > selectedModelDetails.max_context_length
+      ) {
+        return `Loaded model context cannot exceed this model's maximum of ${Number(selectedModelDetails.max_context_length).toLocaleString()} tokens.`
+      }
+    }
+    const timeoutSeconds = Number(formData.timeout_seconds)
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 604800) {
+      return 'Generation timeout must be an integer from 10 to 604,800 seconds.'
+    }
+    return null
+  }
+
   const validate = () => {
     if (selectedProvider?.requiresKey && !editConfig && !formData.api_key.trim() && !hasReusableProviderKey) {
       setError('API key is required')
@@ -180,6 +284,17 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
     if (selectedProvider?.requiresEndpoint && !formData.endpoint.trim()) {
       setError('Endpoint URL is required')
       return false
+    }
+    if (selectedProvider?.requiresModel && !formData.model.trim()) {
+      setError('Model is required')
+      return false
+    }
+    if (formData.provider === 'lmstudio') {
+      const tokenError = validateLMStudioTokens()
+      if (tokenError) {
+        setError(tokenError)
+        return false
+      }
     }
 
     return true
@@ -202,6 +317,14 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
         provider: formData.provider,
         model: effectiveModel,
         endpoint: formData.endpoint.trim() || null,
+        reasoning_effort: selectedProvider?.reasoningConfigurable ? formData.reasoning_effort : null,
+        max_tokens: formData.provider === 'lmstudio' ? Number(formData.max_tokens) : null,
+        context_length: formData.provider === 'lmstudio' && formData.context_length
+          ? Number(formData.context_length)
+          : null,
+        timeout_seconds: formData.provider === 'lmstudio'
+          ? Number(formData.timeout_seconds)
+          : null,
       }
 
       const effectiveApiKey = formData.api_key.trim() || reusableProviderKey
@@ -212,7 +335,10 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
       }
 
       // Validate API connection before saving (only for new configs or when API key is provided)
-      if (selectedProvider?.requiresKey && (effectiveApiKey || (!editConfig && !existingProviderConfig))) {
+      if (
+        (selectedProvider?.requiresKey && (effectiveApiKey || (!editConfig && !existingProviderConfig))) ||
+        selectedProvider?.isLocal
+      ) {
         setIsValidating(true)
         try {
           const validationData = {
@@ -220,6 +346,10 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
             model: configData.model,
             api_key: effectiveApiKey,
             endpoint: configData.endpoint,
+            reasoning_effort: configData.reasoning_effort,
+            max_tokens: configData.max_tokens,
+            context_length: configData.context_length,
+            timeout_seconds: configData.timeout_seconds,
           }
           logger.info('LLMConfigModal', 'Validating API connection...', { provider: configData.provider, model: configData.model })
           const response = await validateLLMConfig(validationData)
@@ -352,7 +482,7 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
           >
             {selectedProvider?.hallucinationCapable
               ? 'Can be used for extraction and hallucination checks.'
-              : 'Local vLLM is available for extraction only.'}
+              : `${selectedProvider?.name || 'This local provider'} is available for extraction only.`}
           </p>
         </div>
 
@@ -364,9 +494,11 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
             style={{ color: 'var(--color-text-primary)' }}
           >
             Model
-            <span className="ml-1 font-normal" style={{ color: 'var(--color-text-muted)' }}>
-              (optional)
-            </span>
+            {!selectedProvider?.requiresModel && (
+              <span className="ml-1 font-normal" style={{ color: 'var(--color-text-muted)' }}>
+                (optional)
+              </span>
+            )}
           </label>
           <div className="flex gap-2">
             <input
@@ -409,7 +541,9 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
               ? `Live list from provider (${modelOptions.length} models). You can also type any model id.`
               : modelSource === 'fallback'
                 ? `Showing curated fallback list (${modelOptions.length} models). Type any model id, or click Fetch with a valid API key.`
-                : `Default: ${selectedProvider?.defaultModel}. Type any model id, or click Fetch to query the provider with your API key.`}
+                : selectedProvider?.defaultModel
+                  ? `Default: ${selectedProvider.defaultModel}. Type any model id, or click Fetch to query the provider with your API key.`
+                  : 'Enter a model id, or click Fetch to list models currently loaded by the local server.'}
           </p>
           {modelError && (
             <p className="mt-1 text-xs" style={{ color: 'var(--color-error, #ef4444)' }}>
@@ -483,7 +617,13 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
               name="endpoint"
               value={formData.endpoint}
               onChange={handleChange}
-              placeholder={formData.provider === 'vllm' ? 'http://localhost:8000' : 'https://your-resource.openai.azure.com'}
+              placeholder={
+                formData.provider === 'vllm'
+                  ? 'http://localhost:8000'
+                  : formData.provider === 'lmstudio'
+                    ? 'http://localhost:1234'
+                    : 'https://your-resource.openai.azure.com'
+              }
               className="w-full px-3 py-2 rounded-lg border focus:outline-none focus:ring-2"
               style={{
                 backgroundColor: 'var(--color-bg-secondary)',
@@ -491,6 +631,171 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
                 color: 'var(--color-text-primary)',
               }}
             />
+          </div>
+        )}
+
+        {/* LM Studio context and completion budgets */}
+        {formData.provider === 'lmstudio' && (
+          <div
+            className="space-y-3 rounded-lg border p-3"
+            style={{ borderColor: 'var(--color-border)' }}
+          >
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label
+                  htmlFor="context_length"
+                  className="block text-sm font-medium mb-1"
+                  style={{ color: 'var(--color-text-primary)' }}
+                >
+                  Loaded model context
+                </label>
+                <input
+                  type="number"
+                  id="context_length"
+                  name="context_length"
+                  min="1024"
+                  step="1024"
+                  list="lmstudio-context-options"
+                  value={formData.context_length}
+                  onChange={handleChange}
+                  placeholder="Fetch loaded value"
+                  className="w-full px-3 py-2 rounded-lg border focus:outline-none focus:ring-2"
+                  style={{
+                    backgroundColor: 'var(--color-bg-secondary)',
+                    borderColor: 'var(--color-border)',
+                    color: 'var(--color-text-primary)',
+                  }}
+                />
+                <datalist id="lmstudio-context-options">
+                  {[4096, 8192, 16384, 32768, 65536, 131072].map(value => (
+                    <option key={value} value={value} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
+                <label
+                  htmlFor="max_tokens"
+                  className="block text-sm font-medium mb-1"
+                  style={{ color: 'var(--color-text-primary)' }}
+                >
+                  Maximum output tokens
+                </label>
+                <input
+                  type="number"
+                  id="max_tokens"
+                  name="max_tokens"
+                  min="128"
+                  step="1"
+                  value={formData.max_tokens}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 rounded-lg border focus:outline-none focus:ring-2"
+                  style={{
+                    backgroundColor: 'var(--color-bg-secondary)',
+                    borderColor: 'var(--color-border)',
+                    color: 'var(--color-text-primary)',
+                  }}
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="timeout_seconds"
+                  className="block text-sm font-medium mb-1"
+                  style={{ color: 'var(--color-text-primary)' }}
+                >
+                  Generation timeout (seconds)
+                </label>
+                <input
+                  type="number"
+                  id="timeout_seconds"
+                  name="timeout_seconds"
+                  min="10"
+                  max="604800"
+                  step="1"
+                  list="lmstudio-timeout-options"
+                  value={formData.timeout_seconds}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 rounded-lg border focus:outline-none focus:ring-2"
+                  style={{
+                    backgroundColor: 'var(--color-bg-secondary)',
+                    borderColor: 'var(--color-border)',
+                    color: 'var(--color-text-primary)',
+                  }}
+                />
+                <datalist id="lmstudio-timeout-options">
+                  {[300, 900, 1800, 3600, 7200, 21600, 43200, 86400].map(value => (
+                    <option key={value} value={value} />
+                  ))}
+                </datalist>
+              </div>
+            </div>
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              Click Fetch after choosing the endpoint and model to read the currently loaded context.
+              {selectedModelDetails.context_length
+                ? ` Currently loaded: ${Number(selectedModelDetails.context_length).toLocaleString()} tokens.`
+                : ''}
+              {selectedModelDetails.max_context_length
+                ? ` Model maximum: ${Number(selectedModelDetails.max_context_length).toLocaleString()} tokens.`
+                : ''}
+              {' '}Testing or saving a changed context reloads this LM Studio model and may briefly interrupt local inference.
+              {' '}The generation timeout applies to each extraction call; for example, 3,600 seconds is one hour.
+            </p>
+            {lmStudioBudget && (
+              <p
+                className="rounded-md px-3 py-2 text-xs"
+                style={{
+                  backgroundColor: 'var(--color-bg-secondary)',
+                  color: lmStudioBudget.inputTokens > 0
+                    ? 'var(--color-text-secondary)'
+                    : 'var(--color-error, #ef4444)',
+                }}
+              >
+                Safe bibliography input per extraction call: about{' '}
+                {lmStudioBudget.inputTokens.toLocaleString()} tokens, roughly{' '}
+                {lmStudioBudget.minPages === lmStudioBudget.maxPages
+                  ? lmStudioBudget.minPages
+                  : `${lmStudioBudget.minPages}–${lmStudioBudget.maxPages}`}{' '}
+                reference pages. Estimate assumes 600–900 tokens per dense reference page,
+                reserves {Number(formData.max_tokens).toLocaleString()} output tokens and about{' '}
+                {EXTRACTION_PROMPT_OVERHEAD_TOKENS} prompt tokens. Longer bibliographies are split
+                into multiple calls.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* LM Studio reasoning control */}
+        {selectedProvider?.reasoningConfigurable && (
+          <div>
+            <label
+              htmlFor="reasoning_effort"
+              className="block text-sm font-medium mb-1"
+              style={{ color: 'var(--color-text-primary)' }}
+            >
+              Reasoning effort
+            </label>
+            <select
+              id="reasoning_effort"
+              name="reasoning_effort"
+              value={formData.reasoning_effort}
+              onChange={handleChange}
+              className="w-full px-3 py-2 rounded-lg border focus:outline-none focus:ring-2"
+              style={{
+                backgroundColor: 'var(--color-bg-secondary)',
+                borderColor: 'var(--color-border)',
+                color: 'var(--color-text-primary)',
+              }}
+            >
+              <option value="none">Disabled (recommended for extraction)</option>
+              <option value="minimal">Minimal</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="xhigh">Extra high</option>
+              <option value="default">LM Studio model default</option>
+            </select>
+            <p className="mt-1 text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              Disabled is fastest for extraction. If another level consumes the output budget without producing reference JSON, RefChecker retries once with reasoning disabled.
+            </p>
           </div>
         )}
 

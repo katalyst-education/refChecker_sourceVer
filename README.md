@@ -130,7 +130,7 @@ LLM extraction is generally more accurate, but PDFs can fall back to GROBID when
 |----------|-------------|
 | **Input formats** | ArXiv IDs/URLs, PDFs, LaTeX (.tex), BibTeX (.bib/.bbl), plain text |
 | **Verification sources** | Semantic Scholar, OpenAlex, CrossRef, DBLP, ACL Anthology |
-| **LLM extraction** | OpenAI, Anthropic, Google, Azure, or local vLLM for parsing complex bibliographies |
+| **LLM extraction** | OpenAI, Anthropic, Google, Azure, local vLLM, or LM Studio for parsing complex bibliographies |
 | **Metadata checks** | Titles, authors, years, venues, DOIs, ArXiv IDs, URLs |
 | **Smart matching** | Handles formatting variations (BERT vs B-ERT, pre-trained vs pretrained) |
 | **Hallucination detection** | Flags likely fabricated references using deterministic pre-filters, LLM deep web search, and metadata reverification when the LLM finds a better match |
@@ -216,7 +216,7 @@ pip install -r requirements-dev.txt                  # pytest, playwright, etc.
 
 The Web UI provides real-time progress, check history, batch tracking, and one-click export of corrections.
 
-LLM extraction is preferred, but PDF uploads and direct PDF URLs can fall back to GROBID. Hallucination checks use a separate hallucination LLM selection when one is configured; otherwise the UI falls back to the selected extraction LLM only if that provider supports web search. Local vLLM can be used for extraction, but hallucination checks require OpenAI, Anthropic, Google, or Azure.
+LLM extraction is preferred, but PDF uploads and direct PDF URLs can fall back to GROBID. Hallucination checks use a separate hallucination LLM selection when one is configured; otherwise the UI falls back to the selected extraction LLM only if that provider supports web search. Local vLLM and LM Studio can be used for extraction, but hallucination checks require OpenAI, Anthropic, Google, or Azure.
 
 ```bash
 refchecker-webui                    # default: http://localhost:8000
@@ -302,9 +302,14 @@ Input (choose one):
                             Custom path for the generated OpenReview paper list
 
 LLM:
-  --llm-provider PROVIDER    openai, anthropic, google, azure, or vllm
+  --llm-provider PROVIDER    openai, anthropic, google, azure, vllm, or lmstudio
   --llm-model MODEL          Override the default model for the provider
   --llm-endpoint URL         Custom endpoint (e.g. local vLLM server)
+  --llm-reasoning-effort N   LM Studio reasoning: default, none, minimal, low,
+                             medium, high, or xhigh (default: none)
+  --llm-max-tokens N         Maximum generated tokens per extraction call
+  --llm-context-length N     Loaded LM Studio context; reloads the selected model
+  --llm-timeout SECONDS      Generation timeout per LLM call (LM Studio default: 300)
   --llm-parallel-chunks      Enable parallel LLM chunk processing (default)
   --llm-no-parallel-chunks   Disable parallel LLM chunk processing
   --llm-max-chunk-workers N  Max workers for parallel LLM chunks (default: 4)
@@ -711,6 +716,7 @@ LLM-powered extraction improves accuracy with complex bibliographies. Hallucinat
 | Google | `GOOGLE_API_KEY` | `gemini-3.1-flash-lite-preview` |
 | Azure | `AZURE_OPENAI_API_KEY` | `gpt-4.1` |
 | vLLM | (local) | `meta-llama/Llama-3.3-70B-Instruct` |
+| LM Studio | (local) | Loaded model identifier (required) |
 
 When running the Web UI, provider keys present in the server environment are added automatically as selectable LLM configurations in both single-user and multi-user mode. The key value is not returned to the browser; users can still enter a browser/session key to override the server environment key for their own run.
 
@@ -720,6 +726,7 @@ academic-refchecker --paper 1706.03762 --llm-provider anthropic
 
 academic-refchecker --paper paper.pdf --llm-provider openai --llm-model gpt-4.1
 academic-refchecker --paper paper.pdf --llm-provider vllm --llm-model meta-llama/Llama-3.3-70B-Instruct
+academic-refchecker --paper paper.pdf --llm-provider lmstudio --llm-model qwen/qwen3.6-35b-a3b --llm-endpoint http://localhost:1234 --llm-reasoning-effort none
 
 # Use one model for extraction and another for hallucination checks
 academic-refchecker --paper paper.pdf \
@@ -727,7 +734,7 @@ academic-refchecker --paper paper.pdf \
   --hallucination-provider anthropic --hallucination-model claude-sonnet-4-6
 ```
 
-Hallucination-capable providers are OpenAI, Anthropic, Google, and Azure. vLLM can extract references but cannot perform live web search, so pair it with `--hallucination-provider` when you want hallucination checks.
+Hallucination-capable providers are OpenAI, Anthropic, Google, and Azure. vLLM and LM Studio can extract references but cannot perform live web search, so pair either local provider with `--hallucination-provider` when you want hallucination checks.
 
 #### Local Models (vLLM)
 
@@ -739,12 +746,34 @@ python scripts/start_vllm_server.py --model meta-llama/Llama-3.3-70B-Instruct --
 academic-refchecker --paper paper.pdf --llm-provider vllm --llm-endpoint http://localhost:8001/v1
 ```
 
+#### Local Models (LM Studio)
+
+Load a model in LM Studio, start its local server, then choose **LM Studio (Local)** in the Web UI or run:
+
+```bash
+academic-refchecker --paper paper.pdf \
+  --llm-provider lmstudio \
+  --llm-model qwen/qwen3.6-35b-a3b \
+  --llm-endpoint http://localhost:1234 \
+  --llm-reasoning-effort none \
+  --llm-context-length 16384 \
+  --llm-max-tokens 6000 \
+  --llm-timeout 3600
+```
+
+The Web UI exposes reasoning effort, the loaded-model context length, maximum output tokens, and a generation timeout in seconds. Fetch the model list to read LM Studio's current and maximum context values. Testing or saving a changed context unloads and reloads only the selected model instance, which can briefly interrupt local inference. The generation timeout applies separately to each extraction call; large output budgets may require an hour or more.
+
+The UI also estimates the bibliography capacity of one extraction call. It assumes about 600–900 input tokens per dense reference page, subtracts 300 tokens for the extraction prompt, reserves the selected output budget, and caps input at the output budget so the returned reference list is not truncated. Longer bibliographies are split automatically. `none` reasoning is recommended because reasoning-only output can otherwise consume the completion budget before the model emits reference JSON.
+
 ### Environment Variables
 
 ```bash
 # LLM
 export REFCHECKER_LLM_PROVIDER=anthropic
 export ANTHROPIC_API_KEY=your_key           # Also: OPENAI_API_KEY, GOOGLE_API_KEY
+export REFCHECKER_LMSTUDIO_CONTEXT_LENGTH=16384
+export REFCHECKER_LMSTUDIO_MAX_TOKENS=6000
+export REFCHECKER_LMSTUDIO_TIMEOUT=3600
 
 # Performance
 export SEMANTIC_SCHOLAR_API_KEY=your_key    # Higher rate limits / faster verification

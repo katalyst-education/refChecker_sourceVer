@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from typing import List, Dict, Any, Optional
 import logging
 
@@ -32,7 +33,7 @@ def _record_provider_usage(provider: str, model: str, response, kind: str):
     if _usage_tracker is None:
         return
     try:
-        if provider == "openai":
+        if provider in {"openai", "azure", "vllm", "lmstudio"}:
             u = _usage_tracker.extract_openai_usage(response)
         elif provider == "anthropic":
             u = _usage_tracker.extract_anthropic_usage(response)
@@ -1251,3 +1252,272 @@ class vLLMProvider(LLMProviderMixin, LLMProvider):
     def __del__(self):
         """Cleanup on deletion"""
         self.cleanup()
+
+
+class LMStudioProvider(LLMProviderMixin, LLMProvider):
+    """LM Studio provider using its OpenAI-compatible local server."""
+
+    _context_reload_lock = threading.Lock()
+    _REASONING_EFFORTS = frozenset({
+        "default", "none", "minimal", "low", "medium", "high", "xhigh",
+    })
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.model_name = (config.get("model") or "").strip()
+        if not self.model_name:
+            raise ValueError("LM Studio requires a model identifier")
+        self.model = self.model_name
+        self.server_url = (
+            config.get("endpoint")
+            or config.get("server_url")
+            or os.getenv("REFCHECKER_LMSTUDIO_SERVER_URL")
+            or os.getenv("LM_STUDIO_BASE_URL")
+            or "http://localhost:1234"
+        ).rstrip("/")
+        if self.server_url.endswith("/v1"):
+            self.server_url = self.server_url[:-3].rstrip("/")
+        self.reasoning_effort = str(
+            config.get("reasoning_effort")
+            or os.getenv("REFCHECKER_LMSTUDIO_REASONING_EFFORT")
+            or "none"
+        ).strip().lower()
+        if self.reasoning_effort not in self._REASONING_EFFORTS:
+            supported = ", ".join(sorted(self._REASONING_EFFORTS))
+            raise ValueError(
+                f"Unsupported LM Studio reasoning effort '{self.reasoning_effort}'. "
+                f"Choose one of: {supported}"
+            )
+        raw_context_length = config.get("context_length")
+        self.context_length = int(raw_context_length) if raw_context_length else None
+        if self.context_length is not None and self.context_length < 1024:
+            raise ValueError("LM Studio context length must be at least 1024 tokens")
+        if self.max_tokens <= 0:
+            raise ValueError("LM Studio maximum output tokens must be positive")
+        if self.context_length is not None and self.max_tokens >= self.context_length:
+            raise ValueError(
+                "LM Studio maximum output tokens must be smaller than the context length"
+            )
+        self.timeout_seconds = int(
+            config.get("timeout_seconds", config.get("timeout", 300))
+        )
+        if self.timeout_seconds < 10:
+            raise ValueError("LM Studio generation timeout must be at least 10 seconds")
+        self.api_key = config.get("api_key")
+
+        self.client = None
+        try:
+            import openai
+            import httpx
+
+            self.client = openai.OpenAI(
+                api_key=config.get("api_key") or "lm-studio",
+                base_url=f"{self.server_url}/v1",
+                timeout=httpx.Timeout(
+                    float(self.timeout_seconds),
+                    connect=5.0,
+                ),
+            )
+            logger.info(
+                "LM Studio provider initialized - Server URL: %s, Model: %s, "
+                "Reasoning effort: %s, Generation timeout: %ss",
+                self.server_url,
+                self.model_name,
+                self.reasoning_effort,
+                self.timeout_seconds,
+            )
+        except ImportError:
+            logger.error("OpenAI/httpx libraries not installed. Reinstall requirements.txt")
+
+    def is_available(self) -> bool:
+        """Return whether LM Studio is reachable and exposes the selected model."""
+        if not self.client:
+            return False
+        try:
+            import requests
+
+            with self._context_reload_lock:
+                response = requests.get(
+                    f"{self.server_url}/api/v1/models",
+                    headers=self._native_api_headers(),
+                    timeout=10,
+                )
+                response.raise_for_status()
+                model_info = self._find_native_model(response.json())
+                if not model_info:
+                    logger.info("LM Studio model not found: %s", self.model_name)
+                    return False
+
+                loaded_instances = model_info.get("loaded_instances") or []
+                instance = next(
+                    (
+                        item
+                        for item in loaded_instances
+                        if item.get("id") == self.model_name
+                    ),
+                    loaded_instances[0] if loaded_instances else None,
+                )
+                if not instance:
+                    logger.info("LM Studio model is installed but not loaded: %s", self.model_name)
+                    return False
+
+                current_context = (instance.get("config") or {}).get("context_length")
+                if self.context_length and current_context != self.context_length:
+                    self._reload_model_context(requests, model_info, instance)
+                return True
+        except Exception as exc:
+            logger.error("LM Studio health/context check failed: %s", exc)
+            return False
+
+    def _native_api_headers(self) -> Dict[str, str]:
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
+
+    def _find_native_model(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for model in payload.get("models", []):
+            identifiers = {
+                model.get("key"),
+                model.get("selected_variant"),
+                *(item.get("id") for item in model.get("loaded_instances") or []),
+            }
+            if self.model_name in identifiers:
+                return model
+        return None
+
+    def _reload_model_context(self, requests_module, model_info, instance) -> None:
+        """Reload one LM Studio model instance with the configured context length."""
+        max_context = model_info.get("max_context_length")
+        if max_context and self.context_length > int(max_context):
+            raise ValueError(
+                f"Requested context length {self.context_length} exceeds the model maximum "
+                f"of {max_context} tokens"
+            )
+
+        old_config = dict(instance.get("config") or {})
+        instance_id = instance.get("id")
+        model_key = model_info.get("key") or self.model_name
+        headers = {
+            **self._native_api_headers(),
+            "Content-Type": "application/json",
+        }
+
+        unload_response = requests_module.post(
+            f"{self.server_url}/api/v1/models/unload",
+            headers=headers,
+            json={"instance_id": instance_id},
+            timeout=120,
+        )
+        unload_response.raise_for_status()
+
+        load_config = {
+            "model": model_key,
+            "context_length": self.context_length,
+            "echo_load_config": True,
+        }
+        for key in (
+            "eval_batch_size",
+            "flash_attention",
+            "num_experts",
+            "offload_kv_cache_to_gpu",
+        ):
+            if old_config.get(key) is not None:
+                load_config[key] = old_config[key]
+
+        try:
+            load_response = requests_module.post(
+                f"{self.server_url}/api/v1/models/load",
+                headers=headers,
+                json=load_config,
+                timeout=300,
+            )
+            load_response.raise_for_status()
+        except Exception:
+            rollback_config = {
+                **load_config,
+                "context_length": old_config.get("context_length"),
+            }
+            try:
+                requests_module.post(
+                    f"{self.server_url}/api/v1/models/load",
+                    headers=headers,
+                    json=rollback_config,
+                    timeout=300,
+                ).raise_for_status()
+            except Exception as rollback_exc:
+                logger.error(
+                    "LM Studio context reload failed and rollback also failed: %s",
+                    rollback_exc,
+                )
+            raise
+
+        logger.info(
+            "Reloaded LM Studio model %s with context length %d tokens",
+            model_key,
+            self.context_length,
+        )
+
+    def extract_references(self, bibliography_text: str) -> List[str]:
+        return self.extract_references_with_chunking(bibliography_text)
+
+    def _call_llm(self, prompt: str) -> str:
+        """Call LM Studio, optionally controlling its reasoning budget."""
+        try:
+            def make_request(reasoning_effort: str):
+                kwargs = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": self._get_system_prompt()},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                }
+                if reasoning_effort != "default":
+                    kwargs["extra_body"] = {
+                        "reasoning_effort": reasoning_effort,
+                    }
+
+                response = self.client.chat.completions.create(**kwargs)
+                _record_provider_usage("lmstudio", self.model_name, response, "extraction")
+                _track_openai_usage(response, self.model_name)
+                return response
+
+            response = make_request(self.reasoning_effort)
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
+            if (
+                not content
+                and reasoning_content
+                and self.reasoning_effort != "none"
+            ):
+                logger.warning(
+                    "LM Studio returned reasoning but no final content "
+                    "(finish_reason=%s, reasoning_effort=%s, reasoning_chars=%d); "
+                    "retrying once with reasoning disabled",
+                    choice.finish_reason,
+                    self.reasoning_effort,
+                    len(reasoning_content),
+                )
+                response = make_request("none")
+                choice = response.choices[0]
+                content = choice.message.content or ""
+                reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
+
+            if not content and reasoning_content:
+                logger.warning(
+                    "LM Studio returned reasoning but no final content after extraction retry "
+                    "(finish_reason=%s, reasoning_chars=%d)",
+                    choice.finish_reason,
+                    len(reasoning_content),
+                )
+            logger.debug(
+                "LM Studio response: content_chars=%d, finish_reason=%s",
+                len(content),
+                choice.finish_reason,
+            )
+            return content
+        except Exception as exc:
+            logger.error("LM Studio API call failed: %s", exc)
+            raise

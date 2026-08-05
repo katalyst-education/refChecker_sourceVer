@@ -18,8 +18,9 @@ _PROVIDER_ENV_VARS: Dict[str, list] = {
 }
 
 _ENDPOINT_ENV_VARS: Dict[str, list] = {
-    'openai': ['OPENAI_CHAT_ENDPOINT'],
-    'azure':  ['AZURE_OPENAI_ENDPOINT', 'REFCHECKER_AZURE_ENDPOINT'],
+    'openai':   ['OPENAI_CHAT_ENDPOINT'],
+    'azure':    ['AZURE_OPENAI_ENDPOINT', 'REFCHECKER_AZURE_ENDPOINT'],
+    'lmstudio': ['REFCHECKER_LMSTUDIO_SERVER_URL', 'LM_STUDIO_BASE_URL'],
 }
 
 
@@ -57,6 +58,7 @@ DEFAULT_EXTRACTION_MODELS: Dict[str, str] = {
     'google':    'gemini-3.1-flash-lite-preview',
     'azure':     'gpt-4.1',
     'vllm':      'meta-llama/Llama-3.1-8B-Instruct',
+    'lmstudio':  '',
 }
 
 DEFAULT_HALLUCINATION_MODELS: Dict[str, str] = {
@@ -172,6 +174,18 @@ DEFAULT_CONFIG = {
             "server_url": "http://localhost:8000",
             "download_path": "./models",
             "auto_download": True,
+        },
+        "lmstudio": {
+            "model": DEFAULT_EXTRACTION_MODELS['lmstudio'],
+            "max_tokens": 4000,
+            "temperature": 0.1,
+            "timeout_seconds": 300,
+            "server_url": "http://localhost:1234",
+            "context_length": None,
+            # Reference extraction is a formatting task. Disable reasoning by
+            # default so thinking models do not consume the completion budget
+            # before producing message.content.
+            "reasoning_effort": "none",
         }
     }
 }
@@ -218,6 +232,22 @@ def get_config() -> Dict[str, Any]:
     
     if os.getenv("REFCHECKER_VLLM_AUTO_DOWNLOAD"):
         config["llm"]["vllm"]["auto_download"] = os.getenv("REFCHECKER_VLLM_AUTO_DOWNLOAD").lower() == "true"
+
+    lmstudio_endpoint = resolve_endpoint("lmstudio")
+    if lmstudio_endpoint:
+        config["llm"]["lmstudio"]["server_url"] = lmstudio_endpoint
+
+    if os.getenv("REFCHECKER_LMSTUDIO_REASONING_EFFORT"):
+        config["llm"]["lmstudio"]["reasoning_effort"] = os.getenv("REFCHECKER_LMSTUDIO_REASONING_EFFORT")
+
+    if os.getenv("REFCHECKER_LMSTUDIO_MAX_TOKENS"):
+        config["llm"]["lmstudio"]["max_tokens"] = int(os.getenv("REFCHECKER_LMSTUDIO_MAX_TOKENS"))
+
+    if os.getenv("REFCHECKER_LMSTUDIO_CONTEXT_LENGTH"):
+        config["llm"]["lmstudio"]["context_length"] = int(os.getenv("REFCHECKER_LMSTUDIO_CONTEXT_LENGTH"))
+
+    if os.getenv("REFCHECKER_LMSTUDIO_TIMEOUT"):
+        config["llm"]["lmstudio"]["timeout_seconds"] = int(os.getenv("REFCHECKER_LMSTUDIO_TIMEOUT"))
     
     # Parallel processing configuration
     if os.getenv("REFCHECKER_LLM_PARALLEL_CHUNKS"):

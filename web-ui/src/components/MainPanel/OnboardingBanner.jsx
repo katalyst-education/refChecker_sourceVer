@@ -124,7 +124,7 @@ export default function OnboardingBanner({ onOpenSettings }) {
                   Needed for accurate bibliography parsing and for the hallucination check.
                   {multiuser
                     ? ' OpenAI, Anthropic, Google, or Azure are supported.'
-                    : ' OpenAI, Anthropic, Google, Azure, or a local vLLM server are supported.'}
+                    : ' OpenAI, Anthropic, Google, Azure, a local vLLM server, or LM Studio are supported.'}
                   Open <button type="button" onClick={() => onOpenSettings?.('LLM')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → LLM</button>{' '}
                   to paste your key — click <b>Test connection</b> first, then Save.
                 </div>

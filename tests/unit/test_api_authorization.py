@@ -239,20 +239,148 @@ def test_single_user_llm_config_update_validates_model_with_stored_key(tmp_path,
     assert stored["model"] == "claude-sonnet-4-6"
 
 
-def test_multiuser_rejects_vllm_config_creation_and_validation(auth_db):
+def test_single_user_lmstudio_config_round_trips_reasoning_effort(tmp_path, monkeypatch):
+    monkeypatch.delenv("REFCHECKER_MULTIUSER", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_api_authorization")
+    api_main = importlib.import_module("backend.main")
+    api_main = importlib.reload(api_main)
+    temp_db = Database(str(tmp_path / "local-lmstudio.db"))
+    _run(temp_db.init_db())
+    monkeypatch.setattr(api_main, "db", temp_db)
+    validated = {}
+
+    async def record_validation(**kwargs):
+        validated.update(kwargs)
+
+    monkeypatch.setattr(api_main, "_validate_llm_connection_or_raise", record_validation)
+    local_user = api_main.UserInfo(id=0, name="Local User", provider="local", is_admin=True)
+
+    created = _run(api_main.create_llm_config(
+        api_main.LLMConfigCreate(
+            name="LM Studio",
+            provider="lmstudio",
+            model="qwen/test",
+            endpoint="http://localhost:1234",
+            reasoning_effort="none",
+            max_tokens=4000,
+            context_length=8192,
+            timeout_seconds=21600,
+        ),
+        local_user,
+    ))
+
+    assert created["reasoning_effort"] == "none"
+    assert created["max_tokens"] == 4000
+    assert created["context_length"] == 8192
+    assert created["timeout_seconds"] == 21600
+    assert validated["reasoning_effort"] == "none"
+    assert validated["max_tokens"] == 4000
+    assert validated["context_length"] == 8192
+    assert validated["timeout_seconds"] == 21600
+    resolved = _run(api_main._resolve_llm_config_for_request(
+        user_id=None,
+        use_llm=True,
+        llm_config_id=created["id"],
+        llm_provider=None,
+        llm_model=None,
+        api_key=None,
+    ))
+    assert resolved == (
+        "lmstudio",
+        "qwen/test",
+        None,
+        "http://localhost:1234",
+        "none",
+        4000,
+        8192,
+        21600,
+    )
+
+
+def test_lmstudio_model_list_includes_loaded_context_metadata(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.delenv("REFCHECKER_MULTIUSER", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_api_authorization")
+    api_main = importlib.import_module("backend.main")
+    api_main = importlib.reload(api_main)
+    requested_urls = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "models": [{
+                    "key": "qwen/test",
+                    "max_context_length": 262144,
+                    "loaded_instances": [{
+                        "id": "qwen/test",
+                        "config": {"context_length": 8192},
+                    }],
+                }],
+            }
+
+    def fake_get(url, **_kwargs):
+        requested_urls.append(url)
+        return Response()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    local_user = api_main.UserInfo(id=0, name="Local User", provider="local", is_admin=True)
+    result = _run(api_main.list_llm_models(
+        api_main._ListModelsRequest(
+            provider="lmstudio",
+            endpoint="http://localhost:1234/v1",
+        ),
+        local_user,
+    ))
+
+    assert requested_urls == ["http://localhost:1234/api/v1/models"]
+    assert result["models"] == ["qwen/test"]
+    assert result["model_details"]["qwen/test"] == {
+        "loaded": True,
+        "instance_id": "qwen/test",
+        "context_length": 8192,
+        "max_context_length": 262144,
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "endpoint", "model"),
+    [
+        ("vllm", "http://localhost:8000", None),
+        ("lmstudio", "http://localhost:1234", "loaded-model"),
+    ],
+)
+def test_multiuser_rejects_local_llm_config_creation_and_validation(
+    auth_db, provider, endpoint, model
+):
     api_main, _db = auth_db
-    owner = _run(_create_user(api_main, _db, "owner-vllm"))
+    owner = _run(_create_user(api_main, _db, f"owner-{provider}"))
 
     with pytest.raises(HTTPException) as exc:
         _run(api_main.create_llm_config(
-            api_main.LLMConfigCreate(name="Local vLLM", provider="vllm", endpoint="http://localhost:8000"),
+            api_main.LLMConfigCreate(
+                name=f"Local {provider}",
+                provider=provider,
+                endpoint=endpoint,
+                model=model,
+            ),
             owner,
         ))
     assert exc.value.status_code == 403
 
     with pytest.raises(HTTPException) as exc:
         _run(api_main.validate_llm_config(
-            api_main.LLMConfigValidate(provider="vllm", endpoint="http://localhost:8000"),
+            api_main.LLMConfigValidate(provider=provider, endpoint=endpoint, model=model),
+            owner,
+        ))
+    assert exc.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc:
+        _run(api_main.list_llm_models(
+            api_main._ListModelsRequest(provider=provider, endpoint=endpoint),
             owner,
         ))
     assert exc.value.status_code == 403
@@ -612,7 +740,16 @@ def test_env_llm_config_resolution_prefers_request_key(auth_db, monkeypatch):
     owner = _run(_create_user(api_main, _db, "owner-env-resolution"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "server-env-secret")
 
-    provider, model, api_key, endpoint = _run(api_main._resolve_llm_config_for_request(
+    (
+        provider,
+        model,
+        api_key,
+        endpoint,
+        reasoning_effort,
+        max_tokens,
+        context_length,
+        timeout_seconds,
+    ) = _run(api_main._resolve_llm_config_for_request(
         user_id=owner.id,
         use_llm=True,
         llm_config_id="env:anthropic",
@@ -624,8 +761,21 @@ def test_env_llm_config_resolution_prefers_request_key(auth_db, monkeypatch):
     assert model
     assert api_key == "server-env-secret"
     assert endpoint is None
+    assert reasoning_effort is None
+    assert max_tokens is None
+    assert context_length is None
+    assert timeout_seconds is None
 
-    _provider, _model, override_key, _endpoint = _run(api_main._resolve_llm_config_for_request(
+    (
+        _provider,
+        _model,
+        override_key,
+        _endpoint,
+        _reasoning_effort,
+        _max_tokens,
+        _context_length,
+        _timeout_seconds,
+    ) = _run(api_main._resolve_llm_config_for_request(
         user_id=owner.id,
         use_llm=True,
         llm_config_id="env:anthropic",

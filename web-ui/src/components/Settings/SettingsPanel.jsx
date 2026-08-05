@@ -1399,7 +1399,7 @@ export default function SettingsPanel({ theme, onThemeChange }) {
           Extraction LLM
         </div>
         <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
-          Used to extract references from PDFs, URLs, and pasted text. Local vLLM is available for extraction in single-user local deployments.
+          Used to extract references from PDFs, URLs, and pasted text. Local vLLM and LM Studio are available for extraction in single-user local deployments.
         </div>
         <div className="mt-3 max-w-sm">
           <LLMSelector mode="extraction" />

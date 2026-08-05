@@ -915,7 +915,11 @@ class ProgressRefChecker:
                  ai_detection_api_key: Optional[str] = None,
                  ai_detection_consent: bool = False,
                  ai_detection_service: str = "pangram",
-                 paperclip_api_key: Optional[str] = None):
+                 paperclip_api_key: Optional[str] = None,
+                 reasoning_effort: Optional[str] = None,
+                 max_tokens: Optional[int] = None,
+                 context_length: Optional[int] = None,
+                 timeout_seconds: Optional[int] = None):
         """
         Initialize the progress-aware refchecker
 
@@ -923,6 +927,10 @@ class ProgressRefChecker:
             llm_provider: LLM provider (anthropic, openai, google, etc.)
             llm_model: Specific model to use
             api_key: API key for the LLM provider
+            reasoning_effort: Optional provider reasoning level (LM Studio defaults to none)
+            max_tokens: Maximum generated tokens for one extraction call
+            context_length: Requested LM Studio loaded-model context length
+            timeout_seconds: Maximum duration of one LM Studio generation request
             use_llm: Whether to use LLM for reference extraction
             progress_callback: Async callback for progress updates
             check_id: Database ID for this check (for updating title)
@@ -961,8 +969,8 @@ class ProgressRefChecker:
         # Initialize LLM if requested
         self.llm = None
         if use_llm and llm_provider:
-            if is_multiuser_mode() and llm_provider.strip().lower() == "vllm":
-                raise ValueError("vLLM is only supported in single-user local deployments")
+            if is_multiuser_mode() and llm_provider.strip().lower() in {"vllm", "lmstudio"}:
+                raise ValueError(f"{llm_provider} is only supported in single-user local deployments")
             try:
                 # Build config dict for the LLM provider
                 llm_config = {}
@@ -972,6 +980,14 @@ class ProgressRefChecker:
                     llm_config['api_key'] = api_key
                 if endpoint:
                     llm_config['endpoint'] = endpoint
+                if reasoning_effort:
+                    llm_config['reasoning_effort'] = reasoning_effort
+                if max_tokens:
+                    llm_config['max_tokens'] = max_tokens
+                if context_length:
+                    llm_config['context_length'] = context_length
+                if timeout_seconds:
+                    llm_config['timeout_seconds'] = timeout_seconds
                 logger.info(f"Creating LLM provider '{llm_provider}' with api_key={'present' if api_key else 'MISSING'}, model={llm_model}")
                 provider = create_llm_provider(
                     provider_name=llm_provider,
