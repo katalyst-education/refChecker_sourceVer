@@ -29,6 +29,53 @@ class LocalMatchChecker:
         )
 
 
+class LocalDoiMismatchChecker:
+    database_label = "Semantic Scholar"
+    database_key = "local_s2"
+
+    def __init__(self):
+        self.called = False
+
+    def verify_reference(self, reference):
+        self.called = True
+        return (
+            {
+                "title": reference["title"],
+                "authors": [{"name": "Ada Author"}],
+                "externalIds": {"DOI": "10.48550/arXiv.2410.13298"},
+            },
+            [{
+                "warning_type": "doi",
+                "warning_details": (
+                    "DOI mismatch\n"
+                    "       cited:  10.18653/v1/2024.emnlp-main.223\n"
+                    "       actual: 10.48550/arXiv.2410.13298"
+                ),
+            }],
+            "https://arxiv.org/abs/2410.13298",
+        )
+
+
+class ExactDoiChecker:
+    database_label = "CrossRef"
+    database_key = "local_crossref"
+
+    def __init__(self):
+        self.called = False
+
+    def verify_reference(self, reference):
+        self.called = True
+        return (
+            {
+                "title": reference["title"],
+                "authors": [{"name": "Ada Author"}],
+                "externalIds": {"DOI": reference["doi"]},
+            },
+            [],
+            f"https://doi.org/{reference['doi']}",
+        )
+
+
 class LocalArxivMismatchChecker:
     database_label = "Semantic Scholar"
     database_key = "local_s2"
@@ -222,6 +269,53 @@ def test_verify_reference_records_matched_database_from_local_checker():
     assert url == "https://www.semanticscholar.org/paper/s2-match-id"
     assert verified_data["_matched_database"] == "Semantic Scholar"
     assert verified_data["_matched_checker"] == "local_s2"
+
+
+def test_doi_mismatch_does_not_stop_search_before_exact_local_doi_match():
+    checker = _build_checker()
+    mismatching_checker = LocalDoiMismatchChecker()
+    exact_checker = ExactDoiChecker()
+    checker.local_db = mismatching_checker
+    checker.local_db_checkers = [
+        ("local_s2", "Semantic Scholar", mismatching_checker),
+        ("local_crossref", "CrossRef", exact_checker),
+    ]
+    checker.semantic_scholar = None
+    checker.crossref = None
+
+    verified_data, errors, url = checker.verify_reference({
+        "title": "A paper with both preprint and proceedings records",
+        "authors": ["Ada Author"],
+        "doi": "10.18653/v1/2024.emnlp-main.223",
+    })
+
+    assert mismatching_checker.called is True
+    assert exact_checker.called is True
+    assert errors == []
+    assert verified_data["externalIds"]["DOI"] == "10.18653/v1/2024.emnlp-main.223"
+    assert verified_data["_matched_database"] == "CrossRef"
+    assert url == "https://doi.org/10.18653/v1/2024.emnlp-main.223"
+
+
+def test_explicit_doi_uses_crossref_before_semantic_scholar_title_result():
+    checker = _build_checker()
+    crossref = ExactDoiChecker()
+    semantic_scholar = LocalDoiMismatchChecker()
+    checker.local_db = None
+    checker.local_db_checkers = []
+    checker.crossref = crossref
+    checker.semantic_scholar = semantic_scholar
+
+    verified_data, errors, _ = checker.verify_reference({
+        "title": "A paper with both preprint and proceedings records",
+        "authors": ["Ada Author"],
+        "doi": "10.18653/v1/2024.emnlp-main.223",
+    })
+
+    assert crossref.called is True
+    assert semantic_scholar.called is False
+    assert errors == []
+    assert verified_data["externalIds"]["DOI"] == "10.18653/v1/2024.emnlp-main.223"
 
 
 def test_major_author_discrepancy_recognizes_no_matching_authors_error():

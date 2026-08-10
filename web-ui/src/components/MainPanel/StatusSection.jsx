@@ -647,7 +647,7 @@ function renderSourceMethodLine({
         className="text-sm"
         style={{ color: 'var(--color-text-muted)' }}
       >
-        Extraction: <span style={extractionValueStyle}>GROBID fallback</span>
+        Extraction: <span style={extractionValueStyle}>GROBID extraction</span>
       </p>
     )
   }

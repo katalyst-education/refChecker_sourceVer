@@ -2452,6 +2452,11 @@ async def run_check(
 
         # Resolve cache directory from environment or settings
         cache_dir = await _get_configured_cache_dir()
+        extraction_mode = (
+            await db.get_setting("extraction_mode")
+            or os.environ.get("REFCHECKER_EXTRACTION_MODE")
+            or "cascade"
+        )
 
         # Wait for WebSocket to connect (give client time to establish connection)
         logger.info(f"Waiting for WebSocket connection for session {session_id}...")
@@ -2560,6 +2565,7 @@ async def run_check(
             ai_detection_detectors=ai_detection_detectors,
             paperclip_api_key=paperclip_api_key,
             detection_mode=detection_mode,
+            extraction_mode=extraction_mode,
         )
 
         # Run the check

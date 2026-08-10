@@ -502,6 +502,16 @@ class EnhancedHybridReferenceChecker:
                   (reference.get('url') and ('doi.org' in reference['url'] or 'doi:' in reference['url'])) or
                   (reference.get('raw_text') and ('doi' in reference['raw_text'].lower())))
         return has_doi
+
+    @staticmethod
+    def _has_doi_mismatch(errors: List[Dict[str, Any]]) -> bool:
+        """Return whether a result disputes the explicitly cited DOI."""
+        for issue in errors or []:
+            issue_type = issue.get('error_type') or issue.get('warning_type') or ''
+            details = issue.get('error_details') or issue.get('warning_details') or ''
+            if str(issue_type).lower() == 'doi' and 'mismatch' in str(details).lower():
+                return True
+        return False
     
     def _is_data_complete(self, verified_data: Dict[str, Any], reference: Dict[str, Any]) -> bool:
         """
@@ -1017,6 +1027,32 @@ class EnhancedHybridReferenceChecker:
         """
         last_crossref_result = None
         last_openalex_result = None
+        last_doi_mismatch_result = None
+        doi_first = self._should_try_doi_apis_first(reference)
+
+        # A cited DOI is more authoritative than a title match.  Ask CrossRef
+        # for that DOI before Semantic Scholar can select the same work's
+        # arXiv record and report the publisher DOI as a mismatch.
+        if doi_first and self.crossref:
+            self._append_attempted_api(attempted_apis, 'crossref')
+            verified_data, errors, url, success, failure_type, failure_detail = self._try_api(
+                'crossref', self.crossref, reference,
+            )
+            if success:
+                result = (verified_data, errors, url)
+                if self._is_data_complete(verified_data, reference) and not self._has_doi_mismatch(errors):
+                    return result, {}
+                last_crossref_result = result
+                if self._has_doi_mismatch(errors):
+                    last_doi_mismatch_result = result
+            elif failure_type not in ('none', 'not_found'):
+                failed_apis.append({
+                    'name': 'crossref',
+                    'instance': self.crossref,
+                    'failure_type': failure_type,
+                    'failure_detail': failure_detail,
+                    'active': True,
+                })
         
         # Try Semantic Scholar first — it succeeds ~92% of the time.
         # Skip SS when the local DB (233M papers) already returned not_found:
@@ -1026,8 +1062,13 @@ class EnhancedHybridReferenceChecker:
             self._append_attempted_api(attempted_apis, 'semantic_scholar')
             verified_data, errors, url, success, failure_type, failure_detail = self._try_api('semantic_scholar', self.semantic_scholar, reference)
             if success:
-                if self._is_data_complete(verified_data, reference):
+                result = (verified_data, errors, url)
+                if self._is_data_complete(verified_data, reference) and not (
+                    doi_first and self._has_doi_mismatch(errors)
+                ):
                     return (verified_data, errors, url), {}
+                if doi_first and self._has_doi_mismatch(errors):
+                    last_doi_mismatch_result = last_doi_mismatch_result or result
             elif failure_type not in ('none', 'not_found'):
                 failed_apis.append({
                     'name': 'semantic_scholar',
@@ -1039,7 +1080,7 @@ class EnhancedHybridReferenceChecker:
         
         # SS failed or incomplete — fire remaining APIs in parallel
         fallback_apis = []
-        if self.crossref:
+        if self.crossref and not doi_first:
             fallback_apis.append(('crossref', self.crossref))
         if self.openalex:
             fallback_apis.append(('openalex', self.openalex))
@@ -1130,6 +1171,8 @@ class EnhancedHybridReferenceChecker:
             incomplete['crossref'] = last_crossref_result
         if last_openalex_result:
             incomplete['openalex'] = last_openalex_result
+        if last_doi_mismatch_result:
+            incomplete['doi_mismatch'] = last_doi_mismatch_result
         return None, incomplete
 
     def _try_arxiv_title_search(self, reference, attempted_apis):
@@ -1622,6 +1665,7 @@ class EnhancedHybridReferenceChecker:
         attempted_apis = []
         db_not_found = False
         incomplete_data = None
+        local_doi_mismatch_result = None
         is_arxiv = self.arxiv_citation and self.arxiv_citation.is_arxiv_reference(reference)
         
         # ── PHASE 1: Parallel API calls ──
@@ -1673,6 +1717,22 @@ class EnhancedHybridReferenceChecker:
                     reference,
                 )
                 if success:
+                    # A title match may identify the right work but expose only
+                    # its arXiv DOI.  Keep searching configured local databases
+                    # and DOI-aware remote sources for the DOI that was actually
+                    # cited before accepting that mismatch warning.
+                    if (
+                        self._should_try_doi_apis_first(reference)
+                        and self._has_doi_mismatch(errors)
+                    ):
+                        local_doi_mismatch_result = local_doi_mismatch_result or (
+                            verified_data, errors, url,
+                        )
+                        logger.debug(
+                            "Enhanced Hybrid: %s returned a DOI mismatch; continuing authoritative DOI lookup",
+                            local_key,
+                        )
+                        continue
                     return verified_data, errors, url
                 if failure_type not in ('none', 'not_found'):
                     failed_apis.append({
@@ -1691,11 +1751,15 @@ class EnhancedHybridReferenceChecker:
             result, incomplete_data = self._verify_non_arxiv_parallel(reference, failed_apis, attempted_apis, skip_ss=db_not_found)
             if result is not None:
                 return result
+            if local_doi_mismatch_result is not None:
+                incomplete_data = incomplete_data or {}
+                incomplete_data.setdefault('doi_mismatch', local_doi_mismatch_result)
         
         # Store incomplete results for Phase 3 fallback (thread-safe: returned
         # as local values from _verify_non_arxiv_parallel, not shared state)
         crossref_result = incomplete_data.get('crossref') if incomplete_data else None
         openalex_result = incomplete_data.get('openalex') if incomplete_data else None
+        doi_mismatch_result = incomplete_data.get('doi_mismatch') if incomplete_data else None
         
         # PHASE 2: If no API succeeded in Phase 1, retry failed APIs.
         # Skip retries when the local DB definitively returned not_found —
@@ -1770,10 +1834,13 @@ class EnhancedHybridReferenceChecker:
                         failed_api['active'] = retry_failure_type not in ('none', 'not_found')
         
         # PHASE 3: If all APIs failed or returned incomplete data, use best available incomplete data as fallback
-        incomplete_results = [r for r in [crossref_result, openalex_result] if r is not None]
+        incomplete_results = [
+            r for r in [crossref_result, openalex_result, doi_mismatch_result]
+            if r is not None
+        ]
         if incomplete_results:
             # Prefer CrossRef over OpenAlex for incomplete data (usually more reliable)
-            best_incomplete = crossref_result if crossref_result else openalex_result
+            best_incomplete = crossref_result or openalex_result or doi_mismatch_result
             logger.debug("Enhanced Hybrid: No complete data found, using incomplete data as fallback")
             return best_incomplete
         

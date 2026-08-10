@@ -109,16 +109,20 @@ def get_cached_artifact_path(
     return os.path.join(entry_dir, filename)
 
 
-def llm_cache_identity_from_extractor(llm_extractor: Any) -> str:
+def llm_cache_identity_from_extractor(llm_extractor: Any, extraction_mode: Optional[str] = None) -> str:
     """Return a stable bibliography-cache identity for the extraction LLM."""
+    mode_suffix = ''
+    if extraction_mode is not None:
+        from refchecker.utils.extraction_policy import normalize_extraction_mode
+        mode_suffix = f':mode={normalize_extraction_mode(extraction_mode)}'
     provider = getattr(llm_extractor, 'llm_provider', None) if llm_extractor else None
     if not provider:
-        return f'no_llm:{BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION}'
+        return f'no_llm:{BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION}{mode_suffix}'
 
     provider_name = provider.__class__.__name__
     model = getattr(provider, 'model', None) or getattr(provider, 'model_name', None) or 'default'
     endpoint = getattr(provider, 'endpoint', None) or getattr(provider, 'server_url', None) or ''
-    return f'{provider_name}:{model}:{endpoint}:{BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION}'
+    return f'{provider_name}:{model}:{endpoint}:{BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION}{mode_suffix}'
 
 
 def _safe_cache_component(value: str, max_prefix: int = 48) -> str:

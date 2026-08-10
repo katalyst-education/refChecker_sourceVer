@@ -1,8 +1,8 @@
 """
 GROBID integration for PDF reference extraction.
 
-Provides a fallback extraction method that uses a GROBID server
-(local Docker or remote) when no LLM is available.
+Provides PDF reference extraction through a GROBID server (local Docker or
+remote). In cascade mode GROBID is tried before the LLM.
 
 GROBID auto-starts via Docker if available on the host.
 """
@@ -193,16 +193,18 @@ def extract_pdf_references_with_grobid_fallback(
     pdf_path: Optional[str] = None,
     pdf_content: Any = None,
     llm_available: bool,
+    extraction_mode: str = 'cascade',
     failure_message: Optional[str] = None,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """Use GROBID for PDF reference extraction when no LLM is available.
+    """Try GROBID according to the shared extraction policy.
 
-    Returns ``(None, None)`` when an LLM is available and the caller should
-    continue with its normal text/LLM extraction flow. When no LLM is
-    available, this helper attempts GROBID extraction and returns
-    ``(references, 'grobid')`` on success.
+    Cascade mode tries GROBID even when an LLM is configured. If GROBID cannot
+    produce references and an LLM is available, ``(None, None)`` tells the
+    caller to continue to its LLM fallback. ``llm-only`` always skips GROBID.
     """
-    if llm_available:
+    from refchecker.utils.extraction_policy import normalize_extraction_mode
+
+    if normalize_extraction_mode(extraction_mode) == 'llm-only':
         return None, None
 
     temp_pdf_path = None
@@ -222,6 +224,8 @@ def extract_pdf_references_with_grobid_fallback(
         grobid_pdf_path = temp_pdf_path
 
     if grobid_pdf_path is None:
+        if llm_available:
+            return None, None
         raise ValueError(failure_message or DEFAULT_GROBID_FALLBACK_ERROR)
 
     try:
@@ -235,5 +239,9 @@ def extract_pdf_references_with_grobid_fallback(
 
     if references:
         return references, 'grobid'
+
+    if llm_available:
+        logger.info("GROBID produced no references; continuing with LLM fallback")
+        return None, None
 
     raise ValueError(failure_message or DEFAULT_GROBID_FALLBACK_ERROR)

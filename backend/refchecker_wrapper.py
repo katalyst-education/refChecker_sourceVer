@@ -116,7 +116,7 @@ def _process_llm_references_cli_style(references: List[Any]) -> List[Dict[str, A
     return cli_checker._process_llm_extracted_references(references)
 
 
-def _make_cli_checker(llm_provider):
+def _make_cli_checker(llm_provider, extraction_mode='cascade'):
     """Create a lightweight ArxivReferenceChecker instance for parsing only.
 
     We bypass __init__ to avoid heavy setup and set just the fields needed for
@@ -130,6 +130,10 @@ def _make_cli_checker(llm_provider):
     cli_checker.used_unreliable_extraction = False
     cli_checker.fatal_error = False
     cli_checker.fatal_error_message = None
+    from refchecker.utils.extraction_policy import normalize_extraction_mode
+    cli_checker.extraction_mode = normalize_extraction_mode(extraction_mode)
+    cli_checker.last_reference_parser_method = None
+    cli_checker.last_bibliography_extraction_method = None
     return cli_checker
 
 
@@ -1149,7 +1153,8 @@ class ProgressRefChecker:
                  ai_detection_detectors: Optional[List[str]] = None,
                  timeout_seconds: Optional[int] = None,
                  detection_mode: str = "both",
-                 enrich_enabled: bool = True):
+                 enrich_enabled: bool = True,
+                 extraction_mode: Optional[str] = None):
         """
         Initialize the progress-aware refchecker
 
@@ -1172,6 +1177,9 @@ class ProgressRefChecker:
         self.api_key = api_key
         self.endpoint = endpoint
         self.use_llm = use_llm
+        from refchecker.utils.extraction_policy import normalize_extraction_mode
+        self.extraction_mode = normalize_extraction_mode(extraction_mode)
+        self._last_reference_parser_method = None
         self.progress_callback = progress_callback
         self.cancel_event = cancel_event
         self.check_id = check_id
@@ -1775,7 +1783,10 @@ class ProgressRefChecker:
             raise asyncio.CancelledError()
 
     def _bibliography_cache_identity(self) -> str:
-        return llm_cache_identity_from_extractor(SimpleNamespace(llm_provider=self.llm) if self.llm else None)
+        return llm_cache_identity_from_extractor(
+            SimpleNamespace(llm_provider=self.llm) if self.llm else None,
+            self.extraction_mode,
+        )
 
     async def _attach_citation_contexts_via_llm(
         self, references: List[Dict[str, Any]], paper_text: str
@@ -2031,13 +2042,14 @@ class ProgressRefChecker:
                 normalized = method.lower()
                 if normalized == 'cache':
                     return
-                bibliography_source_kind = 'pdf' if normalized in {'file', 'pdf'} else normalized
+                bibliography_source_kind = 'pdf' if normalized in {'file', 'pdf', 'grobid'} else normalized
 
             async def maybe_extract_grobid_references(pdf_path: str, failure_message: str):
                 refs, method = await asyncio.to_thread(
                     extract_pdf_references_with_grobid_fallback,
                     pdf_path=pdf_path,
                     llm_available=bool(self.llm),
+                    extraction_mode=self.extraction_mode,
                     failure_message=failure_message,
                 )
                 if refs:
@@ -2492,7 +2504,7 @@ class ProgressRefChecker:
                     # (matching CLI behavior for text files with no section header)
                     elif paper_source.lower().endswith('.txt'):
                         logger.info("Processing uploaded .txt file as plain text references")
-                        cli_checker = _make_cli_checker(self.llm)
+                        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
                         refs = await asyncio.to_thread(cli_checker.parse_references, paper_text)
                         if refs:
                             arxiv_source_references = [_normalize_reference_fields(r) for r in refs]
@@ -2550,7 +2562,7 @@ class ProgressRefChecker:
                 # on text that has no "References" section header.
                 if not arxiv_source_references:
                     logger.info("Plain text input — treating entire text as bibliography")
-                    cli_checker = _make_cli_checker(self.llm)
+                    cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
                     refs = await asyncio.to_thread(cli_checker.parse_references, paper_text)
                     if refs:
                         arxiv_source_references = [_normalize_reference_fields(r) for r in refs]
@@ -2578,8 +2590,8 @@ class ProgressRefChecker:
                     references = arxiv_source_references
                     logger.info(f"Using {len(references)} references from ArXiv source files (method: {extraction_method})")
                 else:
-                    references = await self._extract_references(paper_text)
-                    if not references and pdf_path_for_fallback:
+                    references = []
+                    if pdf_path_for_fallback and self.extraction_mode == 'cascade':
                         fallback_refs, fallback_method = await maybe_extract_grobid_references(
                             pdf_path_for_fallback,
                             "No LLM or GROBID available for PDF reference extraction. Please configure an API key in Settings, or ensure Docker is installed so GROBID can auto-start.",
@@ -2587,9 +2599,10 @@ class ProgressRefChecker:
                         if fallback_refs:
                             references = fallback_refs
                             set_extraction_method(fallback_method)
-                    # If we used PDF/file extraction and LLM was configured, mark as LLM-assisted
-                    if self.llm and extraction_method in ('pdf', 'file', 'text'):
-                        set_extraction_method('llm')
+                    if not references:
+                        references = await self._extract_references(paper_text)
+                        if self._last_reference_parser_method:
+                            set_extraction_method(self._last_reference_parser_method)
 
                 # Save to disk cache. Done BEFORE citation-context
                 # attachment so cached bibliographies stay compact (a
@@ -3308,7 +3321,7 @@ class ProgressRefChecker:
     async def _extract_references(self, paper_text: str) -> List[Dict[str, Any]]:
         """Extract references using the same pipeline/order as the CLI."""
         try:
-            cli_checker = _make_cli_checker(self.llm)
+            cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
 
             # Step 1: find bibliography section (CLI logic) - run in thread
             await self.emit_progress("extracting", {
@@ -3377,6 +3390,7 @@ class ProgressRefChecker:
                     return cli_checker.parse_references(bib_section, progress_callback=_chunk_progress)
 
             refs = await asyncio.to_thread(_parse_with_scope)
+            self._last_reference_parser_method = cli_checker.last_reference_parser_method
             if cli_checker.fatal_error:
                 logger.error("Reference parsing failed (CLI fatal_error)")
                 return []
@@ -3444,8 +3458,8 @@ class ProgressRefChecker:
         is one of 'bbl', 'bib', 'llm', or None.
         """
         try:
-            cli_checker = _make_cli_checker(self.llm)
-            extraction_mode = (os.environ.get('REFCHECKER_EXTRACTION_MODE') or 'cascade').lower()
+            cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
+            extraction_mode = self.extraction_mode
             # Capture check_id + bind FlowScope("extract") inside each
             # to_thread worker so per-check $ badge attribution doesn't
             # drop on bibtex/bbl extraction paths. The threading.local
@@ -3467,7 +3481,11 @@ class ProgressRefChecker:
                         processed = await asyncio.to_thread(cli_checker._process_llm_extracted_references, llm_refs)
                         return processed, 'llm'
                 except Exception as e:
-                    logger.warning(f"llm-only extraction failed, falling back to cascade: {e}")
+                    logger.warning(f"llm-only extraction failed: {e}")
+                return [], 'llm'
+            if extraction_mode == 'llm-only':
+                logger.warning("extraction_mode=llm-only but no LLM is configured")
+                return [], None
 
             # Check if this is LaTeX thebibliography format (e.g., from .bbl files)
             if '\\begin{thebibliography}' in bibtex_content and '\\bibitem' in bibtex_content:

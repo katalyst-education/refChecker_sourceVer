@@ -599,17 +599,11 @@ class LocalNonArxivReferenceChecker:
             else:
                 logger.debug(f"Could not find paper with arXiv ID: {arxiv_id}")
         
-        # Try title/author search (primary fallback, or first if no arXiv URL)
-        if not paper_data and (title or authors):
-            logger.debug(f"{self._log_prefix}: Searching by title/authors - Title: '{title}', Authors: {authors}, Year: {year}")
-            paper_data = self.find_best_match(title, authors, year)
-            
-            if paper_data:
-                logger.debug(f"Found paper by title/author search")
-            else:
-                logger.debug(f"Could not find matching paper by title/authors")
-        
-        # Try DOI if title search didn't find it
+        # An explicit valid DOI is an authoritative lookup key and must be
+        # tried before title matching.  The same work can have both a
+        # publisher/conference DOI and an arXiv DOI in separate database rows;
+        # title-first lookup can select the arXiv row and incorrectly report
+        # the cited publisher DOI as a mismatch.
         if not paper_data and doi:
             logger.debug(f"{self._log_prefix}: Searching by DOI: {doi}")
             doi_paper = self.get_paper_by_doi(doi)
@@ -636,6 +630,17 @@ class LocalNonArxivReferenceChecker:
                     logger.debug(f"Found paper by DOI: {doi}")
             else:
                 logger.debug(f"Could not find paper with DOI: {doi}")
+
+        # Fall back to title/author search only when authoritative identifier
+        # lookup did not find a usable record.
+        if not paper_data and (title or authors):
+            logger.debug(f"{self._log_prefix}: Searching by title/authors - Title: '{title}', Authors: {authors}, Year: {year}")
+            paper_data = self.find_best_match(title, authors, year)
+            
+            if paper_data:
+                logger.debug(f"Found paper by title/author search")
+            else:
+                logger.debug(f"Could not find matching paper by title/authors")
         
         # Try arXiv ID as last resort (only if we haven't tried it above)
         if not paper_data and arxiv_id and not arxiv_tried:

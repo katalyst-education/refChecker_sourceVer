@@ -810,7 +810,9 @@ def _process_bulk_paper_job(
 
         # Check bibliography cache
         from refchecker.utils.cache_utils import cached_bibliography, cache_bibliography, llm_cache_identity_from_extractor
-        llm_cache_identity = llm_cache_identity_from_extractor(checker.llm_extractor)
+        llm_cache_identity = llm_cache_identity_from_extractor(
+            checker.llm_extractor, getattr(checker, 'extraction_mode', 'cascade')
+        )
         bibliography = cached_bibliography(checker.cache_dir, job.input_spec, llm_cache_identity)
         if bibliography is not None:
             phase_times['extract_bib'] = time.perf_counter() - _t
@@ -981,6 +983,28 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
             )
             return []
         text = checker.extract_text_from_pdf(pdf_content)
+        checker.last_paper_text = text or ''
+
+        if getattr(checker, 'extraction_mode', 'cascade') == 'cascade':
+            try:
+                from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
+
+                pdf_path = getattr(paper, 'file_path', None)
+                if not pdf_path or not os.path.exists(pdf_path):
+                    pdf_path = None
+                grobid_references, _ = extract_pdf_references_with_grobid_fallback(
+                    pdf_path=pdf_path,
+                    pdf_content=pdf_content,
+                    llm_available=bool(checker.llm_extractor),
+                    extraction_mode=getattr(checker, 'extraction_mode', 'cascade'),
+                )
+                if grobid_references:
+                    checker.last_bibliography_extraction_method = 'grobid'
+                    checker.fatal_error = False
+                    checker.fatal_error_message = None
+                    return grobid_references
+            except ValueError as exc:
+                logger.debug('GROBID cascade failed for %s: %s', paper_id, exc)
 
     if not text:
         checker._set_fatal_source_error(
@@ -1039,6 +1063,8 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
     references = parse_references_bulk(checker, bibliography_text, extraction_batcher)
     if references or checker.llm_extractor:
         return references
+    if getattr(checker, 'extraction_mode', 'cascade') != 'cascade':
+        return references
 
     try:
         from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
@@ -1050,6 +1076,7 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
             pdf_path=pdf_path,
             pdf_content=pdf_content,
             llm_available=False,
+            extraction_mode=getattr(checker, 'extraction_mode', 'cascade'),
             failure_message=(
                 'No LLM configured for PDF reference extraction; falling back to GROBID.'
             ),
@@ -1072,15 +1099,48 @@ def parse_references_bulk(checker: Any, bibliography_text: str, extraction_batch
         )
         return []
 
+    deterministic_references = []
+    if (
+        getattr(checker, 'extraction_mode', 'cascade') == 'cascade'
+        and hasattr(checker, 'parse_references')
+    ):
+        original_extractor = checker.llm_extractor
+        try:
+            checker.llm_extractor = None
+            deterministic_references = checker.parse_references(bibliography_text)
+        finally:
+            checker.llm_extractor = original_extractor
+
+        if deterministic_references:
+            from refchecker.utils.text_utils import validate_parsed_references
+            validation = validate_parsed_references(deterministic_references)
+            if validation['is_valid']:
+                checker.fatal_error = False
+                checker.fatal_error_message = None
+                return deterministic_references
+
     if checker.llm_extractor:
         references = extraction_batcher.extract_references(checker, bibliography_text)
         if references:
+            checker.last_reference_parser_method = 'llm'
+            checker.fatal_error = False
+            checker.fatal_error_message = None
             return references
+        if deterministic_references:
+            checker.last_reference_parser_method = 'regex'
+            checker.fatal_error = False
+            checker.fatal_error_message = None
+            return deterministic_references
         _set_reference_extraction_fatal(
             checker,
             _zero_reference_message(bibliography_text, 'LLM extraction'),
         )
         return []
+
+    if deterministic_references:
+        checker.fatal_error = False
+        checker.fatal_error_message = None
+        return deterministic_references
 
     _set_reference_extraction_fatal(
         checker,

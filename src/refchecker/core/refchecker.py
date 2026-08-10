@@ -277,6 +277,7 @@ class ArxivReferenceChecker:
                  report_file=None, report_format='json', cache_dir=None,
                  db_paths=None, database_directory=None,
                  ai_detection_enabled=False, ai_detection_device='cpu',
+                 extraction_mode=None,
                  # Deprecated parameters kept for backward compatibility
                  scan_mode='standard', only_flagged=False):
         # Initialize the reference checker for non-arXiv references
@@ -297,6 +298,11 @@ class ArxivReferenceChecker:
         self.report_file = report_file
         self.report_format = report_format
         self.last_bibliography_extraction_method = None
+        self.last_reference_parser_method = None
+        from refchecker.utils.extraction_policy import normalize_extraction_mode
+        self.extraction_mode = normalize_extraction_mode(
+            extraction_mode or (llm_config or {}).get('extraction_mode')
+        )
         self.ai_detection_enabled = bool(ai_detection_enabled)
         self.ai_detection_device = (ai_detection_device or 'cpu').lower()
         self.ai_detection_results = []
@@ -4414,7 +4420,9 @@ class ArxivReferenceChecker:
                         print(f"   Bibliography extraction: {self._format_bibliography_extraction_method()}")
                     # Save to cache if enabled
                     from refchecker.utils.cache_utils import cache_bibliography, llm_cache_identity_from_extractor
-                    llm_cache_identity = llm_cache_identity_from_extractor(self.llm_extractor)
+                    llm_cache_identity = llm_cache_identity_from_extractor(
+                        self.llm_extractor, self.extraction_mode
+                    )
                     cache_bibliography(self.cache_dir, getattr(paper, '_input_spec', None), bibliography, llm_cache_identity)
                     
                     # Apply deduplication to all bibliography sources (not just LLM-extracted)
@@ -4926,18 +4934,51 @@ class ArxivReferenceChecker:
         if not bibliography_text:
             logger.warning("No bibliography text provided to parse_references")
             return []
+        self.last_reference_parser_method = None
         
         # Log a sample of the bibliography text for debugging
         bib_sample = bibliography_text[:500] + "..." if len(bibliography_text) > 500 else bibliography_text
         logger.debug(f"Bibliography sample: {bib_sample}")
 
         from refchecker.utils.bibtex_parser import detect_bibtex_format
-        if detect_bibtex_format(bibliography_text):
+        is_bibtex = detect_bibtex_format(bibliography_text)
+        if is_bibtex and self.extraction_mode == 'cascade':
             logger.info("Detected BibTeX format, using deterministic BibTeX parser")
-            return self._parse_bibtex_references(bibliography_text)
+            references = self._parse_bibtex_references(bibliography_text)
+            if references:
+                self.last_reference_parser_method = 'bib'
+                return references
 
         numbered_entries = self._split_numbered_reference_entries(bibliography_text)
         expected_numbered_count = len(numbered_entries)
+
+        deterministic_references = []
+        if self.extraction_mode == 'cascade' and expected_numbered_count:
+            fatal_state_before_deterministic = (
+                self.fatal_error,
+                self.fatal_error_message,
+            )
+            deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
+            if deterministic_references:
+                from refchecker.utils.text_utils import validate_parsed_references
+                validation = validate_parsed_references(deterministic_references)
+                complete = len(deterministic_references) >= expected_numbered_count
+                if validation['is_valid'] and complete:
+                    logger.info(
+                        "Using deterministic numbered-reference extraction "
+                        f"({len(deterministic_references)} references; quality "
+                        f"{validation['quality_score']:.2f})"
+                    )
+                    self.last_reference_parser_method = 'regex'
+                    self.fatal_error = False
+                    self.fatal_error_message = None
+                    return deterministic_references
+                logger.info(
+                    "Deterministic extraction needs LLM fallback "
+                    f"(quality {validation['quality_score']:.2f}, "
+                    f"{len(deterministic_references)} of {expected_numbered_count} references)"
+                )
+            self.fatal_error, self.fatal_error_message = fatal_state_before_deterministic
 
         if self.llm_extractor:
             try:
@@ -4955,32 +4996,38 @@ class ArxivReferenceChecker:
                         if chunked_references:
                             chunked_processed = self._process_llm_extracted_references(chunked_references)
                             if len(chunked_processed) >= expected_numbered_count:
+                                self.last_reference_parser_method = 'llm'
                                 return chunked_processed
                             if len(chunked_processed) > len(processed_references):
                                 processed_references = chunked_processed
 
-                        fatal_error_before_fallback = self.fatal_error
-                        deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
-                        if len(deterministic_references) > len(processed_references):
-                            logger.warning(
-                                "Using deterministic numbered-reference fallback "
-                                f"({len(deterministic_references)} references) after LLM under-extraction"
-                            )
-                            return deterministic_references
-                        self.fatal_error = fatal_error_before_fallback
+                        if self.extraction_mode == 'cascade':
+                            fatal_error_before_fallback = self.fatal_error
+                            deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
+                            if len(deterministic_references) > len(processed_references):
+                                logger.warning(
+                                    "Using deterministic numbered-reference fallback "
+                                    f"({len(deterministic_references)} references) after LLM under-extraction"
+                                )
+                                self.last_reference_parser_method = 'regex'
+                                return deterministic_references
+                            self.fatal_error = fatal_error_before_fallback
+                    self.last_reference_parser_method = 'llm'
                     return processed_references
                 else:
                     logger.warning("LLM reference extraction returned no results")
             except Exception as e:
                 logger.warning(f"LLM reference extraction failed: {e}")
 
-        if expected_numbered_count:
-            deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
+        if self.extraction_mode == 'cascade' and expected_numbered_count:
+            if not deterministic_references:
+                deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
             if deterministic_references:
                 logger.warning(
                     "Using deterministic numbered-reference extraction "
                     f"({len(deterministic_references)} references)"
                 )
+                self.last_reference_parser_method = 'regex'
                 return deterministic_references
         
         if not self.llm_extractor:
@@ -6699,9 +6746,16 @@ class ArxivReferenceChecker:
         self.last_bibliography_extraction_method = None
         self.last_paper_text = ''
         pdf_content = None
+        grobid_attempted = False
         from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
 
         def _maybe_use_grobid_fallback(failure_message):
+            nonlocal grobid_attempted
+            if self.extraction_mode != 'cascade':
+                return None
+            if grobid_attempted:
+                return None
+            grobid_attempted = True
             try:
                 pdf_path = getattr(paper, 'file_path', None)
                 if not pdf_path or not os.path.exists(pdf_path):
@@ -6710,6 +6764,7 @@ class ArxivReferenceChecker:
                     pdf_path=pdf_path,
                     pdf_content=pdf_content,
                     llm_available=bool(self.llm_extractor),
+                    extraction_mode=self.extraction_mode,
                     failure_message=failure_message,
                 )
                 if references:
@@ -6723,7 +6778,9 @@ class ArxivReferenceChecker:
 
         # Check bibliography cache
         from refchecker.utils.cache_utils import cached_bibliography, llm_cache_identity_from_extractor
-        llm_cache_identity = llm_cache_identity_from_extractor(self.llm_extractor)
+        llm_cache_identity = llm_cache_identity_from_extractor(
+            self.llm_extractor, self.extraction_mode
+        )
         hit = cached_bibliography(self.cache_dir, input_spec, llm_cache_identity)
         if hit is not None:
             self.last_bibliography_extraction_method = 'cache'
@@ -6748,7 +6805,11 @@ class ArxivReferenceChecker:
                     logger.warning(f"Could not save debug BibTeX file for {paper_id}: {e}")
             
             # Check if this is LaTeX thebibliography format (e.g., from .bbl files)
-            if '\\begin{thebibliography}' in bibtex_content and '\\bibitem' in bibtex_content:
+            if (
+                self.extraction_mode == 'cascade'
+                and '\\begin{thebibliography}' in bibtex_content
+                and '\\bibitem' in bibtex_content
+            ):
                 logger.info(f"Detected LaTeX thebibliography format, using extract_latex_references")
                 self.last_bibliography_extraction_method = 'bbl'
                 # Use None for file_path since this is content from .bbl files
@@ -6788,7 +6849,7 @@ class ArxivReferenceChecker:
                 else:
                     logger.debug(f"LaTeX parsing validation passed (quality: {validation['quality_score']:.2f})")
             else:
-                # Parse BibTeX using the standard flow (LLM or regex based on config)
+                # Use the shared parser so llm-only also applies to BBL/BibTeX.
                 self.last_bibliography_extraction_method = 'bib'
                 references = self.parse_references(bibtex_content)
             
@@ -6905,6 +6966,15 @@ class ArxivReferenceChecker:
             text = self.extract_text_from_pdf(pdf_content)
             self.last_paper_text = text or ''
             self.last_bibliography_extraction_method = 'pdf'
+
+            # Cascade policy for PDFs: GROBID is the structured extractor and
+            # therefore runs before bibliography-text parsing or any LLM call.
+            grobid_references = _maybe_use_grobid_fallback(
+                "No LLM or GROBID available for PDF reference extraction. "
+                "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
+            )
+            if grobid_references:
+                return grobid_references
         
         if not text:
             grobid_references = _maybe_use_grobid_fallback(
@@ -6992,7 +7062,7 @@ class ArxivReferenceChecker:
         if not self.last_bibliography_extraction_method:
             self.last_bibliography_extraction_method = 'pdf'
 
-        if not references and not self.llm_extractor:
+        if not references and self.extraction_mode == 'cascade':
             grobid_references = _maybe_use_grobid_fallback(
                 "No LLM or GROBID available for PDF reference extraction. "
                 "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
@@ -7487,7 +7557,7 @@ class ArxivReferenceChecker:
             'text': 'plain text references',
             'latex': 'LaTeX bibliography',
             'pdf': 'PDF parsing',
-            'grobid': 'GROBID fallback',
+            'grobid': 'GROBID extraction',
             'llm': 'LLM extraction',
         }
         return labels.get(method, method or 'unknown')
@@ -7944,6 +8014,15 @@ def main():
     parser.add_argument("--llm-endpoint", type=str,
                         help="Endpoint for the LLM provider (overrides default endpoint)")
     parser.add_argument(
+        "--extraction-mode",
+        choices=["cascade", "llm-only"],
+        default=os.environ.get("REFCHECKER_EXTRACTION_MODE", "cascade"),
+        help=(
+            "Reference extraction policy: cascade tries structured parsers and GROBID "
+            "before the LLM; llm-only bypasses them (default: cascade)"
+        ),
+    )
+    parser.add_argument(
         "--llm-reasoning-effort",
         choices=["default", "none", "minimal", "low", "medium", "high", "xhigh"],
         help="Reasoning effort for providers that support it (LM Studio default: none)",
@@ -8144,6 +8223,7 @@ def main():
             cache_dir=args.cache,
             ai_detection_enabled=args.ai_detection,
             ai_detection_device=args.ai_detection_device,
+            extraction_mode=args.extraction_mode,
         )
         
         if checker.fatal_error:

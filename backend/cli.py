@@ -245,6 +245,12 @@ def build_check_parser(subparsers=None):
                         help="API key for the LLM provider (else read from the provider's env var)")
     parser.add_argument("--no-llm", action="store_true",
                         help="Disable the LLM extractor (regex/structural extraction only)")
+    parser.add_argument(
+        "--extraction-mode",
+        choices=["cascade", "llm-only"],
+        default=os.environ.get("REFCHECKER_EXTRACTION_MODE", "cascade"),
+        help="Extraction policy: structured parsers/GROBID first, or LLM only (default: cascade)",
+    )
     parser.add_argument("--semantic-scholar-api-key", default=None,
                         help="Semantic Scholar API key (optional; raises rate limits). "
                              "Also read from SEMANTIC_SCHOLAR_API_KEY.")
@@ -539,6 +545,7 @@ def _build_checker(args):
         ai_detection_detectors=selected_detectors,
         detection_mode=detection_mode,
         enrich_enabled=(not args.no_enrich),
+        extraction_mode=args.extraction_mode,
     )
 
 
