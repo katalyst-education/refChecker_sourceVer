@@ -247,7 +247,21 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
   // Export handlers
   const handleExport = (format) => {
     setShowExportMenu(false)
-    const sortedRefs = sortReferencesForExport(references, sortMode)
+    // Export from the SAME style-filtered reference view that powers the GUI
+    // chips/cards so exported issue counts and rows match what users saw.
+    const sortedRefs = sortReferencesForExport(styleFilteredReferences, sortMode)
+    const exportStats = {
+      total_refs: summaryCounts.totalRefs ?? 0,
+      refs_verified: summaryCounts.references?.verified ?? 0,
+      refs_with_errors: summaryCounts.references?.errors ?? 0,
+      refs_with_warnings_only: summaryCounts.references?.warnings ?? 0,
+      refs_with_suggestions_only: summaryCounts.references?.suggestions ?? 0,
+      unverified_count: summaryCounts.references?.unverified ?? 0,
+      hallucination_count: summaryCounts.references?.hallucinated ?? 0,
+      errors_count: summaryCounts.issues?.errors ?? 0,
+      warnings_count: summaryCounts.issues?.warnings ?? 0,
+      suggestions_count: summaryCounts.issues?.suggestions ?? 0,
+    }
 
     // 'diff' mode short-circuits format: there are only two file shapes
     // (markdown and csv) that make sense for a side-by-side report.
@@ -273,7 +287,13 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
           return next
         })
       : sortedRefs
-    const data = { paperTitle, paperSource, stats, references: correctedRefs }
+    const data = {
+      paperTitle,
+      paperSource,
+      stats: exportStats,
+      references: correctedRefs,
+      isCheckComplete: isComplete,
+    }
 
     switch (format) {
       case 'markdown':

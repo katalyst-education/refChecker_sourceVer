@@ -2,6 +2,7 @@
  * Formatting utilities
  */
 import { shouldSuppressVenueWarning, venuesCoreMatch } from './venueAbbreviations'
+import { getEffectiveReferenceStatus } from './referenceStatus'
 
 /**
  * Format a date for display
@@ -759,7 +760,7 @@ function getCorrectedReferenceData(ref) {
  * @param {array} params.references - Array of reference results
  * @returns {string} Markdown formatted report
  */
-export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, references }) {
+export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, references, isCheckComplete = true }) {
   const lines = []
   
   // Header
@@ -799,7 +800,7 @@ export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, refere
     lines.push('No references found.')
   } else {
     references.forEach((ref, index) => {
-      const status = (ref.status || 'unknown').toLowerCase()
+      const status = (getEffectiveReferenceStatus(ref, isCheckComplete) || 'unknown').toLowerCase()
       const statusEmoji = {
         verified: '✅',
         warning: '⚠️',
@@ -978,7 +979,7 @@ export async function copyToClipboard(text) {
  * @param {object} params - Export parameters
  * @returns {string} Plain text formatted report
  */
-export function exportResultsAsPlainText({ paperTitle, paperSource, stats, references }) {
+export function exportResultsAsPlainText({ paperTitle, paperSource, stats, references, isCheckComplete = true }) {
   const lines = []
   
   lines.push('REFCHECKER REPORT')
@@ -1006,7 +1007,7 @@ export function exportResultsAsPlainText({ paperTitle, paperSource, stats, refer
     lines.push('No references found.')
   } else {
     references.forEach((ref, index) => {
-      const status = (ref.status || 'unknown').toUpperCase()
+      const status = (getEffectiveReferenceStatus(ref, isCheckComplete) || 'unknown').toUpperCase()
       lines.push('')
       lines.push(`[${index + 1}] ${ref.title || ref.cited_url || 'Unknown Title'} [${status}]`)
       if (ref.authors?.length > 0) {
@@ -1199,7 +1200,7 @@ export function exportResultsAsBibtex({ references }) {
  * --report-format json/jsonl produces so downstream consumers see the same
  * shape regardless of which path produced the report.
  */
-function _flattenReferenceForReport(ref, index, paperTitle, paperSource) {
+function _flattenReferenceForReport(ref, index, paperTitle, paperSource, isCheckComplete = true) {
   const errors = (ref.errors || []).map(formatIssueLine)
   const warnings = (ref.warnings || []).map(formatIssueLine)
   return {
@@ -1215,7 +1216,7 @@ function _flattenReferenceForReport(ref, index, paperTitle, paperSource) {
     cited_url: ref.cited_url || '',
     matched_db: ref.matched_db || '',
     verified_url: ref.verified_url || '',
-    status: ref.status || '',
+    status: getEffectiveReferenceStatus(ref, isCheckComplete) || '',
     error_count: errors.length,
     warning_count: warnings.length,
     errors,
@@ -1226,10 +1227,10 @@ function _flattenReferenceForReport(ref, index, paperTitle, paperSource) {
   }
 }
 
-export function exportResultsAsJsonl({ paperTitle, paperSource, references }) {
+export function exportResultsAsJsonl({ paperTitle, paperSource, references, isCheckComplete = true }) {
   if (!references || references.length === 0) return ''
   return references
-    .map((ref, i) => JSON.stringify(_flattenReferenceForReport(ref, i + 1, paperTitle, paperSource)))
+    .map((ref, i) => JSON.stringify(_flattenReferenceForReport(ref, i + 1, paperTitle, paperSource, isCheckComplete)))
     .join('\n')
 }
 
@@ -1242,7 +1243,7 @@ function _csvField(value) {
   return s
 }
 
-export function exportResultsAsCsv({ paperTitle, paperSource, references }) {
+export function exportResultsAsCsv({ paperTitle, paperSource, references, isCheckComplete = true }) {
   const columns = [
     'index', 'paper_title', 'paper_source',
     'cited_title', 'cited_authors', 'cited_year', 'cited_venue', 'cited_doi',
@@ -1253,7 +1254,7 @@ export function exportResultsAsCsv({ paperTitle, paperSource, references }) {
   const header = columns.join(',')
   if (!references || references.length === 0) return header
   const rows = references.map((ref, i) => {
-    const flat = _flattenReferenceForReport(ref, i + 1, paperTitle, paperSource)
+    const flat = _flattenReferenceForReport(ref, i + 1, paperTitle, paperSource, isCheckComplete)
     return columns.map(c => _csvField(flat[c])).join(',')
   })
   return [header, ...rows].join('\n')

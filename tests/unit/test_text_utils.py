@@ -273,6 +273,24 @@ class TestNameMatching:
         assert "cited:  P. Hinze" in error
         assert "actual: Patrick Hintze" in error
 
+    def test_compare_authors_accepts_same_authors_different_order(self):
+        cited = ["J. Doe", "A. Smith", "B. Brown"]
+        correct = [{"name": "A. Smith"}, {"name": "B. Brown"}, {"name": "J. Doe"}]
+
+        match, msg = compare_authors(cited, correct)
+
+        assert match is True
+        assert "same authors, different order" in msg
+
+    def test_compare_authors_still_rejects_wrong_author_with_order_shuffle(self):
+        cited = ["J. Doe", "A. Smith", "B. Brown"]
+        correct = [{"name": "A. Smith"}, {"name": "B. Brown"}, {"name": "Eunhwan Park"}]
+
+        match, msg = compare_authors(cited, correct)
+
+        assert match is False
+        assert "mismatch" in msg.lower() or "no matching authors" in msg.lower()
+
 
 class TestAuthorNameProcessing:
     """Test author name processing functions."""

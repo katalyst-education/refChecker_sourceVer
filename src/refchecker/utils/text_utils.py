@@ -3990,6 +3990,37 @@ def compare_authors(cited_authors: list, correct_authors: list, normalize_func=N
     else:
         comparison_cited = cleaned_cited
         comparison_correct = correct_names
+
+    def _all_authors_match_unordered(cited_list, correct_list):
+        """True when both lists contain the same authors, independent of order."""
+        if len(cited_list) != len(correct_list):
+            return False
+        used = set()
+        for cited_author in cited_list:
+            matched_idx = None
+            for idx, correct_author in enumerate(correct_list):
+                if idx in used:
+                    continue
+                if enhanced_name_match(cited_author, correct_author):
+                    matched_idx = idx
+                    break
+            if matched_idx is None:
+                return False
+            used.add(matched_idx)
+        return True
+
+    # Author order is often style-dependent (or swapped by metadata sources).
+    # If both lists contain the same authors, do not raise positional mismatch.
+    if (
+        len(comparison_cited) > 1
+        and _all_authors_match_unordered(comparison_cited, comparison_correct)
+    ):
+        if any(
+            not enhanced_name_match(cited_author, correct_author)
+            for cited_author, correct_author in zip(comparison_cited, comparison_correct)
+        ):
+            return True, "Authors match (same authors, different order)"
+        return True, "Authors match"
     
     # Use shared three-line formatter (imported lazily to avoid circular imports)
     from refchecker.utils.error_utils import (
