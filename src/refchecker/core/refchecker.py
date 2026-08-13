@@ -6195,6 +6195,8 @@ class ArxivReferenceChecker:
         Create structured reference from LLM-extracted text (assumes well-formatted input)
         """
         # LLM outputs are well-formatted, so we can use simpler parsing
+        if re.search(r"(?:doi(?:\.org/|\s*:)|10\.\d{4,9}/)", ref_text, re.IGNORECASE):
+            logger.info("[DOI_TRACE] stage=parser_input raw_reference=%r", ref_text)
         
         # Check for ArXiv references
         arxiv_patterns = [
@@ -6628,6 +6630,14 @@ class ArxivReferenceChecker:
                         year = correct_year
                 except Exception as e:
                     logger.debug(f"Could not fetch ArXiv year for {arxiv_id}: {e}")
+
+        if doi:
+            logger.info(
+                "[DOI_TRACE] stage=parser_output title=%r doi=%r url=%r",
+                title,
+                doi,
+                url or arxiv_url or "",
+            )
         
         return {
             'url': url or arxiv_url or "",

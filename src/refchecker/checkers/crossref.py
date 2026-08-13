@@ -468,6 +468,14 @@ class CrossRefReferenceChecker:
             doi = reference['doi']
         elif url:
             doi = extract_doi_from_url(url)
+
+        if doi:
+            logger.info(
+                "[DOI_TRACE] stage=crossref_input title=%r cited_doi=%r cited_url=%r",
+                title,
+                doi,
+                url,
+            )
         
         work_data = None
         
@@ -476,8 +484,18 @@ class CrossRefReferenceChecker:
             work_data = self.get_work_by_doi(doi)
             
             if work_data:
+                logger.info(
+                    "[DOI_TRACE] stage=crossref_direct_lookup status=found "
+                    "cited_doi=%r returned_doi=%r",
+                    doi,
+                    work_data.get('DOI'),
+                )
                 logger.debug(f"Found work by DOI in CrossRef: {doi}")
             else:
+                logger.info(
+                    "[DOI_TRACE] stage=crossref_direct_lookup status=not_found cited_doi=%r",
+                    doi,
+                )
                 logger.debug(f"Could not find work with DOI in CrossRef: {doi}")
         
         # If we couldn't get the work by DOI, try searching by title
@@ -507,6 +525,13 @@ class CrossRefReferenceChecker:
                 # Use match if score is good enough
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
                     work_data = best_match
+                    logger.info(
+                        "[DOI_TRACE] stage=crossref_title_fallback cited_doi=%r "
+                        "matched_doi=%r score=%.4f",
+                        doi,
+                        best_match.get('DOI'),
+                        best_score,
+                    )
                     logger.debug(f"Found work by title in CrossRef with score {best_score:.2f}: {cleaned_title}")
                 else:
                     logger.debug(f"No good title match found in CrossRef (best score: {best_score:.2f})")
@@ -601,6 +626,11 @@ class CrossRefReferenceChecker:
             # Compare DOIs using the proper comparison function
             from refchecker.utils.doi_utils import compare_dois, validate_doi_resolves
             if not compare_dois(doi, work_doi):
+                logger.warning(
+                    "[DOI_TRACE] stage=crossref_compare result=mismatch cited_doi=%r actual_doi=%r",
+                    doi,
+                    work_doi,
+                )
                 # If cited DOI resolves, it's likely a valid alternate DOI (e.g., arXiv vs conference)
                 # Treat as warning instead of error
                 if validate_doi_resolves(doi):
@@ -615,6 +645,12 @@ class CrossRefReferenceChecker:
                         'error_details': format_doi_mismatch(doi, work_doi),
                         'ref_doi_correct': work_doi
                     })
+            else:
+                logger.info(
+                    "[DOI_TRACE] stage=crossref_compare result=match cited_doi=%r actual_doi=%r",
+                    doi,
+                    work_doi,
+                )
         
         # Extract URL from work data
         work_url = self.extract_url_from_work(work_data)

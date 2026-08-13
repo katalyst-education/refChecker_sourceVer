@@ -21,6 +21,45 @@ from refchecker.config.settings import resolve_api_key, resolve_endpoint, DEFAUL
 
 logger = logging.getLogger(__name__)
 
+
+def _doi_trace_contexts(text: str, limit: int = 100) -> List[str]:
+    """Return compact, escaped DOI contexts for extraction diagnostics.
+
+    Keeping the line break visible is intentional: wrapped DOI suffixes are
+    one of the places where a generative extractor can silently alter an
+    identifier.  This helper is diagnostic only and never changes the text.
+    """
+    if not text:
+        return []
+
+    contexts = []
+    seen = set()
+    for match in re.finditer(r"10\.\d{4,9}/", str(text), re.IGNORECASE):
+        tail = str(text)[match.start():match.start() + 160]
+        # Stop before the next numbered reference or structured-output field.
+        tail = re.split(r"(?=\r?\n\s*\[\d+\])|#", tail, maxsplit=1)[0].strip()
+        escaped = tail.replace("\r", "\\r").replace("\n", "\\n")
+        if escaped and escaped not in seen:
+            seen.add(escaped)
+            contexts.append(escaped)
+        if len(contexts) >= limit:
+            break
+    return contexts
+
+
+def _log_doi_trace(stage: str, model: str, text: str, origin: str) -> None:
+    """Emit a concise console-visible DOI trace when the payload has DOIs."""
+    contexts = _doi_trace_contexts(text)
+    if contexts:
+        logger.info(
+            "[DOI_TRACE] stage=%s origin=%s model=%s count=%d contexts=%s",
+            stage,
+            origin,
+            model or "unknown",
+            len(contexts),
+            json.dumps(contexts, ensure_ascii=False),
+        )
+
 # Soft import — usage tracker only exists when running under the WebUI/desktop
 # backend. The CLI is unaffected; tracker calls become no-ops.
 try:
@@ -155,6 +194,7 @@ class LLMProviderMixin:
         """Wrapper around _call_llm that checks/saves the LLM response cache."""
         logger.debug("Raw bibliography text passed to LLM (%d chars):\n%s",
                       len(prompt), prompt)
+        _log_doi_trace("llm_input", self.model, prompt, "bibliography")
         if self.cache_dir:
             from refchecker.utils.cache_utils import cached_llm_response, cache_llm_response
             system = self._get_system_prompt()
@@ -163,11 +203,13 @@ class LLMProviderMixin:
                 logger.debug("Raw LLM extraction response (cached, %d chars):\n%s",
                              len(hit['text']), hit['text'])
                 if cache_predicate is None or cache_predicate(hit['text']):
+                    _log_doi_trace("llm_output", self.model, hit['text'], "cache")
                     return hit['text']
                 logger.info("Ignoring cached LLM extraction response that parses to zero references")
             result = self._call_llm(prompt)
             logger.debug("Raw LLM extraction response (%d chars):\n%s",
                          len(result), result)
+            _log_doi_trace("llm_output", self.model, result, "fresh")
             if cache_predicate is None or cache_predicate(result):
                 cache_llm_response(self.cache_dir, self.model, system, prompt, response={'text': result})
             else:
@@ -176,6 +218,7 @@ class LLMProviderMixin:
         result = self._call_llm(prompt)
         logger.debug("Raw LLM extraction response (%d chars):\n%s",
                      len(result), result)
+        _log_doi_trace("llm_output", self.model, result, "fresh")
         return result
 
     def _clean_bibtex_for_llm(self, bibliography_text: str) -> str:

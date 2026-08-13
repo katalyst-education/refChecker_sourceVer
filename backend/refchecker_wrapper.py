@@ -1391,8 +1391,11 @@ class ProgressRefChecker:
             details = err.get('error_details') or err.get('warning_details') or err.get('info_details')
             if not e_type and not details:
                 continue
-            # Track if this was originally an info_type (suggestion, not error)
+            # Track if this was originally an info_type. Publication-year
+            # discrepancies are first-class neutral information (the citation
+            # remains verified); legacy info items retain suggestion semantics.
             is_info = 'info_type' in err
+            is_metadata_info = is_info and e_type == 'publication_year_discrepancy'
             # Track if this was originally a warning_type (warning, not error)
             is_warning = 'warning_type' in err
             logger.info(f"Sanitizing error: e_type={e_type}, is_info={is_info}, is_warning={is_warning}, keys={list(err.keys())}")
@@ -1413,9 +1416,14 @@ class ProgressRefChecker:
                 "error_details": details if e_type != 'timeout' else 'Verification timed out',
                 "cited_value": err.get('cited_value'),
                 "actual_value": _actual,
-                "is_suggestion": is_info,  # Preserve info_type as suggestion flag
+                "is_suggestion": is_info and not is_metadata_info,
+                "is_info": is_metadata_info,
                 "is_warning": is_warning,  # Preserve warning_type as warning flag
             }
+            if err.get('source_years'):
+                _san['source_years'] = err.get('source_years')
+            if err.get('metadata_classification'):
+                _san['metadata_classification'] = err.get('metadata_classification')
             # Carry the typed correction fields through so the FE corrected-bibtex
             # builder can recover year/venue/title/authors even when the checker
             # only set the typed field (belt-and-suspenders with the backfill).
@@ -1431,6 +1439,7 @@ class ProgressRefChecker:
         has_errors = any(
             e.get('error_type') not in ['unverified'] 
             and not e.get('is_suggestion')
+            and not e.get('is_info')
             and not e.get('is_warning')
             # 'url' errors where the URL references the paper are informational,
             # not real errors — the webpage checker confirmed the cited URL
@@ -1462,6 +1471,7 @@ class ProgressRefChecker:
                 e for e in sanitized
                 if e.get('error_type') != 'unverified'
                 and not e.get('is_suggestion')
+                and not e.get('is_info')
                 and not e.get('is_warning')
             ]
             cited_url_lower = cited_url.lower()
@@ -1558,6 +1568,7 @@ class ProgressRefChecker:
         # Format errors, warnings, and suggestions
         formatted_errors = []
         formatted_warnings = []
+        formatted_infos = []
         formatted_suggestions = []
         for err in sanitized:
             err_obj = {
@@ -1569,13 +1580,25 @@ class ProgressRefChecker:
                 "cited_value": err.get('cited_value'),
                 "actual_value": err.get('actual_value')
             }
+            if err.get('source_years'):
+                err_obj['source_years'] = err.get('source_years')
+            if err.get('metadata_classification'):
+                err_obj['metadata_classification'] = err.get('metadata_classification')
             # Propagate typed correction fields so the FE corrected-bibtex builder
             # always has year/venue/title/authors to insert.
             for _k in ("ref_year_correct", "ref_venue_correct", "ref_title_correct", "ref_authors_correct", "ref_doi_correct"):
                 if err.get(_k):
                     err_obj[_k] = err.get(_k)
-            # Check is_suggestion flag (set when original had info_type)
-            if err.get('is_suggestion'):
+            if err.get('is_info'):
+                formatted_infos.append({
+                    "info_type": err.get('error_type') or 'info',
+                    "info_details": err.get('error_details', ''),
+                    "cited_value": err.get('cited_value'),
+                    "source_years": err.get('source_years') or [],
+                    "metadata_classification": err.get('metadata_classification'),
+                })
+            # Check is_suggestion flag (set for legacy info_type entries)
+            elif err.get('is_suggestion'):
                 # Store as suggestion with full details
                 formatted_suggestions.append({
                     "suggestion_type": err.get('error_type') or 'info',
@@ -1690,11 +1713,15 @@ class ProgressRefChecker:
             "status": status,
             "errors": formatted_errors,
             "warnings": formatted_warnings,
+            "infos": formatted_infos,
             "suggestions": formatted_suggestions,
             "authoritative_urls": authoritative_urls,
             "matched_database": matched_database,
             "verified_via_website": verified_via_webpage,
             "enrichment": enrichment_payload,
+            "publication_year_assessment": (
+                (verified_data or {}).get('_publication_year_assessment')
+            ),
             "corrected_reference": None,
             "hallucination_assessment": hallucination_assessment,
             "_raw_errors": errors,  # Stashed for deferred hallucination check
@@ -1733,6 +1760,7 @@ class ProgressRefChecker:
                 "error_details": str(error)
             }],
             "warnings": [],
+            "infos": [],
             "suggestions": [],
             "authoritative_urls": [],
             "corrected_reference": None,
@@ -3840,6 +3868,25 @@ class ProgressRefChecker:
         if any(
             str(error.get('error_type') or '').strip().lower() == 'unverified'
             for error in (cached_result.get('errors') or [])
+        ):
+            return False
+
+        # Results cached before publication-year reconciliation may still carry
+        # the old single-source "Year mismatch" warning/error. Refresh those
+        # DOI/PMID-addressable entries once so the new cross-database policy can
+        # classify them as verified, metadata discrepancy, or likely error.
+        has_stable_identifier = bool(cached_result.get('doi') or cached_result.get('pmid'))
+        year_issues = (cached_result.get('errors') or []) + (cached_result.get('warnings') or [])
+        has_year_issue = any(
+            str(issue.get('error_type') or issue.get('warning_type') or '').strip().lower()
+            in {'year', 'publication_year'}
+            for issue in year_issues
+            if isinstance(issue, dict)
+        )
+        if (
+            has_stable_identifier
+            and has_year_issue
+            and not cached_result.get('publication_year_assessment')
         ):
             return False
 

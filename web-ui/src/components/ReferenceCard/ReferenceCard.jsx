@@ -1243,6 +1243,26 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
             </div>
           )}
 
+          {/* Neutral metadata information. These items explain a real
+              cross-database discrepancy without downgrading a correct citation
+              from Verified to Warning. */}
+          {reference.infos?.map((info, i) => {
+            const sourceYears = Array.isArray(info.source_years) ? info.source_years : []
+            return (
+              <div key={`info-${i}`} style={{ color: 'var(--color-accent)', wordBreak: 'break-word' }}>
+                <div className="flex items-start gap-2">
+                  <span aria-hidden="true">ℹ️</span>
+                  <span className="font-bold">{info.info_details || 'Metadata discrepancy'}</span>
+                </div>
+                {sourceYears.length > 0 && (
+                  <div className="ml-6">
+                    {sourceYears.map(({ source, year }) => `${source}: ${year}`).join(' · ')}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+
           {/* Warnings */}
           {displayWarnings.map((warning, i) => {
             // Warnings reach us under two field-name conventions: the verifier's
@@ -1293,6 +1313,11 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
           </span>
                         <CollapsibleText text={parsedDetails?.actual || warning.actual_value} />
                       </div>
+                  )}
+                  {Array.isArray(warning.source_years) && warning.source_years.length > 0 && (
+                    <div className="ml-6">
+                      {warning.source_years.map(({ source, year }) => `${source}: ${year}`).join(' · ')}
+                    </div>
                   )}
                 </div>
             )
@@ -1404,6 +1429,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     prev.hallucination_assessment === next.hallucination_assessment &&
     prev.errors === next.errors &&
     prev.warnings === next.warnings &&
+    prev.infos === next.infos &&
     prev.suggestions === next.suggestions &&
     (prev.matched_database ?? null) === (next.matched_database ?? null) &&
     prev.authoritative_urls === next.authoritative_urls

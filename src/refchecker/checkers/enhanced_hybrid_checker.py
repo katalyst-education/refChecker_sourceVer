@@ -1534,6 +1534,23 @@ class EnhancedHybridReferenceChecker:
                 if arxiv_errors:
                     errors = (errors or []) + arxiv_errors
 
+        # 4. Reconcile publication years across authoritative metadata sources.
+        # A database may use the online-first year while PubMed/Crossref uses
+        # the issue/print year.  When the cited year is supported by any reliable
+        # source, keep the reference verified and surface the disagreement as an
+        # informational item instead of a warning/error.  This lives here (the
+        # shared verifier entry point) so CLI, bulk, and WebUI remain identical.
+        if errors and verified_data is not None:
+            try:
+                from refchecker.utils.publication_years import reconcile_publication_year
+                verified_data, errors = reconcile_publication_year(
+                    reference, verified_data, errors,
+                )
+            except Exception as exc:
+                # Cross-source metadata is supplementary evidence. A provider
+                # outage must never break or erase the primary verification.
+                logger.debug("Publication-year reconciliation skipped: %s", exc)
+
         return verified_data, errors or [], url
 
     def verify_reference(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:

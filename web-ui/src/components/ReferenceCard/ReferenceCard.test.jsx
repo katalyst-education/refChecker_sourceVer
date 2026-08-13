@@ -505,4 +505,30 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
     expect(screen.getByText(/Year mismatch/)).toBeTruthy()
     expect(screen.queryByText(/Unknown mismatch/)).toBeNull()
   })
+
+  it('renders publication-year source disagreement as verified information', () => {
+    const reference = {
+      status: 'verified',
+      title: 'Retrieval Augmented Therapy Suggestion for Molecular Tumor Boards',
+      authors: ['E. Berman'],
+      year: 2025,
+      errors: [],
+      warnings: [],
+      suggestions: [],
+      infos: [{
+        info_type: 'publication_year_discrepancy',
+        info_details: 'Publication dates differ across databases',
+        source_years: [
+          { source: 'PubMed/NCBI', year: 2025 },
+          { source: 'Semantic Scholar', year: 2024 },
+        ],
+      }],
+    }
+
+    render(<ReferenceCard reference={reference} index={0} isCheckComplete />)
+
+    expect(screen.getByText('Publication dates differ across databases')).toBeTruthy()
+    expect(screen.getByText('PubMed/NCBI: 2025 · Semantic Scholar: 2024')).toBeTruthy()
+    expect(screen.queryByText(/Warning/)).toBeNull()
+  })
 })
