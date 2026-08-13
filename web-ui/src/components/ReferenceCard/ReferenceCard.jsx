@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, memo } from 'react'
+import { createPortal } from 'react-dom'
 import {
   normalizeAuthors,
   hasEtAlSentinel,
@@ -971,6 +972,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
                   onClick={() => setContextOpen((v) => !v)}
                   aria-expanded={contextOpen}
                   title={contextOpen ? 'Hide citation contexts' : 'Show citation contexts'}
+                  className="hover:opacity-70 transition-opacity"
                   style={{
                     background: 'none',
                     border: 'none',
@@ -1060,6 +1062,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
                                 type="button"
                                 onClick={(e) => { e.stopPropagation(); viewContextInDoc(ctx, i) }}
                                 title="Open this passage in the document and highlight it"
+                                className="hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
                                 style={{
                                   marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4,
                                   background: 'none', border: '1px solid var(--color-border, #d4d4d8)',
@@ -1137,7 +1140,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
             return filteredUrls.map((urlObj, i) => (
               <div
                 key={i}
-                className="flex gap-2"
+                className="flex mb-1"
                 style={{ minWidth: 0 }}
               >
                 <span
@@ -1446,32 +1449,78 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
  * Falls back gracefully when no enrichment was returned (e.g. the
  * ref verified via DBLP only and has no author IDs).
  */
+// Names beyond this count almost never fit in two lines regardless of
+// measurement; also used as the sole signal in environments without a real
+// layout engine (e.g. jsdom in unit tests, where scrollHeight is always 0).
+const AUTHORS_FALLBACK_CAP = 10
+
 function AuthorsLine({ authors, enrichedAuthors, paperTitle, paperYear }) {
   const citedList = normalizeAuthors(authors)
   // Hooks MUST run before any early return (rules-of-hooks). If a reference's
   // authors momentarily go empty (e.g. during Re-verify / Suggest / Remove),
   // an early return here would skip the useState below and flip the hook count,
   // crashing the whole tree with React #310 (blank page).
-  const [showAll, setShowAll] = useState(false)
-  // R09: when the cited list was truncated (ends in an "et al." sentinel)
-  // OR the enriched author list is strictly longer than what was cited,
-  // offer to swap the cited list for the full enriched author list.
-  const [showEnriched, setShowEnriched] = useState(false)
+  // R09/R-row-wrap: the card ALWAYS displays the reference as it was
+  // extracted from the paper — that is the thing being checked, and the
+  // Verification section below reports what the matched record actually says.
+  // Silently substituting the database's author list here made the card
+  // contradict its own error ("cited: F. Li" while the header read "Fan
+  // Yang"). The fuller, DB-resolved list is still available, but only behind
+  // an explicit, labelled toggle.
+  const [expanded, setExpanded] = useState(false)
+  const [showResolved, setShowResolved] = useState(false)
+  const [needsExpand, setNeedsExpand] = useState(false)
+  const measureRef = useRef(null)
 
   // Real enriched names from the resolved author records (sentinels already
-  // can't appear here — these are DB-resolved people). Drives the "et al.
-  // (show N authors)" expand control.
+  // can't appear here — these are DB-resolved people).
   const enrichedNames = (Array.isArray(enrichedAuthors) ? enrichedAuthors : [])
     .map(a => (a && typeof a.name === 'string' ? a.name.trim() : ''))
     .filter(Boolean)
   const etAlSentinel = hasEtAlSentinel(authors)
   const canExpandEnriched = enrichedNames.length > citedList.length
-  const offerEtAlExpand = (etAlSentinel || canExpandEnriched) && enrichedNames.length > 0
+  // Is there a fuller resolved list worth offering as an opt-in?
+  const hasFullerEnriched = (etAlSentinel || canExpandEnriched) && enrichedNames.length > 0
 
-  // The list actually rendered: the enriched full list when expanded,
-  // otherwise the cited (possibly truncated) list.
-  const list = (showEnriched && offerEtAlExpand) ? enrichedNames : citedList
-  if (citedList.length === 0 && !offerEtAlExpand) return null
+  // Nothing was extracted at all → there is no cited text to contradict, so
+  // fall back to the resolved names rather than showing an empty line (still
+  // labelled as coming from the matched record).
+  const citedEmpty = citedList.length === 0 && enrichedNames.length > 0
+  const showingResolved = (showResolved && hasFullerEnriched) || citedEmpty
+  const list = showingResolved ? enrichedNames : citedList
+
+  // Measure whether the full name list wraps beyond two lines at its actual
+  // rendered width, and only offer a show-more/less toggle in that case.
+  // jsdom (unit tests) has no real layout engine, so scrollHeight/lineHeight
+  // are always 0 there; fall back to a conservative name-count heuristic so
+  // pathologically long author lists still collapse sensibly in that case.
+  useEffect(() => {
+    const measure = () => {
+      const el = measureRef.current
+      if (!el) return
+      const cs = window.getComputedStyle(el)
+      const lineHeight = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.4) || 0
+      const fullHeight = el.scrollHeight
+      if (!fullHeight || !lineHeight) {
+        setNeedsExpand(list.length > AUTHORS_FALLBACK_CAP)
+        return
+      }
+      setNeedsExpand(fullHeight > lineHeight * 2 + 1)
+    }
+    measure()
+    let ro
+    if (typeof ResizeObserver !== 'undefined' && measureRef.current) {
+      ro = new ResizeObserver(measure)
+      ro.observe(measureRef.current)
+    }
+    window.addEventListener('resize', measure)
+    return () => {
+      if (ro) ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list.join('|')])
+
   if (list.length === 0) return null
 
   // Normalise a name fragment: lowercase, strip diacritics, strip
@@ -1543,15 +1592,31 @@ function AuthorsLine({ authors, enrichedAuthors, paperTitle, paperYear }) {
     return null
   }
 
-  // Cap at 10 visible names; an overflow list is expandable to reveal ALL
-  // authors (replaces the old static " et al.").  (showAll is declared above,
-  // before the early return, to satisfy rules-of-hooks.)
-  const CAP = 10
-  const overflow = list.length > CAP
-  const visible = (showAll || !overflow) ? list : list.slice(0, CAP)
+  // The full list is always rendered (never sliced) — when it wraps beyond
+  // two rows, a CSS line-clamp visually collapses it and the show-more/less
+  // button (below) reveals/hides the remainder without losing any authors.
   return (
-    <div style={{ color: 'var(--color-text-secondary)' }}>
-      {visible.map((name, i) => {
+    <div style={{ color: 'var(--color-text-secondary)', position: 'relative' }}>
+      {/* Hidden clone used solely to measure whether the full list wraps
+          beyond two lines at the actual rendered width (see effect above). */}
+      <span
+        ref={measureRef}
+        aria-hidden="true"
+        style={{
+          position: 'absolute', top: 0, left: 0, right: 0,
+          visibility: 'hidden', pointerEvents: 'none', zIndex: -1,
+          whiteSpace: 'normal',
+        }}
+      >
+        {/* Masked placeholder (not the real names) so text queries (incl.
+            accessibility-tree-based test queries) never match this hidden
+            measurement clone twice; keeps commas/spaces for word-wrap parity. */}
+        {list.join(', ').replace(/[^\s,]/g, 'x')}
+      </span>
+      <span style={needsExpand && !expanded ? {
+        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+      } : undefined}>
+      {list.map((name, i) => {
         const e = lookupEnrichment(name)
         const profileHref = e?.orcid
           ? `https://orcid.org/${e.orcid}`
@@ -1583,33 +1648,59 @@ function AuthorsLine({ authors, enrichedAuthors, paperTitle, paperYear }) {
         return (
           <span key={`${name}-${i}`}>
             <AuthorChip name={name} display={name} e={e} href={href} onClickHref={handle} tooltipFallback={tooltip} paperTitle={paperTitle} paperYear={paperYear} />
-            {i < visible.length - 1 ? ', ' : ''}
+            {i < list.length - 1 ? ', ' : ''}
           </span>
         )
       })}
-      {overflow && !showAll && (
-        <button type="button" onClick={() => setShowAll(true)}
-          className="ml-1 underline" style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}
-          title="Show all authors">, +{list.length - CAP} more</button>
+      {/* The citation's own "et al." truncation is part of what was extracted,
+          so keep it visible — dropping it made a truncated citation look like
+          a complete one-author list. */}
+      {!showingResolved && etAlSentinel && (
+        <span style={{ color: 'var(--color-text-muted)' }}>, et al.</span>
       )}
-      {overflow && showAll && (
-        <button type="button" onClick={() => setShowAll(false)}
-          className="ml-1 underline" style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}>show less</button>
-      )}
-      {/* R09: "et al." → expand to the full enriched author list. Only shown
-          when the cited list was truncated (or the enriched list is longer)
-          AND we actually have real enriched names to reveal — never fabricated. */}
-      {offerEtAlExpand && !showEnriched && (
-        <button type="button" onClick={() => { setShowEnriched(true); setShowAll(false) }}
-          className="ml-1 underline" style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}
-          title="Show the full author list resolved from the matched record">
-          {' '}et al. (show {enrichedNames.length} authors)
+      </span>
+      {/* Show-more/less only appears when the displayed list actually wraps
+          beyond two rows (measured above) — short lists never get a button. */}
+      {needsExpand && !expanded && (
+        <button type="button" onClick={() => setExpanded(true)}
+          className="ml-1 underline hover:opacity-70 transition-opacity" style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}
+          title="Show the rest of this author list">
+          {' '}show more
         </button>
       )}
-      {offerEtAlExpand && showEnriched && (
-        <button type="button" onClick={() => { setShowEnriched(false); setShowAll(false) }}
-          className="ml-1 underline" style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}>show less</button>
+      {needsExpand && expanded && (
+        <button type="button" onClick={() => setExpanded(false)}
+          className="ml-1 underline hover:opacity-70 transition-opacity" style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}>show less</button>
       )}
+      {/* Opt-in swap to the matched record's full author list. Kept explicit
+          (and labelled) so the card never silently shows corrected data in
+          place of what the paper actually cited. */}
+      {showingResolved ? (
+        <>
+          <span className="ml-1" style={{ color: 'var(--color-text-muted)', fontSize: '0.85em' }}>
+            (from matched record)
+          </span>
+          {!citedEmpty && (
+            <button type="button"
+              onClick={() => { setShowResolved(false); setExpanded(false) }}
+              className="ml-1 underline hover:opacity-70 transition-opacity"
+              style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}
+              title="Show the authors exactly as they were cited in the paper">
+              show as cited
+            </button>
+          )}
+        </>
+      ) : hasFullerEnriched ? (
+        <button type="button"
+          onClick={() => { setShowResolved(true); setExpanded(false) }}
+          className="ml-1 underline hover:opacity-70 transition-opacity"
+          style={{ color: 'var(--color-accent)', fontSize: '0.85em' }}
+          title="Show the full author list resolved from the matched record">
+          {canExpandEnriched
+            ? `show all ${enrichedNames.length} author${enrichedNames.length === 1 ? '' : 's'}`
+            : 'show matched authors'}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -1709,7 +1800,12 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
   // there's more room above, and cap maxHeight to the ACTUAL available space so
   // the lower part is never clipped below the viewport. Recomputed whenever the
   // popover opens, on scroll, and on resize (real geometry — no guessing).
-  const [placement, setPlacement] = useState({ dir: 'down', maxHeight: '70vh' })
+  // Rendered via a portal (see below) with `position: fixed` coordinates so an
+  // ancestor reference card's `overflow: hidden`/`auto` can never clip it —
+  // previously the popover was an absolutely-positioned DOM child of the
+  // author chip, so opening upward near the top of a card sliced the top of
+  // the card off (avatar/name/pin controls hidden behind the card boundary).
+  const [placement, setPlacement] = useState({ dir: 'down', maxHeight: '70vh', left: 0, top: 0, bottom: 0 })
 
   // Lazily pull the richer Semantic Scholar profile the first time the card
   // opens for an author that has an S2 id. Soft-fails to the basic card.
@@ -1758,12 +1854,18 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
     if (!e) return
     enterTimer.current = setTimeout(() => { setOpen(true); loadProfile() }, 250)
   }
-  const onLeave = () => {
+  // Moving the pointer off BOTH the author name and the popover always
+  // dismisses it — including when it was clicked open ("pinned"). The card is
+  // still fully interactive while the pointer is on it (the popover's own
+  // onMouseEnter cancels this pending close), but it must never be left
+  // stranded on screen after the pointer has moved away.
+  const scheduleClose = () => {
     if (enterTimer.current) { clearTimeout(enterTimer.current); enterTimer.current = null }
-    // R11: when pinned, leaving the chip must NOT close the popover.
-    if (pinned) return
-    leaveTimer.current = setTimeout(() => setOpen(false), 120)
+    if (leaveTimer.current) clearTimeout(leaveTimer.current)
+    // 180ms is enough to cross the small gap between the name and the popover.
+    leaveTimer.current = setTimeout(() => { setPinned(false); setOpen(false) }, 180)
   }
+  const onLeave = scheduleClose
   // R11: pin the popover open (stays open off-hover). Clears any pending
   // hover-leave close, opens immediately, and loads the rich profile.
   const pin = () => {
@@ -1776,7 +1878,31 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
   }
   const closePinned = () => { setPinned(false); setOpen(false) }
 
-  // R11: while pinned, dismiss on outside-click (mousedown) or Escape — mirrors
+  // Safety net: a `mouseleave` can be missed entirely (pointer moved very fast,
+  // the anchor re-rendered/scrolled out from under the cursor, the window lost
+  // focus), which is what leaves a popover stranded on screen. While it is
+  // open, watch the real pointer position and close as soon as it is over
+  // neither the author name nor the popover.
+  useEffect(() => {
+    if (!open) return undefined
+    const isInside = (target) => (
+      (wrapperRef.current && wrapperRef.current.contains(target)) ||
+      (popoverRef.current && popoverRef.current.contains(target))
+    )
+    const onMove = (ev) => { if (!isInside(ev.target)) scheduleClose() }
+    // Pointer left the document/window entirely.
+    const onWindowOut = () => scheduleClose()
+    document.addEventListener('mousemove', onMove, true)
+    window.addEventListener('blur', onWindowOut)
+    document.addEventListener('mouseleave', onWindowOut)
+    return () => {
+      document.removeEventListener('mousemove', onMove, true)
+      window.removeEventListener('blur', onWindowOut)
+      document.removeEventListener('mouseleave', onWindowOut)
+    }
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Dismiss on outside-click (mousedown) or Escape while pinned — mirrors
   // the export-menu outside-click pattern elsewhere in this file.
   useEffect(() => {
     if (!pinned) return undefined
@@ -1802,7 +1928,10 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
   // Decide whether to open the popover up or down, and how tall it may be, from
   // the real available space around the anchor. Caps maxHeight to min(70vh,
   // space − margin) so the popover's own overflowY:'auto' actually scrolls the
-  // overflow instead of it falling off-screen unreachable.
+  // overflow instead of it falling off-screen unreachable. Also computes the
+  // viewport-fixed left/top|bottom coordinates the portal-rendered popover
+  // anchors to (see render below) — this is what keeps the card from being
+  // clipped by an ancestor reference card's overflow.
   useEffect(() => {
     if (!open) return
     const GAP = 8       // matches marginTop/marginBottom on the popover
@@ -1813,6 +1942,7 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
       if (!el) return
       const rect = el.getBoundingClientRect()
       const vh = window.innerHeight || document.documentElement.clientHeight || 0
+      const vw = window.innerWidth || document.documentElement.clientWidth || 0
       const spaceBelow = vh - rect.bottom - GAP - MARGIN
       const spaceAbove = rect.top - GAP - MARGIN
       const cap70 = Math.round(vh * 0.7)
@@ -1821,7 +1951,16 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
       const openUp = spaceBelow < MIN_H && spaceAbove > spaceBelow
       const avail = openUp ? spaceAbove : spaceBelow
       const maxH = Math.max(MIN_H, Math.min(cap70, avail))
-      setPlacement({ dir: openUp ? 'up' : 'down', maxHeight: `${maxH}px` })
+      // Clamp left so a popover anchored near the right edge doesn't run off
+      // the viewport (the panel can be up to 460px wide when pinned).
+      const left = Math.max(MARGIN, Math.min(rect.left, vw - 460 - MARGIN))
+      setPlacement({
+        dir: openUp ? 'up' : 'down',
+        maxHeight: `${maxH}px`,
+        left,
+        top: openUp ? null : rect.bottom + GAP,
+        bottom: openUp ? vh - rect.top + GAP : null,
+      })
     }
     compute()
     window.addEventListener('scroll', compute, true)
@@ -1922,20 +2061,22 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
           // (not a claimed profile), always available.
           { label: 'Google Scholar', url: scholarUrl, icon: 'googlescholar' },
         ].filter(Boolean)
-        return (
+        return createPortal((
         <div
           ref={popoverRef}
           role={pinned ? 'dialog' : 'tooltip'}
           aria-label={pinned ? `${dispName} — author details` : undefined}
           className="rounded-xl text-xs"
           style={{
-            position: 'absolute', left: 0, zIndex: 60,
-            // Flip up/down based on real available space (see the placement
-            // effect) so the card never opens into a clipped region when the
-            // author sits low on the page.
+            // Rendered via a portal into document.body with viewport-fixed
+            // coordinates (computed in the placement effect from the
+            // anchor's real getBoundingClientRect) so an ancestor reference
+            // card's overflow:hidden/auto can never clip the card, even when
+            // it opens upward right at a card's top edge.
+            position: 'fixed', left: placement.left, zIndex: 1000,
             ...(placement.dir === 'up'
-              ? { bottom: '100%', marginBottom: 8 }
-              : { top: '100%', marginTop: 8 }),
+              ? { bottom: placement.bottom ?? 8 }
+              : { top: placement.top ?? 8 }),
             // R11: the pinned panel is larger (wider + taller) so the full
             // recent-papers list has room to scroll.
             minWidth: pinned ? 360 : 300,
@@ -1967,12 +2108,14 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
                 {pinned ? (
                   <button type="button" onClick={closePinned} aria-label="Close author card"
                     title="Close"
+                    className="hover:bg-black/10 dark:hover:bg-white/10 transition-colors rounded"
                     style={{ flexShrink: 0, lineHeight: 1, fontSize: 16, padding: '0 2px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
                     ×
                   </button>
                 ) : (
                   <button type="button" onClick={pin} aria-label="Pin author card open"
                     title="Pin open"
+                    className="hover:bg-black/10 dark:hover:bg-white/10 transition-colors rounded"
                     style={{ flexShrink: 0, lineHeight: 1, fontSize: 13, padding: '0 2px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>
                     ⤢
                   </button>
@@ -2024,7 +2167,7 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
             <div className="px-3 pb-2.5" style={{ fontSize: 11 }}>
               {findState === 'idle' && (
                 <button type="button" onClick={runFindProfile}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md"
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors${paperTitle ? ' hover:brightness-90 dark:hover:brightness-125' : ''}`}
                   title={paperTitle ? 'Look up this author on OpenAlex, corroborated by this paper' : 'A paper title is required to find this author confidently'}
                   disabled={!paperTitle}
                   style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-accent)', cursor: paperTitle ? 'pointer' : 'not-allowed', opacity: paperTitle ? 1 : 0.6, border: 'none' }}>
@@ -2109,7 +2252,7 @@ function AuthorChip({ name, e, href, onClickHref, tooltipFallback, paperTitle, p
             </div>
           )}
         </div>
-        )
+        ), document.body)
       })()}
     </span>
   )

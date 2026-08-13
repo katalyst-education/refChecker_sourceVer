@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   deletePaperclipKey: vi.fn(),
   getAIDetectionModelStatus: vi.fn(),
   checkAIDetectionModelUpdate: vi.fn(),
+  getDatabaseStatus: vi.fn(),
 }))
 
 vi.mock('../../stores/useSettingsStore', () => ({
@@ -60,6 +61,7 @@ vi.mock('../../utils/api', () => ({
   checkAIDetectionModelUpdate: mocks.checkAIDetectionModelUpdate,
   downloadAIDetectionModel: vi.fn(),
   deleteAIDetectionModel: vi.fn(),
+  getDatabaseStatus: mocks.getDatabaseStatus,
 }))
 
 vi.mock('../../utils/logger', () => ({
@@ -205,5 +207,173 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: 'Remove' }).length).toBe(2)
     })
+  })
+})
+
+describe('SettingsPanel local database status', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.multiuser = true
+    mocks.hasKey.mockReturnValue(false)
+    mocks.getSemanticScholarKeyStatus.mockResolvedValue({ data: {} })
+    mocks.getPaperclipKeyStatus.mockResolvedValue({ data: {} })
+  })
+
+  it('warns an admin when the local S2 snapshot has stopped updating', async () => {
+    mocks.getDatabaseStatus.mockResolvedValue({
+      data: {
+        databases: [
+          {
+            database: 's2',
+            label: 'Semantic Scholar',
+            path: '/data/semantic_scholar.db',
+            exists: true,
+            size_bytes: 90_000_000_000,
+            snapshot: '2025-01-15',
+            snapshot_age_days: 420,
+            snapshot_stale: true,
+            ingest_complete: true,
+          },
+        ],
+        active: ['s2'],
+        using_local_s2: true,
+        refresh_interval_hours: 24,
+      },
+    })
+
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    expect(await screen.findByText(/Semantic Scholar — present/)).toBeInTheDocument()
+    expect(screen.getByText(/420 days old — not updating/)).toBeInTheDocument()
+  })
+
+  it('reports a missing local database instead of silently omitting it', async () => {
+    mocks.getDatabaseStatus.mockResolvedValue({
+      data: {
+        databases: [
+          {
+            database: 's2',
+            label: 'Semantic Scholar',
+            path: '/data/semantic_scholar.db',
+            exists: false,
+            size_bytes: null,
+            snapshot: null,
+            snapshot_age_days: null,
+            snapshot_stale: false,
+          },
+        ],
+        active: [],
+        using_local_s2: false,
+        refresh_interval_hours: 24,
+      },
+    })
+
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    expect(await screen.findByText(/Semantic Scholar — missing/)).toBeInTheDocument()
+  })
+
+  it('names a missing API key as the reason refreshes are failing', async () => {
+    // The hosted deployment sat five months on a stale snapshot because the
+    // datasets API 401s without a key and nothing ever said so.
+    mocks.getDatabaseStatus.mockResolvedValue({
+      data: {
+        databases: [
+          {
+            database: 's2',
+            label: 'Semantic Scholar',
+            path: '/data/semantic_scholar.db',
+            exists: true,
+            size_bytes: 90_000_000_000,
+            snapshot: '2026-03-10',
+            snapshot_age_days: 155,
+            snapshot_stale: true,
+            ingest_complete: true,
+            api_key_configured: false,
+          },
+        ],
+        active: ['s2'],
+        using_local_s2: true,
+        refresh_interval_hours: 24,
+      },
+    })
+
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    expect(await screen.findByText(/SEMANTIC_SCHOLAR_API_KEY is not set/)).toBeInTheDocument()
+  })
+
+  it('stays quiet about the API key when one is configured', async () => {
+    mocks.getDatabaseStatus.mockResolvedValue({
+      data: {
+        databases: [
+          {
+            database: 's2',
+            label: 'Semantic Scholar',
+            path: '/data/semantic_scholar.db',
+            exists: true,
+            size_bytes: 90_000_000_000,
+            snapshot: '2026-08-05',
+            snapshot_age_days: 2,
+            snapshot_stale: false,
+            ingest_complete: true,
+            api_key_configured: true,
+          },
+        ],
+        active: ['s2'],
+        using_local_s2: true,
+        refresh_interval_hours: 24,
+      },
+    })
+
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    expect(await screen.findByText(/Semantic Scholar — present/)).toBeInTheDocument()
+    expect(screen.queryByText(/SEMANTIC_SCHOLAR_API_KEY is not set/)).not.toBeInTheDocument()
+  })
+})
+
+describe('SettingsPanel local database disk', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.multiuser = true
+    mocks.hasKey.mockReturnValue(false)
+    mocks.getSemanticScholarKeyStatus.mockResolvedValue({ data: {} })
+    mocks.getPaperclipKeyStatus.mockResolvedValue({ data: {} })
+  })
+
+  it('surfaces a nearly full data disk and leftover refresh staging dirs', async () => {
+    mocks.getDatabaseStatus.mockResolvedValue({
+      data: {
+        databases: [
+          {
+            database: 's2',
+            label: 'Semantic Scholar',
+            path: '/data/semantic_scholar.db',
+            exists: true,
+            size_bytes: 90_000_000_000,
+            snapshot: '2026-08-05',
+            snapshot_age_days: 7,
+            snapshot_stale: false,
+            ingest_complete: true,
+          },
+        ],
+        disk: {
+          path: '/data',
+          total_bytes: 100_000_000_000,
+          free_bytes: 1_000_000_000,
+          used_bytes: 99_000_000_000,
+          orphaned_staging_dirs: ['tmpabc'],
+        },
+        active: ['s2'],
+        using_local_s2: true,
+        refresh_interval_hours: 24,
+      },
+    })
+
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    expect(await screen.findByText(/1.0 GB free of 100 GB/)).toBeInTheDocument()
+    expect(screen.getByText(/1 leftover refresh staging dir/)).toBeInTheDocument()
   })
 })

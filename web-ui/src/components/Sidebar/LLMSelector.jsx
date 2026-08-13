@@ -28,7 +28,11 @@ export default function LLMSelector({ mode = 'extraction' }) {
     isLoading,
   } = useConfigStore()
   const multiuser = useAuthStore(state => state.multiuser)
-  const hasKeyInBrowser = useKeyStore(state => state.hasKey)
+  // Subscribe to the actual `keys` map (not the stable `hasKey` function
+  // reference) so this component re-renders whenever a key is added/removed
+  // in another part of the UI (e.g. saving a key in LLMConfigModal).
+  const browserKeys = useKeyStore(state => state.keys)
+  const hasKeyInBrowser = (id) => Boolean(browserKeys[id])
   const hallucinationCapableProviders = ['openai', 'anthropic', 'google', 'azure']
   const isHallucinationMode = mode === 'hallucination'
   const isChatMode = mode === 'chat'
@@ -65,6 +69,7 @@ export default function LLMSelector({ mode = 'extraction' }) {
   const [editConfig, setEditConfig] = useState(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState(null)
   const [menuStyle, setMenuStyle] = useState(null)
+  const [hoveredConfigId, setHoveredConfigId] = useState(null)
   const dropdownRef = useRef(null)
 
   const selectedConfig = visibleConfigs.find(c => c.id === activeSelectedId && configHasKey(c))
@@ -234,18 +239,12 @@ export default function LLMSelector({ mode = 'extraction' }) {
                   style={{
                     backgroundColor: config.id === activeSelectedId 
                       ? 'var(--color-bg-tertiary)' 
-                      : 'transparent',
+                      : hoveredConfigId === config.id
+                        ? 'var(--color-bg-secondary)'
+                        : 'transparent',
                   }}
-                  onMouseEnter={(e) => {
-                    if (config.id !== activeSelectedId) {
-                      e.currentTarget.style.backgroundColor = 'var(--color-bg-secondary)'
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (config.id !== activeSelectedId) {
-                      e.currentTarget.style.backgroundColor = 'transparent'
-                    }
-                  }}
+                  onMouseEnter={() => setHoveredConfigId(config.id)}
+                  onMouseLeave={() => setHoveredConfigId(prev => (prev === config.id ? null : prev))}
                 >
                   <div 
                     className="flex-1 min-w-0"

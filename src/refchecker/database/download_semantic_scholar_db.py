@@ -40,6 +40,7 @@ import concurrent.futures
 import gzip
 import hashlib
 import re
+import shutil
 import urllib.parse
 import dateutil.parser
 from datetime import datetime, timezone, timedelta
@@ -57,6 +58,167 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 LATEST_SNAPSHOT_FILENAME = "latest_snapshot.txt"
+
+# The datasets API often reports size 0, so assume a typical papers shard.
+DEFAULT_ARCHIVE_SIZE_BYTES = 2 * 1024 ** 3
+# Rows inserted from an archive occupy several times its compressed size.
+ARCHIVE_EXPANSION_FACTOR = 4
+# Never let ingest drive the volume to zero: SQLite fails hard on a full disk.
+MIN_FREE_DISK_BYTES = 5 * 1024 ** 3
+
+# A handful of malformed records in a multi-million-line archive is normal and
+# worth reporting. Logging every one of them is not: a file we fail to decode
+# produces one message per line, which has filled a production data disk with a
+# multi-gigabyte log and taken the database offline. Report the first few, then
+# count the rest and summarise once.
+MAX_MALFORMED_LINE_LOGS = 20
+# If nothing at all parses after this many lines the payload is not the JSONL we
+# expect (wrong encoding, truncated download, an error page). Fail loudly rather
+# than grinding through gigabytes of garbage and reporting success afterwards.
+MALFORMED_LINE_ABORT_THRESHOLD = 1000
+
+GZIP_MAGIC = b"\x1f\x8b"
+
+# The datasets API throttles diff requests hard; a short wait clears it.
+DIFF_RATE_LIMIT_RETRIES = 5
+DIFF_RATE_LIMIT_BACKOFF_SECONDS = 30
+
+
+def _redact_signed_url(url: str) -> str:
+    """Drop the query string from a dataset URL before logging it.
+
+    The datasets API hands back S3 links carrying AWSAccessKeyId, Signature and
+    x-amz-security-token. Those do not belong in a log file, and they made each
+    line unreadably long.
+    """
+    return str(url).split("?", 1)[0]
+
+
+class _PrefixedStream:
+    """A read-only stream that replays a sniffed prefix ahead of the rest.
+
+    HTTP response bodies cannot be rewound, so peeking at the first bytes to
+    detect gzip framing means putting them back before handing the stream to a
+    decompressor.
+    """
+
+    def __init__(self, prefix: bytes, stream):
+        self._prefix = prefix
+        self._stream = stream
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            data = self._prefix + self._stream.read()
+            self._prefix = b""
+            return data
+        if not self._prefix:
+            return self._stream.read(size)
+        data = self._prefix[:size]
+        self._prefix = self._prefix[len(data):]
+        if len(data) < size:
+            data += self._stream.read(size - len(data))
+        return data
+
+    def readable(self):
+        return True
+
+    def close(self):
+        self._prefix = b""
+
+
+def _iter_remote_json_lines(response, chunk_size: int = 1 << 20):
+    """Yield decoded lines from an HTTP response, transparently gunzipping.
+
+    The Semantic Scholar datasets API serves gzipped JSONL from S3 without a
+    ``Content-Encoding`` header, so ``requests`` hands back the compressed
+    bytes untouched. Iterating those as text yields binary garbage on every
+    line -- which is exactly how incremental updates silently stopped applying.
+    """
+    raw = getattr(response, "raw", None)
+    if raw is None:
+        prefix, source = b"", response
+    else:
+        # Undo any transport-level Content-Encoding, then sniff the payload.
+        try:
+            raw.decode_content = True
+        except AttributeError:
+            pass
+        prefix, source = raw.read(len(GZIP_MAGIC)) or b"", raw
+
+    stream = _PrefixedStream(prefix, source)
+    if prefix[:len(GZIP_MAGIC)] == GZIP_MAGIC:
+        stream = gzip.GzipFile(fileobj=stream)
+
+    buffer = b""
+    while True:
+        chunk = stream.read(chunk_size)
+        if not chunk:
+            break
+        buffer += chunk
+        lines = buffer.split(b"\n")
+        buffer = lines.pop()
+        for line in lines:
+            yield line.decode("utf-8", errors="replace")
+    if buffer:
+        yield buffer.decode("utf-8", errors="replace")
+
+
+class _MalformedLineReporter:
+    """Rate-limits per-line parse failures and aborts a wholly unreadable file."""
+
+    def __init__(self, description: str):
+        self.description = description
+        self.count = 0
+
+    def record(self, line_num: int, error: Exception, records_processed: int) -> None:
+        self.count += 1
+        if self.count <= MAX_MALFORMED_LINE_LOGS:
+            logger.warning(
+                f"Malformed line {line_num} in {self.description}: {error}"
+            )
+            if self.count == MAX_MALFORMED_LINE_LOGS:
+                logger.warning(
+                    f"Further malformed lines in {self.description} will be counted, not logged"
+                )
+        if records_processed == 0 and self.count >= MALFORMED_LINE_ABORT_THRESHOLD:
+            raise ValueError(
+                f"{self.description} is not readable JSONL: "
+                f"{self.count} consecutive malformed lines and no usable records"
+            )
+
+    def summarise(self, records_processed: int) -> None:
+        if self.count > MAX_MALFORMED_LINE_LOGS:
+            logger.warning(
+                f"Skipped {self.count:,} malformed lines in {self.description} "
+                f"({records_processed:,} records ingested)"
+            )
+
+
+class SemanticScholarRateLimitError(RuntimeError):
+    """The datasets API throttled us.
+
+    This is transient and says nothing about whether updates exist. Treating it
+    as "no incremental updates available" made a refresh fall through to
+    re-downloading the entire ~90GB dataset, which cannot fit on a disk sized
+    for the database, so a single 429 turned a small catch-up into a guaranteed
+    failure.
+    """
+
+
+class SemanticScholarAuthError(RuntimeError):
+    """The datasets API rejected our credentials.
+
+    The Semantic Scholar *datasets* API requires an API key and answers 401/403
+    without one. That is not "no updates available" and no amount of retrying or
+    falling back to a full download will fix it, so it has to be distinguishable
+    from a transient failure -- otherwise a deployment silently stops updating.
+    """
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    response = getattr(exc, 'response', None)
+    return getattr(response, 'status_code', None) in (401, 403)
+
 
 class SemanticScholarDownloader:
     """
@@ -87,6 +249,13 @@ class SemanticScholarDownloader:
         
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # Dataset archives are transient input: they are ingested into the DB
+        # and are tens of GB, so keeping them doubles the disk requirement.
+        # Operators who reprocess archives offline can opt back in.
+        self.keep_dataset_files = os.environ.get(
+            "REFCHECKER_S2_KEEP_ARCHIVES", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
         
         # Initialize database
         self.db_path = os.path.abspath(db_path) if db_path else os.path.join(self.output_dir, "semantic_scholar.db")
@@ -283,6 +452,8 @@ class SemanticScholarDownloader:
             }
             
         except Exception as e:
+            if isinstance(e, (SemanticScholarAuthError, SemanticScholarRateLimitError)):
+                raise
             logger.error(f"Error checking for updates: {e}")
             return {
                 'has_updates': False,
@@ -290,6 +461,32 @@ class SemanticScholarDownloader:
                 'message': f'Error checking for updates: {e}'
             }
     
+    def _get_with_rate_limit_retry(self, url, **kwargs):
+        """GET a datasets API endpoint, waiting out 429s instead of giving up.
+
+        Every datasets endpoint throttles. Treating a 429 as a hard failure made
+        the refresh conclude it had no incremental path and fall back to
+        re-downloading the entire ~90GB dataset, which cannot fit beside the
+        database it builds.
+        """
+        kwargs.setdefault("timeout", 60)
+        response = None
+        for attempt in range(DIFF_RATE_LIMIT_RETRIES):
+            response = self.session.get(url, **kwargs)
+            if response.status_code != 429:
+                return response
+            delay = DIFF_RATE_LIMIT_BACKOFF_SECONDS * (attempt + 1)
+            logger.warning(
+                f"Rate limited by the datasets API (attempt {attempt + 1}/"
+                f"{DIFF_RATE_LIMIT_RETRIES}); retrying in {delay}s"
+            )
+            time.sleep(delay)
+        raise SemanticScholarRateLimitError(
+            f"The Semantic Scholar datasets API is still rate limiting {url} after "
+            f"{DIFF_RATE_LIMIT_RETRIES} attempts. Retrying later is cheaper than "
+            "re-downloading the full dataset."
+        )
+
     def check_incremental_updates(self, start_release_id=None):
         """
         Check for incremental updates between releases using the correct API
@@ -326,16 +523,19 @@ class SemanticScholarDownloader:
                 headers["x-api-key"] = self.api_key
             
             logger.info(f"Requesting incremental diffs from: {url}")
-            response = self.session.get(url, headers=headers, timeout=30)
+            response = self._get_with_rate_limit_retry(url, headers=headers)
             
             # Handle different response codes
             if response.status_code == 404:
                 logger.info(f"Incremental diffs not available for {start_release_id} to {end_release_id} (404)")
                 logger.info("This usually means the release gap is too large for incremental updates")
                 return self._check_incremental_alternative_by_release(start_release_id, end_release_id)
-            elif response.status_code == 429:
-                logger.warning("Rate limited on diffs API. Consider waiting or using a higher tier API key")
-                return None
+            elif response.status_code in (401, 403):
+                raise SemanticScholarAuthError(
+                    "The Semantic Scholar datasets API rejected the request "
+                    f"({response.status_code}). This API requires SEMANTIC_SCHOLAR_API_KEY; "
+                    "without a valid key the database can never be updated."
+                )
             
             response.raise_for_status()
             data = response.json()
@@ -350,6 +550,11 @@ class SemanticScholarDownloader:
             return None
             
         except Exception as e:
+            if (
+                isinstance(e, (SemanticScholarAuthError, SemanticScholarRateLimitError))
+                or _is_auth_error(e)
+            ):
+                raise
             logger.info(f"Error checking incremental updates: {e}")
             logger.info("Falling back to alternative incremental check method")
             # Try to get end_release_id if it wasn't set yet
@@ -492,6 +697,7 @@ class SemanticScholarDownloader:
             
             total_updated = 0
             total_deleted = 0
+            failed_files = 0
             
             for diff in diffs:
                 if diff.get("type") == "full_dataset_update":
@@ -499,12 +705,11 @@ class SemanticScholarDownloader:
                     logger.info(f"Full dataset update recommended: {diff.get('message')}")
                     logger.info("Automatically downloading full dataset...")
                     
-                    # Download the full dataset
+                    # Download the full dataset (each archive is ingested as it
+                    # arrives, so there is nothing left to process afterwards)
                     success = self.download_dataset_files()
                     if success:
-                        logger.info("Full dataset download completed, processing files...")
-                        # Process the downloaded files
-                        self.process_local_files(force_reprocess=False, incremental=False)
+                        logger.info("Full dataset download and ingest completed")
                         
                         # After processing, check for any remaining incremental updates
                         logger.info("Checking for additional incremental updates after full dataset processing...")
@@ -542,24 +747,38 @@ class SemanticScholarDownloader:
                     # Process update files
                     for update_url in update_files:
                         try:
-                            logger.info(f"Processing update file: {update_url}")
+                            logger.info(f"Processing update file: {_redact_signed_url(update_url)}")
                             records_updated = self._process_incremental_file(update_url, "update")
                             total_updated += records_updated
                         except Exception as e:
-                            logger.error(f"Error processing update file {update_url}: {e}")
+                            logger.error(f"Error processing update file {_redact_signed_url(update_url)}: {e}")
+                            failed_files += 1
                             continue
                     
                     # Process delete files
                     for delete_url in delete_files:
                         try:
-                            logger.info(f"Processing delete file: {delete_url}")
+                            logger.info(f"Processing delete file: {_redact_signed_url(delete_url)}")
                             records_deleted = self._process_incremental_file(delete_url, "delete")
                             total_deleted += records_deleted
                         except Exception as e:
-                            logger.error(f"Error processing delete file {delete_url}: {e}")
+                            logger.error(f"Error processing delete file {_redact_signed_url(delete_url)}: {e}")
+                            failed_files += 1
                             continue
             
-            logger.info(f"Incremental update complete - Updated: {total_updated}, Deleted: {total_deleted}")
+            logger.info(
+                f"Incremental update complete - Updated: {total_updated}, "
+                f"Deleted: {total_deleted}, Failed files: {failed_files}"
+            )
+
+            if failed_files:
+                # Advancing the release marker after failures would permanently
+                # skip the diffs we could not apply, so stop here and report it.
+                logger.error(
+                    f"{failed_files} incremental file(s) failed; leaving the recorded "
+                    "release unchanged so the next run retries them"
+                )
+                return False
             
             # Update metadata after successful incremental update
             if total_updated > 0 or total_deleted > 0:
@@ -599,7 +818,7 @@ class SemanticScholarDownloader:
             if self.api_key:
                 headers["x-api-key"] = self.api_key
             
-            response = self.session.get(url, headers=headers, timeout=30)
+            response = self._get_with_rate_limit_retry(url, headers=headers)
             response.raise_for_status()
             
             data = response.json()
@@ -612,6 +831,13 @@ class SemanticScholarDownloader:
             return release_id
             
         except Exception as e:
+            if _is_auth_error(e):
+                raise SemanticScholarAuthError(
+                    "The Semantic Scholar datasets API rejected the request "
+                    f"({getattr(getattr(e, 'response', None), 'status_code', '401')}). "
+                    "This API requires SEMANTIC_SCHOLAR_API_KEY; without a valid key "
+                    "the database can never be updated."
+                ) from e
             logger.error(f"Error getting latest release ID: {e}")
             raise
     
@@ -1152,31 +1378,38 @@ class SemanticScholarDownloader:
 
         if not db_exists:
             logger.info("No database found - performing full download")
+            # download_dataset_files ingests each archive as it lands, so the
+            # peak disk cost is one archive plus the database rather than the
+            # entire compressed dataset plus the database.
             success = self.download_dataset_files()
             if not success:
                 logger.error("Failed to download dataset files")
                 return False
-            self.process_local_files(incremental=False)
             return True
 
         logger.info("Database exists - checking for new or updated data (incremental update)")
-        self.process_local_files(
-            force_reprocess=force_reprocess,
-            incremental=True,
-        )
+        try:
+            self.process_local_files(
+                force_reprocess=force_reprocess,
+                incremental=True,
+            )
 
-        current_release = self.get_last_release_id()
-        latest_release = self.get_latest_release_id()
-        if current_release != latest_release:
-            logger.info(f"Still behind (current: {current_release}, latest: {latest_release})")
-            gz_files = self._find_local_dataset_files()
-            if not gz_files:
-                logger.info("No .gz files found - downloading latest dataset")
-                success = self.download_dataset_files()
-                if not success:
-                    logger.error("Failed to download dataset files")
-                    return False
-                self.process_local_files(incremental=True)
+            current_release = self.get_last_release_id()
+            latest_release = self.get_latest_release_id()
+            if current_release != latest_release:
+                logger.info(f"Still behind (current: {current_release}, latest: {latest_release})")
+                gz_files = self._find_local_dataset_files()
+                if not gz_files:
+                    logger.info("No .gz files found - downloading latest dataset")
+                    success = self.download_dataset_files()
+                    if not success:
+                        logger.error("Failed to download dataset files")
+                        return False
+        except SemanticScholarRateLimitError as e:
+            # Continuing would re-download the whole dataset, because a throttle
+            # is indistinguishable here from "no incremental updates available".
+            logger.error(f"{e}")
+            return False
 
         effective_snapshot = self.get_last_release_id() or self.current_snapshot_id
         if effective_snapshot:
@@ -1247,6 +1480,7 @@ class SemanticScholarDownloader:
         
         records_processed = 0
         cursor = self.conn.cursor()
+        malformed = _MalformedLineReporter(os.path.basename(str(filename)))
         
         try:
             with gzip.open(file_path, 'rt', encoding='utf-8') as f:
@@ -1263,15 +1497,16 @@ class SemanticScholarDownloader:
                             logger.info(f"Processed {records_processed:,} records from {filename}")
                             self.conn.commit()
                             
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON on line {line_num} in {filename}: {e}")
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        malformed.record(line_num, e, records_processed)
                         continue
                     except Exception as e:
-                        logger.error(f"Error processing line {line_num} in {filename}: {e}")
+                        malformed.record(line_num, e, records_processed)
                         continue
             
             # Final commit
             self.conn.commit()
+            malformed.summarise(records_processed)
             
             # Track file processing metadata for incremental updates
             self._track_file_processing(filename, file_path, records_processed)
@@ -1398,8 +1633,15 @@ class SemanticScholarDownloader:
 
     def download_dataset_files(self):
         """
-        Download the official Semantic Scholar dataset files
-        
+        Download and ingest the official Semantic Scholar dataset files.
+
+        Files are downloaded one at a time and each is ingested (and, unless
+        archives are being kept, deleted) before the next download starts. The
+        full papers dataset is tens of GB compressed and the database it builds
+        is ~90GB; downloading everything up front needs both at once, which does
+        not fit on a disk sized for the database alone. Streaming keeps the peak
+        at one archive plus the database.
+
         Returns:
             bool: True if successful, False otherwise
         """
@@ -1421,24 +1663,143 @@ class SemanticScholarDownloader:
             
             # Download files
             downloaded_count = 0
-            for file_meta in files:
+            ingested_count = 0
+            total_records = 0
+            for index, file_meta in enumerate(files, 1):
+                marker = self._archive_marker_key(latest_release, file_meta["path"])
+                if self.get_metadata(marker):
+                    logger.info(
+                        f"Skipping [{index}/{len(files)}] {file_meta['path']} - already ingested"
+                    )
+                    ingested_count += 1
+                    continue
+                if not self._has_room_for_next_archive(file_meta):
+                    logger.error(
+                        "Stopping dataset download: not enough free disk space on "
+                        f"{self.output_dir}. Processed {downloaded_count} of {len(files)} files."
+                    )
+                    break
                 try:
                     path, updated = self.download_file(file_meta)
                     if updated:
                         downloaded_count += 1
-                        logger.info(f"Downloaded: {path}")
+                        logger.info(f"Downloaded [{index}/{len(files)}]: {path}")
                     else:
                         logger.info(f"Skipped (not modified): {path}")
+                        continue
                 except Exception as e:
                     logger.error(f"Error downloading {file_meta.get('path', 'unknown')}: {e}")
                     continue
-            
-            logger.info(f"Downloaded {downloaded_count} files out of {len(files)} total files")
-            return downloaded_count > 0
+
+                local_path = os.path.join(self.output_dir, file_meta["path"])
+                try:
+                    records = self._process_gz_file(local_path)
+                    total_records += records
+                    logger.info(
+                        f"Processed [{index}/{len(files)}] {records:,} records from "
+                        f"{os.path.basename(local_path)}"
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing {local_path}: {e}")
+                    continue
+                # Record progress before deleting so an interrupted bootstrap
+                # resumes where it stopped instead of re-downloading tens of GB.
+                self.set_metadata(marker, datetime.now(timezone.utc).isoformat())
+                ingested_count += 1
+                self._discard_processed_archive(local_path)
+
+            logger.info(
+                f"Ingested {ingested_count} of {len(files)} dataset files "
+                f"({downloaded_count} downloaded this run)"
+            )
+            if ingested_count < len(files):
+                # Leave the snapshot unrecorded: callers treat a database
+                # without one as a partial ingest whose misses can't be trusted.
+                logger.warning(
+                    "Dataset ingest incomplete; the database will keep falling back "
+                    "to the Semantic Scholar API until the remaining files are ingested."
+                )
+                return downloaded_count > 0
+            self._record_processing_metadata(total_records)
+            return True
             
         except Exception as e:
             logger.error(f"Error downloading dataset files: {e}")
             return False
+
+    def _archive_marker_key(self, release_id, archive_path) -> str:
+        """Metadata key marking one archive of one release as ingested."""
+        return f"ingested_archive_{release_id}_{os.path.basename(archive_path)}"
+
+    def _has_room_for_next_archive(self, file_meta) -> bool:
+        """Refuse to download when the disk can't absorb the archive plus growth.
+
+        Running the disk to zero mid-ingest is worse than stopping: SQLite
+        starts raising "disk I/O error" and the database can be left unusable.
+        """
+        try:
+            free = shutil.disk_usage(self.output_dir).free
+        except OSError:
+            return True
+        archive_size = int(file_meta.get("size") or 0) or DEFAULT_ARCHIVE_SIZE_BYTES
+        # The archive itself, the rows it expands into, and WAL headroom.
+        needed = archive_size + int(archive_size * ARCHIVE_EXPANSION_FACTOR) + MIN_FREE_DISK_BYTES
+        if free >= needed:
+            return True
+        logger.error(
+            f"Only {self._format_size(free)} free on {self.output_dir}; "
+            f"need about {self._format_size(needed)} for the next dataset file."
+        )
+        return False
+
+    def _require_free_disk(self) -> None:
+        """Abort while there is still room, rather than running the volume dry.
+
+        An incremental catch-up writes rows straight into the database, so it
+        can exhaust the disk without downloading anything. Once free space hits
+        zero SQLite cannot even write its journal and starts failing every read
+        with "disk I/O error", which takes the database offline entirely.
+        """
+        try:
+            free = shutil.disk_usage(self.output_dir).free
+        except OSError:
+            return
+        if free < MIN_FREE_DISK_BYTES:
+            raise RuntimeError(
+                f"Only {self._format_size(free)} free on {self.output_dir}; "
+                f"refusing to continue ingest below {self._format_size(MIN_FREE_DISK_BYTES)}"
+            )
+
+    def _discard_processed_archive(self, local_path: str) -> None:
+        """Delete an ingested archive unless the operator asked to keep it."""
+        if self.keep_dataset_files:
+            return
+        for path in (local_path, local_path + ".meta"):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                logger.warning(f"Could not remove processed archive {path}: {e}")
+
+    def _record_processing_metadata(self, total_records: int) -> None:
+        """Persist the snapshot/timestamp after ingesting dataset files."""
+        current_time = datetime.now(timezone.utc).isoformat()
+        self.set_last_update_time(current_time)
+        try:
+            release_id = (
+                self.current_snapshot_id
+                or self.get_last_release_id()
+                or self.get_latest_release_id()
+            )
+            self.current_snapshot_id = release_id
+            self.set_last_release_id(release_id)
+            logger.info(
+                f"Updated metadata - last update: {current_time}, release: {release_id}, "
+                f"records: {total_records:,}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not update release ID: {e}")
+
     
     def list_files(self, release_id: str, dataset: str = "papers") -> list[dict]:
         """
@@ -1459,7 +1820,7 @@ class SemanticScholarDownloader:
             if self.api_key:
                 headers["x-api-key"] = self.api_key
             
-            response = self.session.get(url, headers=headers, timeout=30)
+            response = self._get_with_rate_limit_retry(url, headers=headers)
             response.raise_for_status()
             
             data = response.json()
@@ -1487,6 +1848,15 @@ class SemanticScholarDownloader:
             return structured_files
             
         except Exception as e:
+            if isinstance(e, SemanticScholarRateLimitError):
+                raise
+            if _is_auth_error(e):
+                raise SemanticScholarAuthError(
+                    "The Semantic Scholar datasets API rejected the request "
+                    f"({getattr(getattr(e, 'response', None), 'status_code', '401')}). "
+                    "This API requires SEMANTIC_SCHOLAR_API_KEY; without a valid key "
+                    "the database can never be downloaded or updated."
+                ) from e
             logger.error(f"Error listing files: {e}")
             return []
     
@@ -1526,12 +1896,24 @@ class SemanticScholarDownloader:
         # Get actual content length from response headers if available
         content_length = int(resp.headers.get('Content-Length', file_size or 0))
         
-        # Save file with progress tracking
+        # Download to a sibling temp file first. A failure part-way through (a
+        # dropped connection, or a full disk) otherwise leaves a truncated
+        # archive behind that nothing ever cleans up and that later looks like a
+        # complete download.
+        partial_path = local_path + ".part"
         downloaded = 0
-        with open(local_path, "wb") as f_out:
-            for chunk in resp.iter_content(8192):
-                f_out.write(chunk)
-                downloaded += len(chunk)
+        try:
+            with open(partial_path, "wb") as f_out:
+                for chunk in resp.iter_content(8192):
+                    f_out.write(chunk)
+                    downloaded += len(chunk)
+        except BaseException:
+            try:
+                os.remove(partial_path)
+            except OSError:
+                pass
+            raise
+        os.replace(partial_path, local_path)
         
         download_time = time.time() - start_time
         download_speed = downloaded / download_time if download_time > 0 else 0
@@ -1571,8 +1953,10 @@ class SemanticScholarDownloader:
         Returns:
             int: Number of records processed
         """
+        safe_url = _redact_signed_url(file_url)
         try:
-            logger.info(f"Processing {operation_type} file: {file_url}")
+            logger.debug(f"Processing {operation_type} file: {safe_url}")
+            self._require_free_disk()
             
             # Download the file content
             response = self.session.get(file_url, stream=True, timeout=300)
@@ -1580,13 +1964,14 @@ class SemanticScholarDownloader:
             
             records_processed = 0
             cursor = self.conn.cursor()
+            malformed = _MalformedLineReporter(f"{operation_type} file {safe_url}")
             
             # Begin transaction for better performance
             self.conn.execute("BEGIN TRANSACTION")
             
             try:
                 # Process the file line by line
-                for line_num, line in enumerate(response.iter_lines(decode_unicode=True), 1):
+                for line_num, line in enumerate(_iter_remote_json_lines(response), 1):
                     if not line.strip():
                         continue
                     
@@ -1613,18 +1998,22 @@ class SemanticScholarDownloader:
                         # Commit periodically for large files
                         if records_processed % 10000 == 0:
                             self.conn.commit()
+                            # Rows written by an incremental catch-up grow the
+                            # database itself, so re-check headroom as we go.
+                            self._require_free_disk()
                             self.conn.execute("BEGIN TRANSACTION")
                             logger.info(f"Processed {records_processed:,} {operation_type} records")
                         
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON on line {line_num} in {operation_type} file: {e}")
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        malformed.record(line_num, e, records_processed)
                         continue
                     except Exception as e:
-                        logger.error(f"Error processing line {line_num} in {operation_type} file: {e}")
+                        malformed.record(line_num, e, records_processed)
                         continue
                 
                 # Final commit
                 self.conn.commit()
+                malformed.summarise(records_processed)
                 logger.info(f"Completed processing {records_processed:,} {operation_type} records")
                 
             except Exception as e:
@@ -1634,8 +2023,11 @@ class SemanticScholarDownloader:
             return records_processed
             
         except Exception as e:
-            logger.error(f"Error processing {operation_type} file {file_url}: {e}")
-            return 0
+            # Returning 0 here would be indistinguishable from "no changes in
+            # this file", which is how a totally failed refresh came to report
+            # success. Let the caller see the failure.
+            logger.error(f"Error processing {operation_type} file {safe_url}: {e}")
+            raise
 
 def main():
     """Main function"""

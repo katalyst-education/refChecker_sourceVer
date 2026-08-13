@@ -1,14 +1,23 @@
+import collections
 import gzip
 import io
 import json
+import logging
 import sqlite3
 import tarfile
 
 import pytest
 
-from refchecker.checkers.local_semantic_scholar import LocalNonArxivReferenceChecker
+from refchecker.checkers.local_semantic_scholar import (
+    FULL_SNAPSHOT_MIN_ROWS,
+    LocalNonArxivReferenceChecker,
+)
 from refchecker.database import local_database_updater as updater
-from refchecker.database.download_semantic_scholar_db import SemanticScholarDownloader
+from refchecker.database.download_semantic_scholar_db import (
+    MAX_MALFORMED_LINE_LOGS,
+    SemanticScholarAuthError,
+    SemanticScholarDownloader,
+)
 from refchecker.database.local_database_updater import (
     build_acl_database_from_tarball,
     build_dblp_database_from_xml_gz,
@@ -702,3 +711,661 @@ def test_corr_venue_skipped_in_venue_missing_check(tmp_path):
 
     venue_errors = [e for e in errors if e.get('error_type') == 'venue']
     assert venue_errors == [], f"CoRR should NOT trigger venue missing error: {venue_errors}"
+
+def _make_papers_archive(path, paper_id, title):
+    """Write a one-record gzipped S2 papers shard."""
+    record = {
+        'corpusid': 1,
+        'paperId': paper_id,
+        'title': title,
+        'authors': [{'name': 'Author One'}],
+        'year': 2024,
+        'externalIds': {'DOI': f'10.1000/{paper_id}'},
+        'venue': 'Test Venue',
+    }
+    with gzip.open(path, 'wt', encoding='utf-8') as handle:
+        handle.write(json.dumps(record) + '\n')
+
+
+def test_bootstrap_deletes_each_archive_after_ingest(tmp_path, monkeypatch):
+    """Archives must not accumulate: the dataset plus the DB does not fit on a
+    disk sized for the DB, which is what stalls a server bootstrap."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        files = [{'path': f'papers-{i}.gz', 'url': f'https://example/{i}', 'size': 10} for i in range(3)]
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-01-01')
+        monkeypatch.setattr(downloader, 'list_files', lambda release, dataset='papers': files)
+
+        def _fake_download(file_meta):
+            target = tmp_path / file_meta['path']
+            _make_papers_archive(target, file_meta['path'], f"Paper {file_meta['path']}")
+            return file_meta['path'], True
+
+        monkeypatch.setattr(downloader, 'download_file', _fake_download)
+
+        assert downloader.download_dataset_files() is True
+
+        assert list(tmp_path.glob('*.gz')) == []
+        count = downloader.conn.execute('SELECT COUNT(*) FROM papers').fetchone()[0]
+        assert count == 3
+        assert downloader.get_last_release_id() == '2026-01-01'
+    finally:
+        downloader.close()
+
+
+def test_bootstrap_keeps_archives_when_opted_in(tmp_path, monkeypatch):
+    monkeypatch.setenv('REFCHECKER_S2_KEEP_ARCHIVES', 'true')
+    db_path = tmp_path / 'semantic_scholar.db'
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        files = [{'path': 'papers-0.gz', 'url': 'https://example/0', 'size': 10}]
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-01-01')
+        monkeypatch.setattr(downloader, 'list_files', lambda release, dataset='papers': files)
+
+        def _fake_download(file_meta):
+            _make_papers_archive(tmp_path / file_meta['path'], file_meta['path'], 'Kept')
+            return file_meta['path'], True
+
+        monkeypatch.setattr(downloader, 'download_file', _fake_download)
+        assert downloader.download_dataset_files() is True
+        assert (tmp_path / 'papers-0.gz').exists()
+    finally:
+        downloader.close()
+
+
+def test_bootstrap_stops_before_filling_the_disk(tmp_path, monkeypatch):
+    """Running the volume to zero corrupts SQLite; stop while there is room."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        files = [{'path': f'papers-{i}.gz', 'url': f'https://example/{i}', 'size': 10} for i in range(3)]
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-01-01')
+        monkeypatch.setattr(downloader, 'list_files', lambda release, dataset='papers': files)
+
+        downloaded = []
+
+        def _fake_download(file_meta):
+            downloaded.append(file_meta['path'])
+            _make_papers_archive(tmp_path / file_meta['path'], file_meta['path'], 'X')
+            return file_meta['path'], True
+
+        monkeypatch.setattr(downloader, 'download_file', _fake_download)
+
+        usage = collections.namedtuple('usage', 'total used free')
+        monkeypatch.setattr(
+            'refchecker.database.download_semantic_scholar_db.shutil.disk_usage',
+            lambda path: usage(100, 100, 0),
+        )
+
+        assert downloader.download_dataset_files() is False
+        assert downloaded == []
+    finally:
+        downloader.close()
+
+
+def _make_minimal_s2_db(path, release_id=None):
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE papers (
+                paperId TEXT PRIMARY KEY,
+                title TEXT,
+                normalized_paper_title TEXT,
+                venue TEXT,
+                year INTEGER,
+                externalIds_DOI TEXT,
+                externalIds_ArXiv TEXT,
+                authors TEXT
+            )
+            """
+        )
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        if release_id is not None:
+            conn.execute("INSERT INTO metadata VALUES ('last_release_id', ?)", (release_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_partial_database_does_not_claim_complete_coverage(tmp_path):
+    """A DB still being built must not be trusted to disprove a reference."""
+    db_path = tmp_path / 'partial.db'
+    _make_minimal_s2_db(db_path)
+    checker = LocalNonArxivReferenceChecker(db_path=str(db_path))
+    try:
+        assert checker.has_complete_coverage() is False
+    finally:
+        checker.close()
+
+
+def test_finished_database_claims_complete_coverage(tmp_path):
+    db_path = tmp_path / 'complete.db'
+    _make_minimal_s2_db(db_path, release_id='2026-08-05')
+    checker = LocalNonArxivReferenceChecker(db_path=str(db_path))
+    try:
+        assert checker.has_complete_coverage() is True
+    finally:
+        checker.close()
+
+
+def test_interrupted_bootstrap_resumes_without_redownloading(tmp_path, monkeypatch):
+    """Resuming must skip shards already ingested and only then mark complete."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    files = [{'path': f'papers-{i}.gz', 'url': f'https://example/{i}', 'size': 10} for i in range(3)]
+    downloaded = []
+
+    def _install(downloader, fail_after=None):
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-01-01')
+        monkeypatch.setattr(downloader, 'list_files', lambda release, dataset='papers': files)
+
+        def _fake_download(file_meta):
+            if fail_after is not None and len(downloaded) >= fail_after:
+                raise RuntimeError('connection reset')
+            downloaded.append(file_meta['path'])
+            _make_papers_archive(tmp_path / file_meta['path'], file_meta['path'], 'X')
+            return file_meta['path'], True
+
+        monkeypatch.setattr(downloader, 'download_file', _fake_download)
+
+    first = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        _install(first, fail_after=2)
+        first.download_dataset_files()
+        # Partial ingest must not advertise a finished snapshot.
+        assert first.get_last_release_id() is None
+    finally:
+        first.close()
+
+    assert downloaded == ['papers-0.gz', 'papers-1.gz']
+
+    second = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        _install(second)
+        assert second.download_dataset_files() is True
+        assert second.get_last_release_id() == '2026-01-01'
+    finally:
+        second.close()
+
+    # Only the shard that was missing is fetched on the retry.
+    assert downloaded == ['papers-0.gz', 'papers-1.gz', 'papers-2.gz']
+
+
+def _make_repaired_s2_db(path):
+    """A database with the full expected schema, as a finished build leaves it."""
+    _make_minimal_s2_db(path, release_id='2026-08-05')
+    report = repair_local_database_schema(str(path))
+    assert not report['missing_columns'], report
+    assert not report['missing_indexes'], report
+
+
+def test_opening_healthy_database_performs_no_writes(tmp_path, monkeypatch):
+    """Every check opens this file; writing on open serializes concurrent checks
+    against each other on a database that can be ~90GB."""
+    db_path = tmp_path / 'healthy.db'
+    _make_repaired_s2_db(db_path)
+
+    def _fail_on_repair(*args, **kwargs):
+        raise AssertionError('schema repair ran against an already-healthy database')
+
+    monkeypatch.setattr(
+        'refchecker.checkers.local_semantic_scholar.repair_local_database_schema',
+        _fail_on_repair,
+    )
+
+    before = db_path.stat().st_mtime_ns
+    checker = LocalNonArxivReferenceChecker(db_path=str(db_path))
+    try:
+        assert checker.conn.execute('PRAGMA busy_timeout').fetchone()[0] > 0
+    finally:
+        checker.close()
+    assert db_path.stat().st_mtime_ns == before
+
+
+def test_opening_damaged_database_still_repairs(tmp_path):
+    """A genuinely missing index must still be created."""
+    db_path = tmp_path / 'damaged.db'
+    _make_repaired_s2_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute('DROP INDEX idx_papers_doi')
+    conn.commit()
+    conn.close()
+
+    checker = LocalNonArxivReferenceChecker(db_path=str(db_path))
+    try:
+        indexes = {
+            row[0]
+            for row in checker.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_papers_%'"
+            ).fetchall()
+        }
+    finally:
+        checker.close()
+    assert 'idx_papers_doi' in indexes
+
+
+def test_legacy_full_database_without_marker_reports_complete(tmp_path):
+    """A database built before the completion marker existed must not be treated
+    as a partial bootstrap, which would keep the S2 API in the hot path."""
+    db_path = tmp_path / 'legacy-full.db'
+    _make_repaired_s2_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM metadata WHERE key='last_release_id'")
+    conn.execute(
+        "INSERT INTO papers (rowid, title) VALUES (?, ?)",
+        (FULL_SNAPSHOT_MIN_ROWS, 'a paper deep into a full snapshot'),
+    )
+    conn.commit()
+    conn.close()
+
+    checker = LocalNonArxivReferenceChecker(db_path=str(db_path))
+    try:
+        assert checker.has_complete_coverage() is True
+    finally:
+        checker.close()
+
+
+def test_small_database_without_marker_reports_incomplete(tmp_path):
+    db_path = tmp_path / 'partial.db'
+    _make_repaired_s2_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM metadata WHERE key='last_release_id'")
+    conn.commit()
+    conn.close()
+
+    checker = LocalNonArxivReferenceChecker(db_path=str(db_path))
+    try:
+        assert checker.has_complete_coverage() is False
+    finally:
+        checker.close()
+
+def _http_error(status):
+    import requests
+    response = requests.Response()
+    response.status_code = status
+    response.url = 'https://api.semanticscholar.org/datasets/v1/release/latest'
+    error = requests.exceptions.HTTPError(f'{status} Client Error', response=response)
+    return error
+
+
+def test_unauthorized_release_lookup_raises_auth_error(tmp_path):
+    """A 401 from the datasets API must be distinguishable from a transient
+    failure: it means SEMANTIC_SCHOLAR_API_KEY is missing or invalid and every
+    future refresh will fail identically until an operator fixes it."""
+    downloader = SemanticScholarDownloader(
+        output_dir=str(tmp_path), db_path=str(tmp_path / 's2.db')
+    )
+    try:
+        class _Session:
+            def get(self, *args, **kwargs):
+                raise _http_error(401)
+
+            def close(self):
+                pass
+
+        downloader.session = _Session()
+        with pytest.raises(SemanticScholarAuthError):
+            downloader.get_latest_release_id()
+    finally:
+        downloader.close()
+
+
+def test_unauthorized_file_listing_raises_instead_of_reporting_no_files(tmp_path):
+    """list_files() previously swallowed the 401 and returned [], which the
+    caller reported as 'no files found for the latest release'."""
+    downloader = SemanticScholarDownloader(
+        output_dir=str(tmp_path), db_path=str(tmp_path / 's2.db')
+    )
+    try:
+        class _Session:
+            def get(self, *args, **kwargs):
+                raise _http_error(403)
+
+            def close(self):
+                pass
+
+        downloader.session = _Session()
+        with pytest.raises(SemanticScholarAuthError):
+            downloader.list_files('2026-08-05')
+    finally:
+        downloader.close()
+
+
+def test_refresh_reports_missing_api_key_instead_of_generic_failure(tmp_path, monkeypatch):
+    """The deployed message was 'Semantic Scholar refresh failed', which gave an
+    operator nothing to act on while the snapshot silently aged five months."""
+    db_path = tmp_path / 's2.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+
+    class _AuthFailingDownloader:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def refresh_database(self, *args, **kwargs):
+            raise SemanticScholarAuthError('401 Unauthorized')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(updater, 'SemanticScholarDownloader', _AuthFailingDownloader)
+
+    outcome = updater._prepare_s2_database(str(db_path), api_key=None)
+
+    assert outcome.updated is False
+    assert 'SEMANTIC_SCHOLAR_API_KEY' in outcome.message
+
+
+def _gzipped_jsonl(records):
+    """The datasets API serves gzipped JSONL from S3 with no Content-Encoding."""
+    body = "\n".join(json.dumps(r) for r in records).encode("utf-8")
+    return gzip.compress(body)
+
+
+class _FakeRawStream:
+    """Stands in for urllib3's raw response: read-only, not rewindable."""
+
+    def __init__(self, payload):
+        self._buffer = io.BytesIO(payload)
+        self.decode_content = False
+
+    def read(self, size=-1):
+        return self._buffer.read(size)
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self.raw = _FakeRawStream(payload)
+        self.status_code = 200
+        self.headers = {}
+
+    def raise_for_status(self):
+        return None
+
+    def iter_lines(self, decode_unicode=False):
+        raise AssertionError(
+            "incremental ingest must decompress the archive, not read it as text"
+        )
+
+
+def _incremental_downloader(tmp_path, payload, monkeypatch):
+    db_path = tmp_path / 'semantic_scholar.db'
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _FakeResponse(payload)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(downloader, 'session', _Session())
+    return downloader
+
+
+def test_incremental_update_decompresses_gzipped_diff(tmp_path, monkeypatch):
+    """The diff files are gzip; reading them as text yielded binary garbage on
+    every line, so no update ever applied while the run still reported success."""
+    payload = _gzipped_jsonl([
+        {'paperId': 'S2-INC-1', 'title': 'Incrementally Updated Paper', 'year': 2026},
+        {'paperId': 'S2-INC-2', 'title': 'Another Updated Paper', 'year': 2026},
+    ])
+    downloader = _incremental_downloader(tmp_path, payload, monkeypatch)
+    try:
+        processed = downloader._process_incremental_file('https://example/diff.gz', 'update')
+
+        assert processed == 2
+        titles = {
+            row[0]
+            for row in downloader.conn.execute('SELECT title FROM papers').fetchall()
+        }
+        assert 'Incrementally Updated Paper' in titles
+    finally:
+        downloader.close()
+
+
+def test_incremental_update_still_reads_uncompressed_diff(tmp_path, monkeypatch):
+    """Plain JSONL must keep working: the format is sniffed, not assumed."""
+    payload = b'{"paperId": "S2-PLAIN", "title": "Uncompressed Diff", "year": 2026}\n'
+    downloader = _incremental_downloader(tmp_path, payload, monkeypatch)
+    try:
+        assert downloader._process_incremental_file('https://example/diff', 'update') == 1
+    finally:
+        downloader.close()
+
+
+def test_unreadable_incremental_file_aborts_instead_of_logging_every_line(tmp_path, monkeypatch):
+    """An undecodable payload produced one log line per record and filled the
+    production data disk with a multi-gigabyte log, taking the DB offline."""
+    payload = b"\n".join(b"\x83\x95\xbe not json" for _ in range(5000))
+    downloader = _incremental_downloader(tmp_path, payload, monkeypatch)
+
+    class _Collector(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    collector = _Collector()
+    module_logger = logging.getLogger(
+        'refchecker.database.download_semantic_scholar_db'
+    )
+    module_logger.addHandler(collector)
+    try:
+        with pytest.raises(Exception):
+            downloader._process_incremental_file('https://example/diff', 'update')
+
+        per_line = [m for m in collector.messages if 'Malformed line' in m]
+        assert len(per_line) <= MAX_MALFORMED_LINE_LOGS
+    finally:
+        module_logger.removeHandler(collector)
+        downloader.close()
+
+
+def test_failed_incremental_file_does_not_advance_recorded_release(tmp_path, monkeypatch):
+    """Advancing the release marker past diffs we could not apply would skip
+    them forever, which is how the snapshot silently stayed months out of date."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-08-05')
+
+        def _boom(file_url, operation_type):
+            raise RuntimeError('unreadable diff')
+
+        monkeypatch.setattr(downloader, '_process_incremental_file', _boom)
+
+        result = downloader.download_incremental_updates([
+            {'update_files': ['https://example/diff.gz'], 'delete_files': []}
+        ])
+
+        assert result is False
+        assert downloader.get_last_release_id() == '2026-03-10'
+    finally:
+        downloader.close()
+
+
+def test_interrupted_download_leaves_no_partial_archive(tmp_path, monkeypatch):
+    """A download that dies part-way (dropped connection, full disk) used to
+    leave a truncated .gz behind that nothing cleaned up."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        class _Response:
+            status_code = 200
+            headers = {'Content-Length': '100'}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                yield b'partial data'
+                raise OSError(28, 'No space left on device')
+
+        class _Session:
+            def get(self, *args, **kwargs):
+                return _Response()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(downloader, 'session', _Session())
+
+        with pytest.raises(OSError):
+            downloader.download_file({'path': 'papers-0.gz', 'url': 'https://example/0', 'size': 100})
+
+        leftovers = sorted(p.name for p in tmp_path.iterdir() if '.gz' in p.name)
+        assert leftovers == []
+    finally:
+        downloader.close()
+
+
+def test_incremental_ingest_stops_before_filling_the_disk(tmp_path, monkeypatch):
+    """An incremental catch-up writes rows straight into the DB, so it can
+    exhaust the volume without downloading anything -- which is what left the
+    87GB production database raising "disk I/O error" on every lookup."""
+    payload = _gzipped_jsonl([{'paperId': 'S2-1', 'title': 'Paper', 'year': 2026}])
+    downloader = _incremental_downloader(tmp_path, payload, monkeypatch)
+    try:
+        monkeypatch.setattr(
+            'refchecker.database.download_semantic_scholar_db.shutil.disk_usage',
+            lambda path: collections.namedtuple('u', 'total used free')(100, 100, 1024),
+        )
+
+        with pytest.raises(RuntimeError, match='refusing to continue'):
+            downloader._process_incremental_file('https://example/diff.gz', 'update')
+    finally:
+        downloader.close()
+
+
+def _rate_limited_downloader(tmp_path, monkeypatch, responses):
+    db_path = tmp_path / 'semantic_scholar.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self._payload = payload or {}
+            self.headers = {}
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            return None
+
+    queue = list(responses)
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _Resp(*queue.pop(0))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(downloader, 'session', _Session())
+    monkeypatch.setattr(
+        'refchecker.database.download_semantic_scholar_db.time.sleep', lambda s: None
+    )
+    return downloader
+
+
+def test_rate_limited_diff_request_is_retried(tmp_path, monkeypatch):
+    """A 429 is transient and says nothing about whether updates exist."""
+    diffs = {'diffs': [{'update_files': ['https://example/u.gz'], 'delete_files': []}]}
+    downloader = _rate_limited_downloader(
+        tmp_path, monkeypatch, [(429, None), (429, None), (200, diffs)]
+    )
+    try:
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-08-05')
+
+        result = downloader.check_incremental_updates('2026-03-10')
+
+        assert result == diffs['diffs']
+    finally:
+        downloader.close()
+
+
+def test_persistent_rate_limit_does_not_trigger_full_redownload(tmp_path, monkeypatch):
+    """Treating a throttle as "no incremental updates" made refresh fall through
+    to re-downloading the whole ~90GB dataset, which cannot fit beside the DB."""
+    downloader = _rate_limited_downloader(
+        tmp_path, monkeypatch, [(429, None)] * 10
+    )
+    try:
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-08-05')
+
+        def _must_not_run(*args, **kwargs):
+            raise AssertionError('rate limiting must not trigger a full dataset download')
+
+        monkeypatch.setattr(downloader, 'download_dataset_files', _must_not_run)
+
+        assert downloader.refresh_database() is False
+        assert downloader.get_last_release_id() == '2026-03-10'
+    finally:
+        downloader.close()
+
+
+def test_rate_limited_release_lookup_is_retried(tmp_path, monkeypatch):
+    """Every datasets endpoint throttles, not just diffs; a 429 on the release
+    lookup previously aborted the refresh and escalated to a full download."""
+    downloader = _rate_limited_downloader(
+        tmp_path, monkeypatch, [(429, None), (200, {'release_id': '2026-08-05'})]
+    )
+    try:
+        assert downloader.get_latest_release_id() == '2026-08-05'
+    finally:
+        downloader.close()
+
+
+def test_rate_limited_file_listing_is_retried(tmp_path, monkeypatch):
+    downloader = _rate_limited_downloader(
+        tmp_path,
+        monkeypatch,
+        [(429, None), (200, {'files': ['https://example/papers-0.gz?token=x']})],
+    )
+    try:
+        files = downloader.list_files('2026-08-05', dataset='papers')
+
+        assert len(files) == 1
+    finally:
+        downloader.close()
+
+
+def test_signed_dataset_urls_are_not_written_to_logs(tmp_path, monkeypatch):
+    """Dataset links carry AWSAccessKeyId, Signature and x-amz-security-token;
+    those must not be recorded in a log file that operators read and share."""
+    signed = (
+        'https://ai2-s2ag.s3.amazonaws.com/updates/papers/shard.gz'
+        '?AWSAccessKeyId=ASIASECRET&Signature=abc%3D&x-amz-security-token=TOKEN'
+    )
+    downloader = _incremental_downloader(tmp_path, b'not json\n', monkeypatch)
+
+    class _Collector(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    collector = _Collector()
+    module_logger = logging.getLogger(
+        'refchecker.database.download_semantic_scholar_db'
+    )
+    module_logger.setLevel(logging.DEBUG)
+    module_logger.addHandler(collector)
+    try:
+        downloader._process_incremental_file(signed, 'update')
+
+        blob = ' '.join(collector.messages)
+        assert 'ASIASECRET' not in blob
+        assert 'x-amz-security-token' not in blob
+        assert 'shard.gz' in blob
+    finally:
+        module_logger.removeHandler(collector)
+        downloader.close()

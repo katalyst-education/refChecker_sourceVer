@@ -2,6 +2,7 @@
 FastAPI application for RefChecker Web UI
 """
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import asyncio
 import time
 import uuid
@@ -22,11 +23,13 @@ from pydantic.fields import FieldInfo
 from pydantic import BaseModel, Field
 import logging
 from refchecker.__version__ import __version__
-from refchecker.utils.database_config import DATABASE_BUILD_DEPENDENCIES, DATABASE_FILE_ALIASES, DATABASE_LABELS, DATABASE_UPDATE_ORDER, resolve_database_paths
+from refchecker.utils.database_config import DATABASE_BUILD_DEPENDENCIES, DATABASE_FILE_ALIASES, DATABASE_LABELS, DATABASE_UPDATE_ORDER, resolve_database_paths, resolve_database_update_paths
 
 # Fix Windows encoding issues with Unicode characters (e.g., Greek letters in paper titles).
 # Skip this when running under pytest so we don't replace pytest's capture streams, which can
-# lead to closed-file errors during teardown.
+# lead to closed-file errors during teardown. PYTEST_CURRENT_TEST is not set while pytest is
+# importing this module, so check for the imported pytest module as well; without that the
+# replaced wrapper is garbage collected, closes pytest's capture file, and aborts the run.
 if (
     sys.platform == 'win32'
     and "pytest" not in sys.modules
@@ -39,6 +42,7 @@ if (
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import aiosqlite
+from . import admin_insights
 from .database import db, get_data_dir, get_logs_dir
 from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
@@ -103,7 +107,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-if sys.platform == 'win32' and not os.environ.get("PYTEST_CURRENT_TEST"):
+if sys.platform == 'win32' and not os.environ.get("PYTEST_CURRENT_TEST") and "pytest" not in sys.modules:
+    # PYTEST_CURRENT_TEST alone is not enough: it is unset while pytest is
+    # importing this module, and rebinding handlers onto pytest's capture
+    # stream leaves them pointing at a temp file pytest later closes, which
+    # crashes the whole run at teardown.
     loggers = [logging.getLogger()]
     loggers.extend(
         logger_obj
@@ -155,6 +163,39 @@ def _private_artifact_headers(extra_headers: Optional[Dict[str, str]] = None) ->
     if extra_headers:
         headers.update(extra_headers)
     return headers
+
+
+S2_BOOTSTRAP_MIN_FREE_GB = int(os.environ.get("REFCHECKER_S2_MIN_FREE_GB", "95"))
+DEFAULT_DB_REFRESH_INTERVAL_HOURS = 24.0
+# Semantic Scholar publishes weekly; a snapshot older than this means the
+# refreshes are not landing, whatever the refresh logs say.
+S2_SNAPSHOT_STALE_DAYS = 30.0
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean env var ('1/true/yes/on' vs '0/false/no/off')."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _db_refresh_interval_seconds() -> Optional[float]:
+    """Interval between automatic local-DB refreshes; None disables the loop.
+
+    Refreshes used to run once per process start only, so a deployment that
+    stays up for weeks (the normal case on Render) never picked up new
+    Semantic Scholar releases.
+    """
+    raw = os.environ.get("REFCHECKER_DB_REFRESH_INTERVAL_HOURS")
+    try:
+        hours = float(raw) if raw is not None and raw.strip() else DEFAULT_DB_REFRESH_INTERVAL_HOURS
+    except ValueError:
+        logger.warning("Invalid REFCHECKER_DB_REFRESH_INTERVAL_HOURS=%r; using default", raw)
+        hours = DEFAULT_DB_REFRESH_INTERVAL_HOURS
+    if hours <= 0:
+        return None
+    return hours * 3600.0
 
 
 def _resolve_semantic_scholar_db_path(path_value: Optional[str]) -> Optional[Path]:
@@ -263,6 +304,24 @@ def _read_semantic_scholar_db_snapshot(db_path: Optional[Path]) -> Optional[str]
         return None
 
 
+def _snapshot_age_days(snapshot: Optional[str]) -> Optional[float]:
+    """Days since the S2 release the local DB last finished ingesting.
+
+    Release ids are dates ("2026-08-05"), so this is the honest answer to
+    "is the database actually being updated?" -- the file's mtime is not,
+    since any failed refresh or schema touch bumps it.
+    """
+    if not snapshot:
+        return None
+    try:
+        released = datetime.strptime(snapshot.strip(), "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+    except (ValueError, AttributeError):
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - released).total_seconds() / 86400.0)
+
+
 async def _get_configured_semantic_scholar_db_path() -> Optional[Path]:
     """Return the configured local Semantic Scholar DB path, if any."""
     configured_path = (
@@ -312,6 +371,71 @@ async def _get_configured_database_paths() -> Dict[str, str]:
     return filtered
 
 
+async def _get_planned_s2_bootstrap_path() -> Optional[Path]:
+    """Return where the S2 DB *should* live when it is configured but missing.
+
+    ``_get_configured_database_paths()`` drops paths that don't exist yet, which
+    means a deployment that declares ``REFCHECKER_DB_PATH`` on an empty disk
+    (the Render blueprint does exactly this) never schedules the refresh that
+    would create the DB — so every check silently falls back to the remote
+    Semantic Scholar API forever. The CLI has no such gap: ``--update-databases``
+    plans missing files via ``resolve_database_update_paths()``. This restores
+    that parity for the server paths, for S2 only: the other databases are
+    heavy opt-in builds driven from the admin UI.
+    """
+    if not _env_flag("REFCHECKER_DB_AUTO_BOOTSTRAP", default=True):
+        return None
+
+    configured = (
+        os.environ.get("REFCHECKER_DB_PATH")
+        or os.environ.get("REFCHECKER_DATABASE_DIRECTORY")
+        or await db.get_setting("db_path")
+        or None
+    )
+    if not configured:
+        return None
+
+    planned = resolve_database_update_paths(explicit_paths={"s2": configured}).get("s2")
+    if not planned:
+        candidate = Path(configured).expanduser()
+        # A configured *file* path that doesn't exist yet is still the operator's
+        # declared intent; resolve_database_update_paths() only plans directories.
+        if candidate.suffix.lower() == ".db":
+            planned = str(candidate)
+    if not planned:
+        return None
+
+    planned_path = Path(planned).expanduser()
+    if planned_path.is_file():
+        return None
+    return planned_path
+
+
+def _has_room_for_s2_bootstrap(db_path: Path) -> bool:
+    """Refuse to start a full S2 download that obviously cannot fit on disk.
+
+    The finished database is ~90GB and the downloader ingests one compressed
+    archive at a time, so the requirement is the database plus a few GB of
+    working room -- not the database plus the whole compressed dataset, which
+    is what an up-front download of every archive would have needed.
+    """
+    try:
+        target_dir = db_path.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        free_gb = shutil.disk_usage(target_dir).free / 1e9
+    except OSError as e:
+        logger.warning("Could not check free disk space for %s: %s", db_path, e)
+        return False
+    if free_gb < S2_BOOTSTRAP_MIN_FREE_GB:
+        logger.error(
+            "Skipping Semantic Scholar bootstrap for %s: only %.1fGB free, need at least %dGB. "
+            "Checks will fall back to the remote Semantic Scholar API (slower).",
+            db_path, free_gb, S2_BOOTSTRAP_MIN_FREE_GB,
+        )
+        return False
+    return True
+
+
 async def _get_configured_cache_dir() -> Optional[str]:
     """Return the configured shared cache directory, if any."""
     configured_dir = os.environ.get('REFCHECKER_CACHE_DIR') or await db.get_setting("cache_dir")
@@ -325,6 +449,24 @@ async def _run_semantic_scholar_refresh_subprocess(db_path: Path) -> None:
     await _run_database_refresh_subprocess('s2', db_path)
 
 
+# Last refresh attempt per database, so operators can answer "is the local DB
+# actually being maintained?" from the admin API instead of digging in logs.
+_DB_REFRESH_STATE: Dict[str, Dict[str, object]] = {}
+
+# Staging dirs renamed with this prefix are already condemned by a previous
+# sweep and are deleted unconditionally on the next startup.
+_ORPHAN_SWEEP_PREFIX = "orphan-sweep-"
+
+
+def _record_refresh_result(db_name: str, status: str, detail: Optional[str]) -> None:
+    state = _DB_REFRESH_STATE.setdefault(db_name, {})
+    state["status"] = status
+    state["finished_at"] = time.time()
+    state["detail"] = detail
+    state.setdefault("started_at", None)
+    state.setdefault("db_path", None)
+
+
 def _sweep_orphaned_refresh_tmpdirs() -> None:
     """Delete orphaned staging dirs left in DB directories by killed refreshes.
 
@@ -333,6 +475,9 @@ def _sweep_orphaned_refresh_tmpdirs() -> None:
     by a restart or crash strands a multi-GB tmp* dir on the data disk. Enough
     restarts fill the disk completely, which then breaks SQLite (disk I/O
     error) and takes the whole service down.
+
+    Blocking: callers on the event loop must run this via asyncio.to_thread so
+    a slow network disk cannot delay the server from accepting connections.
     """
     candidates = {get_data_dir(), get_data_dir() / "databases"}
     env_db_dir = os.environ.get("REFCHECKER_DATABASE_DIRECTORY")
@@ -344,26 +489,69 @@ def _sweep_orphaned_refresh_tmpdirs() -> None:
         except OSError:
             continue
         for entry in entries:
-            if not entry.name.startswith("tmp") or not entry.is_dir(follow_symlinks=False):
+            is_condemned = entry.name.startswith(_ORPHAN_SWEEP_PREFIX)
+            if not is_condemned and not entry.name.startswith("tmp"):
                 continue
             try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
                 # No refresh subprocess is running yet at startup, so a
                 # staging dir here is orphaned; the age guard only protects
                 # refreshes launched outside this process (e.g. the CLI).
-                age = time.time() - entry.stat(follow_symlinks=False).st_mtime
-                if age < 1800:
-                    continue
+                # Dirs already renamed by a previous sweep skip the guard:
+                # a partial rmtree refreshes mtime, so an age check alone
+                # would keep re-deferring them on a fast restart loop and
+                # never reclaim the disk.
+                target = Path(entry.path)
+                if not is_condemned:
+                    age = time.time() - entry.stat(follow_symlinks=False).st_mtime
+                    if age < 1800:
+                        continue
+                    target = target.with_name(f"{_ORPHAN_SWEEP_PREFIX}{entry.name}")
+                    os.rename(entry.path, target)
+                # Deliberately no rglob size walk here: on a multi-GB staging
+                # dir that walk costs more than the delete and delays startup.
+                before = shutil.disk_usage(root).free
+                shutil.rmtree(target, ignore_errors=True)
+                reclaimed = max(0, shutil.disk_usage(root).free - before)
+                logger.warning(
+                    f"Removed orphaned refresh staging dir {target} "
+                    f"({reclaimed / 1e9:.2f}GB reclaimed)"
+                )
+            except OSError as e:
+                logger.warning(f"Could not remove staging dir {entry.path}: {e}")
+
+
+async def _sweep_orphaned_refresh_tmpdirs_async() -> None:
+    """Run the orphaned staging dir sweep off the event loop."""
+    try:
+        await asyncio.to_thread(_sweep_orphaned_refresh_tmpdirs)
+    except Exception as e:
+        logger.warning(f"Orphaned staging dir sweep failed: {e}")
+
+
+def _collect_data_dir_entry_sizes(data_dir: Path) -> List[Tuple[int, str]]:
+    """Size every top-level entry in the data dir (blocking; run in a thread)."""
+    sizes: List[Tuple[int, str]] = []
+    try:
+        entries = list(os.scandir(data_dir))
+    except OSError:
+        return sizes
+    for entry in entries:
+        try:
+            if entry.is_file(follow_symlinks=False):
+                size = entry.stat(follow_symlinks=False).st_size
+            elif entry.is_dir(follow_symlinks=False):
                 size = sum(
                     f.stat(follow_symlinks=False).st_size
                     for f in Path(entry.path).rglob("*") if f.is_file()
                 )
-                shutil.rmtree(entry.path)
-                logger.warning(
-                    f"Removed orphaned refresh staging dir {entry.path} "
-                    f"({size / 1e9:.2f}GB reclaimed)"
-                )
-            except OSError as e:
-                logger.warning(f"Could not remove staging dir {entry.path}: {e}")
+            else:
+                continue
+            sizes.append((size, entry.name))
+        except OSError:
+            continue
+    return sizes
 
 
 async def _run_database_refresh_subprocess(db_name: str, db_path: Path) -> None:
@@ -372,8 +560,16 @@ async def _run_database_refresh_subprocess(db_name: str, db_path: Path) -> None:
     script_path = repo_root / "scripts" / "update_local_database.py"
     if not script_path.is_file():
         logger.error(f"Local database refresh script not found: {script_path}")
+        _record_refresh_result(db_name, "failed", "refresh script not found")
         return
 
+    _DB_REFRESH_STATE[db_name] = {
+        "status": "running",
+        "started_at": time.time(),
+        "finished_at": None,
+        "detail": None,
+        "db_path": str(db_path),
+    }
     command = [
         sys.executable,
         str(script_path),
@@ -440,13 +636,16 @@ async def _run_database_refresh_subprocess(db_name: str, db_path: Path) -> None:
                 )
                 process.kill()
                 await process.wait()
+        _record_refresh_result(db_name, "cancelled", "refresh cancelled")
         raise
     finally:
         log_handle.close()
     if return_code == 0:
         logger.info(f"Background {DATABASE_LABELS.get(db_name, db_name)} refresh completed successfully for {db_path}")
+        _record_refresh_result(db_name, "success", None)
         return
     logger.error(f"Background {DATABASE_LABELS.get(db_name, db_name)} refresh failed for {db_path} with exit code {return_code}")
+    _record_refresh_result(db_name, "failed", f"exit code {return_code}")
 
 
 async def _schedule_semantic_scholar_refresh() -> Optional[asyncio.Task]:
@@ -466,7 +665,38 @@ async def _schedule_semantic_scholar_refresh() -> Optional[asyncio.Task]:
 async def _schedule_database_refreshes() -> Dict[str, asyncio.Task]:
     """Schedule non-blocking refreshes for all discovered local databases."""
     db_paths = await _get_configured_database_paths()
+
+    # A configured-but-missing S2 DB is the operator asking for a local DB on a
+    # blank disk. Without this the refresh is never scheduled, the DB is never
+    # created, and every check silently uses the (much slower) remote S2 API.
+    if "s2" not in db_paths:
+        bootstrap_path = await _get_planned_s2_bootstrap_path()
+        if bootstrap_path and _has_room_for_s2_bootstrap(bootstrap_path):
+            logger.warning(
+                "Local Semantic Scholar DB %s does not exist yet; starting a full bootstrap download. "
+                "Checks use the remote Semantic Scholar API until it completes.",
+                bootstrap_path,
+            )
+            db_paths = {**db_paths, "s2": str(bootstrap_path)}
+
     tasks: Dict[str, asyncio.Task] = {}
+
+    if "s2" in db_paths and not os.environ.get("SEMANTIC_SCHOLAR_API_KEY"):
+        # The datasets API answers 401 without a key, so every refresh below
+        # will fail instantly and the snapshot will silently rot.
+        logger.warning(
+            "SEMANTIC_SCHOLAR_API_KEY is not set — the Semantic Scholar datasets "
+            "API requires it, so the local S2 database at %s cannot be built or "
+            "updated and will grow stale.",
+            db_paths["s2"],
+        )
+
+    # Every refresh stages multi-GB downloads onto the same data disk, so running
+    # them concurrently multiplies the peak free space required and makes them
+    # compete for the same I/O. On a disk sized for the Semantic Scholar database
+    # alone that is how the disk fills. Refreshes therefore take turns; the
+    # dependency ordering below still decides who goes first.
+    refresh_gate = asyncio.Lock()
 
     async def run_with_dependencies(
         db_name: str,
@@ -486,7 +716,8 @@ async def _schedule_database_refreshes() -> Dict[str, asyncio.Task]:
                     db_name,
                     exc,
                 )
-        await _run_database_refresh_subprocess(db_name, Path(db_path))
+        async with refresh_gate:
+            await _run_database_refresh_subprocess(db_name, Path(db_path))
 
     scheduled_names = set()
     for db_name in DATABASE_UPDATE_ORDER:
@@ -524,6 +755,25 @@ async def _schedule_database_refreshes() -> Dict[str, asyncio.Task]:
         tasks[db_name] = task
         logger.info(f"Scheduled background refresh for {DATABASE_LABELS.get(db_name, db_name)} DB at {db_path}")
     return tasks
+
+
+async def _database_refresh_loop() -> None:
+    """Refresh local databases at startup and then on a repeating interval.
+
+    Previously refreshes ran exactly once per process start, so a server that
+    stays up (the normal case for a hosted deployment) never picked up new
+    Semantic Scholar releases — the local DB silently drifted months behind.
+    """
+    interval = _db_refresh_interval_seconds()
+    while True:
+        tasks = await _schedule_database_refreshes()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+        if interval is None:
+            logger.info("Automatic local database refreshes are disabled; not rescheduling")
+            return
+        logger.info("Next local database refresh in %.1f hours", interval / 3600.0)
+        await asyncio.sleep(interval)
 
 
 def _ensure_allowed_web_llm_provider(provider_name: Optional[str]) -> None:
@@ -1122,10 +1372,10 @@ db_degraded = False
 async def _run_startup_tasks() -> None:
     """Initialize persistent services used by the API."""
     global db_degraded
-    try:
-        _sweep_orphaned_refresh_tmpdirs()
-    except Exception as e:
-        logger.warning(f"Orphaned staging dir sweep failed: {e}")
+    # Deliberately not awaited: reclaiming a multi-GB staging dir on a slow
+    # network disk must not delay the server from accepting connections, or
+    # Render's health check fails and restarts the instance mid-sweep.
+    asyncio.create_task(_sweep_orphaned_refresh_tmpdirs_async())
     try:
         await db.init_db()
         db_degraded = False
@@ -1144,21 +1394,9 @@ async def _run_startup_tasks() -> None:
                 f"total={usage.total / 1e9:.1f}GB used={usage.used / 1e9:.1f}GB "
                 f"free={usage.free / 1e9:.1f}GB"
             )
-            sizes = []
-            for entry in os.scandir(data_dir):
-                try:
-                    if entry.is_file(follow_symlinks=False):
-                        size = entry.stat(follow_symlinks=False).st_size
-                    elif entry.is_dir(follow_symlinks=False):
-                        size = sum(
-                            f.stat(follow_symlinks=False).st_size
-                            for f in Path(entry.path).rglob("*") if f.is_file()
-                        )
-                    else:
-                        continue
-                    sizes.append((size, entry.name))
-                except OSError:
-                    continue
+            # Walking every file under the data dir is slow enough to trip the
+            # platform health check on its own, so keep it off the event loop.
+            sizes = await asyncio.to_thread(_collect_data_dir_entry_sizes, data_dir)
             for size, name in sorted(sizes, reverse=True)[:15]:
                 logger.error(f"  {size / 1e9:>8.2f}GB  {name}")
         except Exception as diag_err:
@@ -1255,19 +1493,18 @@ async def lifespan(app: FastAPI):
         # degraded DB lives on; running them now can consume the very space
         # an operator (or the startup sweep) just freed for recovery.
         logger.warning("Skipping background database refreshes: DB is degraded")
-        refresh_tasks = {}
+        refresh_loop_task = None
     else:
-        refresh_tasks = await _schedule_database_refreshes()
-    app.state.database_refresh_tasks = refresh_tasks
-    app.state.semantic_scholar_refresh_task = refresh_tasks.get("s2")
+        refresh_loop_task = asyncio.create_task(
+            _database_refresh_loop(), name="db-refresh-loop"
+        )
+    app.state.database_refresh_loop_task = refresh_loop_task
     try:
         yield
     finally:
-        for task in refresh_tasks.values():
-            if not task.done():
-                task.cancel()
-        if refresh_tasks:
-            await asyncio.gather(*refresh_tasks.values(), return_exceptions=True)
+        if refresh_loop_task is not None and not refresh_loop_task.done():
+            refresh_loop_task.cancel()
+            await asyncio.gather(refresh_loop_task, return_exceptions=True)
 
 
 app = FastAPI(title="RefChecker Web UI API", version="1.0.0", lifespan=lifespan)
@@ -5974,8 +6211,27 @@ async def validate_semantic_scholar_key(
         
         if response.status_code == 200:
             return {"valid": True, "message": "API key is valid"}
-        elif response.status_code == 401 or response.status_code == 403:
+        elif response.status_code == 401:
             raise HTTPException(status_code=400, detail="Invalid API key")
+        elif response.status_code == 403:
+            # S2 fronts its API with AWS API Gateway, which answers 403
+            # ForbiddenException for a key that is syntactically fine but not
+            # currently active on a usage plan. In practice that means the key
+            # was revoked (S2 prunes unused keys), regenerated, or has not
+            # finished activating yet — NOT that the user mistyped it. Saying
+            # "Invalid API key" here sends people off hunting for a typo that
+            # isn't there, so be explicit about what to check instead.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Semantic Scholar rejected this key (HTTP 403). The key format looks "
+                    "fine, so it is most likely not active: newly issued keys can take up "
+                    "to a day to start working, and S2 revokes keys that go unused or that "
+                    "have been regenerated. Verify the current key on your S2 account page, "
+                    "or request a new one at semanticscholar.org/product/api. RefChecker "
+                    "works without this key — it just runs slower."
+                ),
+            )
         elif response.status_code == 429:
             # Rate limited but key is valid
             return {"valid": True, "message": "API key is valid (rate limited)"}
@@ -6552,6 +6808,73 @@ async def get_admin_activity(
     except Exception as e:
         logger.error(f"Error getting admin activity: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/insights/overview")
+async def get_admin_insights_overview(
+    days: int = 30,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Fleet-wide usage totals, a daily series, and headline breakdowns.
+
+    `days=0` means all time.
+    """
+    _require_admin(current_user)
+    try:
+        return await admin_insights.get_overview(db.db_path, days=days)
+    except Exception as e:
+        logger.error(f"Error building admin overview: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/insights/users")
+async def get_admin_insights_users(
+    days: int = 0,
+    limit: int = 100,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Per-user activity rollup, busiest first."""
+    _require_admin(current_user)
+    try:
+        return await admin_insights.get_users(db.db_path, days=days, limit=limit)
+    except Exception as e:
+        logger.error(f"Error building admin user rollup: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/insights/users/{user_id}/sessions")
+async def get_admin_insights_user_sessions(
+    user_id: int,
+    days: int = 0,
+    gap_minutes: int = admin_insights.DEFAULT_SESSION_GAP_MINUTES,
+    current_user: UserInfo = Depends(require_user),
+):
+    """One user's checks grouped into sessions (sittings), newest first."""
+    _require_admin(current_user)
+    try:
+        return await admin_insights.get_user_sessions(
+            db.db_path, user_id=user_id, days=days, gap_minutes=gap_minutes
+        )
+    except Exception as e:
+        logger.error(f"Error building admin session view: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/insights/checks/{check_id}")
+async def get_admin_insights_check(
+    check_id: int,
+    current_user: UserInfo = Depends(require_user),
+):
+    """A single check with its per-reference results, regardless of owner."""
+    _require_admin(current_user)
+    try:
+        detail = await admin_insights.get_check_detail(db.db_path, check_id)
+    except Exception as e:
+        logger.error(f"Error loading admin check detail: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Check not found")
+    return detail
 
 
 @app.delete("/api/admin/cache")
@@ -7383,20 +7706,42 @@ async def suggest_alternative_reference(
     if not title:
         raise HTTPException(status_code=400, detail="Reference has no title to search on")
 
+    import asyncio as _asyncio
     import httpx
+
     api_key = await _resolve_semantic_scholar_api_key(None)
     headers = {"x-api-key": api_key} if api_key else {}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                "https://api.semanticscholar.org/graph/v1/paper/search",
-                params={"query": title, "limit": 5, "fields": "paperId,title,authors,year,externalIds,url"},
-                headers=headers,
-            )
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Lookup failed: {e}")
+    data = {"data": []}
+    s2_rate_limited = False
+    s2_error: Optional[str] = None
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for attempt in range(3):
+            try:
+                r = await client.get(
+                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    params={"query": title, "limit": 5, "fields": "paperId,title,authors,year,externalIds,url"},
+                    headers=headers,
+                )
+                if r.status_code == 429:
+                    s2_rate_limited = True
+                    try:
+                        wait_s = float(r.headers.get("Retry-After", "1.5"))
+                    except (TypeError, ValueError):
+                        wait_s = 1.5
+                    await _asyncio.sleep(min(8.0, max(0.5, wait_s)) * (2 ** attempt))
+                    continue
+                if r.status_code >= 400:
+                    s2_error = f"S2 search failed with HTTP {r.status_code}"
+                    break
+                payload = r.json()
+                data = payload if isinstance(payload, dict) else {"data": []}
+                s2_error = None
+                break
+            except httpx.HTTPError as e:
+                s2_error = str(e)
+                await _asyncio.sleep(0.4 * (2 ** attempt))
+    if s2_error:
+        logger.debug("Suggest-alt S2 search failed: %s", s2_error)
 
     suggestions = []
     for p in (data.get("data") or [])[:5]:
@@ -7667,6 +8012,7 @@ async def suggest_alternative_reference(
         "reference_id": ref_id,
         "cited_title": title,
         "candidates": llm_candidates + suggestions,
+        "rate_limited": s2_rate_limited,
     }
 
 
@@ -9825,6 +10171,135 @@ async def trigger_database_download(req: _DBDownloadRequest, current_user: UserI
         "started": started,
         "directory": str(target_dir),
         "openalex_min_year": req.openalex_min_year,
+    }
+
+
+def _describe_data_disk(statuses: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    """Free space on the disk holding the local databases, plus refresh leftovers.
+
+    A refresh killed part-way (a redeploy, or the process being restarted) leaves
+    its staging directory behind; enough of those and the disk fills, at which
+    point every later refresh fails too. Neither is visible without shell access.
+    """
+    directory = None
+    for entry in statuses:
+        path = entry.get("path")
+        if path:
+            directory = os.path.dirname(str(path)) or "."
+            break
+    if not directory or not os.path.isdir(directory):
+        return None
+
+    try:
+        usage = shutil.disk_usage(directory)
+    except OSError as e:
+        logger.warning("Could not read disk usage for %s: %s", directory, e)
+        return None
+
+    staging = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if name.startswith("tmp") or name.startswith(_ORPHAN_SWEEP_PREFIX):
+                    staging.append(name)
+    except OSError as e:
+        logger.warning("Could not scan %s for refresh staging dirs: %s", directory, e)
+
+    return {
+        "path": directory,
+        "total_bytes": usage.total,
+        "free_bytes": usage.free,
+        "used_bytes": usage.used,
+        "orphaned_staging_dirs": sorted(staging),
+    }
+
+
+@app.get("/api/databases/status")
+async def get_local_database_status(current_user: UserInfo = Depends(require_user)):
+    """Report whether the local reference DBs actually exist and are current.
+
+    Answers "is this deployment really using the local Semantic Scholar DB, and
+    is it being kept up to date?" — previously only inferable from server logs,
+    and not visible at all in multi-user mode where the db_path setting is
+    hidden. `active` is what a check run would actually use right now.
+    """
+    _require_admin(current_user)
+
+    def _describe(db_name: str, path_str: Optional[str], exists: bool) -> Dict[str, object]:
+        info: Dict[str, object] = {
+            "database": db_name,
+            "label": DATABASE_LABELS.get(db_name, db_name),
+            "path": path_str,
+            "exists": exists,
+            "size_bytes": None,
+            "modified_at": None,
+            "snapshot": None,
+            "last_refresh": _DB_REFRESH_STATE.get(db_name),
+        }
+        if not (exists and path_str):
+            return info
+        try:
+            stat = os.stat(path_str)
+            info["size_bytes"] = stat.st_size
+            info["modified_at"] = stat.st_mtime
+        except OSError as e:
+            logger.warning("Could not stat local %s DB %s: %s", db_name, path_str, e)
+        if db_name == "s2":
+            info["snapshot"] = _read_semantic_scholar_db_snapshot(Path(path_str))
+            # No snapshot recorded means the builder has not finished a pass,
+            # so the file is a partial ingest and misses are not trustworthy.
+            info["ingest_complete"] = info["snapshot"] is not None
+            age_days = _snapshot_age_days(info["snapshot"])
+            info["snapshot_age_days"] = age_days
+            # S2 publishes weekly, so a snapshot older than a month means the
+            # refreshes are not landing, regardless of what the logs claim.
+            info["snapshot_stale"] = (
+                age_days is not None and age_days > S2_SNAPSHOT_STALE_DAYS
+            )
+            # The datasets API answers 401 without a key, so a missing key means
+            # every refresh fails on the first request no matter what else is
+            # healthy. This is the single most common reason a snapshot rots.
+            info["api_key_configured"] = bool(
+                os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+            )
+        return info
+
+    active_paths = await _get_configured_database_paths()
+    targets = [(db_name, path, True) for db_name, path in sorted(active_paths.items())]
+
+    # Surface a configured-but-missing S2 DB explicitly — that is exactly the
+    # state in which every check silently falls back to the remote S2 API.
+    if "s2" not in active_paths:
+        planned = await _get_planned_s2_bootstrap_path()
+        configured = (
+            os.environ.get("REFCHECKER_DB_PATH")
+            or os.environ.get("REFCHECKER_DATABASE_DIRECTORY")
+            or await db.get_setting("db_path")
+        )
+        targets.insert(0, ("s2", str(planned) if planned else configured, False))
+
+    # stat()/sqlite reads hit a multi-GB file on a network disk — off-loop.
+    statuses = await asyncio.to_thread(
+        lambda: [_describe(name, path, exists) for name, path, exists in targets]
+    )
+
+    # A refresh needs room to stage a download beside a database that already
+    # fills most of the disk, so free space is the first thing to check when
+    # refreshes stop landing — and it is otherwise only visible over SSH.
+    disk = await asyncio.to_thread(_describe_data_disk, statuses)
+
+    return {
+        "databases": statuses,
+        "disk": disk,
+        "active": sorted(active_paths.keys()),
+        "using_local_s2": "s2" in active_paths,
+        "refresh_interval_hours": (
+            (_db_refresh_interval_seconds() or 0) / 3600.0 or None
+        ),
+        "auto_bootstrap_enabled": _env_flag("REFCHECKER_DB_AUTO_BOOTSTRAP", default=True),
     }
 
 
