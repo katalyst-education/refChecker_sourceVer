@@ -107,6 +107,46 @@ def decrypt_secret(value: Optional[str]) -> Optional[str]:
         except Exception:
             pass
     return value
+
+
+def current_verification_logic_version() -> int:
+    """Version of the checking logic that produced a cached verdict.
+
+    Read from the shared core so every path agrees on the value. Imported
+    lazily because ``backend.database`` is loaded during startup, before the
+    ``src`` tree is guaranteed to be on ``sys.path``. Falls back to 0 — a
+    version that never matches anything stored — so a broken import makes the
+    cache abstain rather than silently replay results of unknown vintage.
+    """
+    try:
+        from refchecker.core.verification_logic_version import VERIFICATION_LOGIC_VERSION
+        return int(VERIFICATION_LOGIC_VERSION)
+    except Exception:
+        logger.debug("Could not read the verification logic version; treating cache as stale")
+        return 0
+
+
+def cached_result_is_current(row: Any) -> bool:
+    """True if a cached verification row was produced by the current logic.
+
+    Rows written before the stamp existed have ``logic_version`` NULL and are
+    always stale: the fixes made since then would otherwise never reach any
+    reference the app had already seen.
+    """
+    try:
+        stored = row["logic_version"]
+    except (KeyError, IndexError, TypeError):
+        # Column missing entirely (older schema, or a SELECT that didn't ask
+        # for it) — can't prove the row is current, so don't trust it.
+        return False
+    if stored is None:
+        return False
+    try:
+        return int(stored) == current_verification_logic_version()
+    except (TypeError, ValueError):
+        return False
+
+
 def get_data_dir() -> Path:
     """Get platform-appropriate user data directory for refchecker.
     
@@ -499,7 +539,8 @@ class Database:
                     first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
                     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
                     last_seen_check_id INTEGER,
-                    last_seen_paper_title TEXT
+                    last_seen_paper_title TEXT,
+                    logic_version INTEGER
                 )
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_vri_doi ON verified_reference_identity(doi)")
@@ -510,6 +551,9 @@ class Database:
             for ddl in (
                 "ALTER TABLE verified_reference_identity ADD COLUMN last_seen_check_id INTEGER",
                 "ALTER TABLE verified_reference_identity ADD COLUMN last_seen_paper_title TEXT",
+                # NULL on existing rows, which is exactly right: they were
+                # written by older checking logic and must be re-verified.
+                "ALTER TABLE verified_reference_identity ADD COLUMN logic_version INTEGER",
             ):
                 try:
                     await db.execute(ddl)
@@ -2414,6 +2458,10 @@ class Database:
         
         Key is based on: title, authors (sorted), year, venue, url
         All normalized to lowercase and stripped.
+
+        The checking-logic version is folded in as well, so results produced by
+        superseded logic simply stop being addressable rather than replaying a
+        verdict that later fixes have changed.
         """
         import hashlib
         
@@ -2427,7 +2475,10 @@ class Database:
         url = (reference.get('url') or '').strip().lower()
         
         # Create a deterministic string from reference fields
-        cache_input = f"title:{title}|authors:{authors_str}|year:{year}|venue:{venue}|url:{url}"
+        cache_input = (
+            f"logic:{current_verification_logic_version()}|title:{title}"
+            f"|authors:{authors_str}|year:{year}|venue:{venue}|url:{url}"
+        )
         
         # Hash it for a fixed-length key
         return hashlib.sha256(cache_input.encode('utf-8')).hexdigest()
@@ -2759,8 +2810,8 @@ class Database:
                     (identity_key, title, authors, year, doi, arxiv_id, venue,
                      verified_url, matched_db, status, result_json,
                      times_seen, first_seen, last_seen,
-                     last_seen_check_id, last_seen_paper_title)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
+                     last_seen_check_id, last_seen_paper_title, logic_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?)
                 ON CONFLICT(identity_key) DO UPDATE SET
                     title = excluded.title,
                     authors = excluded.authors,
@@ -2770,6 +2821,7 @@ class Database:
                     matched_db = excluded.matched_db,
                     status = excluded.status,
                     result_json = excluded.result_json,
+                    logic_version = excluded.logic_version,
                     times_seen = verified_reference_identity.times_seen + 1,
                     last_seen = CURRENT_TIMESTAMP,
                     last_seen_check_id = COALESCE(excluded.last_seen_check_id, verified_reference_identity.last_seen_check_id),
@@ -2793,6 +2845,7 @@ class Database:
                     result_json,
                     check_id,
                     paper_title,
+                    current_verification_logic_version(),
                 ),
             )
             await db.commit()
@@ -2811,6 +2864,10 @@ class Database:
             )
             row = await cursor.fetchone()
             if row is None:
+                return None
+            if not cached_result_is_current(row):
+                # Produced by superseded checking logic — re-verify instead of
+                # replaying a verdict that known fixes have since changed.
                 return None
             data = dict(row)
             try:
@@ -2883,7 +2940,7 @@ class Database:
                     """
                     SELECT identity_key, title, authors, year, doi, arxiv_id, venue,
                            verified_url, matched_db, status, result_json,
-                           times_seen
+                           times_seen, logic_version
                     FROM verified_reference_identity
                     WHERE LOWER(title) LIKE ?
                     LIMIT 25
@@ -2898,6 +2955,10 @@ class Database:
         best = None
         best_score = 0
         for r in rows:
+            if not cached_result_is_current(r):
+                # Superseded checking logic — don't let a stale verdict
+                # short-circuit verification.
+                continue
             cached_surname = _first_surname(r["authors"] or "")
             try:
                 cached_year = int(r["year"]) if r["year"] else None

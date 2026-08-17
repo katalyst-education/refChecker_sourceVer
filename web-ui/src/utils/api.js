@@ -142,8 +142,10 @@ export const clearCachedFiles = () => api.delete('/admin/cache-files')
 // so the user drill-down is scoped by user id rather than a session id.
 export const getAdminOverview = (days = 30) =>
   api.get('/admin/insights/overview', { params: { days } })
-export const getAdminUsers = (days = 30, limit = 100) =>
-  api.get('/admin/insights/users', { params: { days, limit } })
+export const getAdminUsers = (days = 30, limit = 100, activeOnly = false) =>
+  api.get('/admin/insights/users', { params: { days, limit, active_only: activeOnly } })
+export const getAdminPapers = (days = 30, limit = 100) =>
+  api.get('/admin/insights/papers', { params: { days, limit } })
 export const getAdminUserSessions = (userId, days = 30, gapMinutes = 30) =>
   api.get(`/admin/insights/users/${userId}/sessions`, {
     params: { days, gap_minutes: gapMinutes },
@@ -281,8 +283,8 @@ export const exportCheckFile = (checkId, opts = {}) =>
   api.get(`/export/${checkId}/file?${_exportParams(opts)}`, { responseType: 'blob', timeout: 60000 })
 export const exportBatchFile = (batchId, opts = {}) =>
   api.get(`/export/batch/${batchId}/file?${_exportParams(opts)}`, { responseType: 'blob', timeout: 120000 })
-export const publishCheck = (checkId, { adapter = 'github_gist', token = '', public: isPublic = false } = {}) =>
-  api.post(`/export/${checkId}/publish`, { adapter, token, public: isPublic }, { timeout: 30000 })
+export const publishCheck = (checkId, { adapter = 'github_gist', token = '', public: isPublic = false, include, corrections = false, summary } = {}) =>
+  api.post(`/export/${checkId}/publish`, { adapter, token, public: isPublic, include, corrections, summary }, { timeout: 30000 })
 // Citation health + retraction (real signals).
 export const getCheckHealth = (checkId) => api.get(`/check/${checkId}/health`, { timeout: 15000 })
 export const getCheckRetractions = (checkId) => api.get(`/check/${checkId}/retractions`, { timeout: 45000 })

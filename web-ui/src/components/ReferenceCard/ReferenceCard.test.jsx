@@ -352,8 +352,9 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
-  it('R10: shows a "Find profile" action for an ID-less author and NOT for an author with an id', async () => {
+  it('resolves an ID-less author automatically on open — no click required', async () => {
     vi.useRealTimers()
+    mockFindAuthorProfile.mockResolvedValue({ data: { available: false, reason: 'no confident match' } })
     const reference = {
       status: 'verified',
       title: 'Mixed author paper',
@@ -361,9 +362,9 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
       authors: ['Jane Researcher', 'Mark Withid'],
       enrichment: {
         authors: [
-          // ID-less: no s2_author_id / openalex_id -> offers "Find profile".
+          // ID-less: no s2_author_id / openalex_id -> resolved by name + title.
           { name: 'Jane Researcher' },
-          // Has an OpenAlex id -> NO "Find profile" (loads a real profile).
+          // Has an OpenAlex id -> loads a real by-id profile instead.
           { name: 'Mark Withid', openalex_id: 'A999' },
         ],
       },
@@ -371,16 +372,34 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
     }
     render(<ReferenceCard reference={reference} index={0} />)
 
-    // Open the ID-less author's popover -> "Find profile" appears.
+    // Opening the ID-less author's popover runs the lookup by itself.
     fireEvent.mouseEnter(screen.getByText('Jane Researcher'))
-    await waitFor(() => expect(screen.getByRole('button', { name: /find profile/i })).toBeTruthy())
+    await waitFor(() => expect(mockFindAuthorProfile).toHaveBeenCalled())
+    // The old manual affordance is gone — nothing is left to click.
+    expect(screen.queryByRole('button', { name: /find profile/i })).toBeNull()
 
-    // Open the WITH-id author's popover -> no "Find profile" (id loads a profile).
+    // The with-id author loads a by-id profile.
     fireEvent.mouseEnter(screen.getByText('Mark Withid'))
     await waitFor(() => expect(mockFetchAuthorProfile).toHaveBeenCalled())
-    // The only "Find profile" button in the DOM is the ID-less author's; the
-    // with-id chip never renders one.
-    expect(screen.getAllByRole('button', { name: /find profile/i }).length).toBe(1)
+  })
+
+  it('does not look up an author by name when there is no paper title to corroborate against', async () => {
+    vi.useRealTimers()
+    mockFindAuthorProfile.mockClear()
+    const reference = {
+      status: 'verified',
+      // No title -> the backend has nothing to corroborate the name against.
+      year: 2018,
+      authors: ['Jane Researcher'],
+      enrichment: { authors: [{ name: 'Jane Researcher' }] },
+      errors: [], warnings: [], suggestions: [],
+    }
+    render(<ReferenceCard reference={reference} index={0} />)
+    fireEvent.mouseEnter(screen.getByText('Jane Researcher'))
+    const tooltip = await screen.findByRole('tooltip')
+    await waitFor(() => expect(within(tooltip).getByText(/no paper title to search by/i)).toBeTruthy())
+    // Guessing from a bare name is worse than showing nothing.
+    expect(mockFindAuthorProfile).not.toHaveBeenCalled()
   })
 
   it('R10: a confident hit populates the popover with real metrics; the find lookup carries the paper title', async () => {
@@ -408,16 +427,14 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
     render(<ReferenceCard reference={reference} index={0} />)
     fireEvent.mouseEnter(screen.getByText('Jane Researcher'))
     const tooltip = await screen.findByRole('tooltip')
-    fireEvent.click(within(tooltip).getByRole('button', { name: /find profile/i }))
 
     // The corroboration-gated lookup is called with name + the paper title/year.
     await waitFor(() => expect(mockFindAuthorProfile).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'Jane Researcher', title: 'A Comparison of Treatment Effects', year: 2018 })
     ))
-    // Confident hit -> real metrics render in the popover; the button is gone.
+    // Confident hit -> real metrics render in the popover.
     await waitFor(() => expect(within(tooltip).getByText('1,500')).toBeTruthy())
     expect(within(tooltip).getByText('42')).toBeTruthy()
-    expect(within(tooltip).queryByRole('button', { name: /find profile/i })).toBeNull()
   })
 
   it('R10: a miss shows a quiet "no confident match" and fabricates nothing', async () => {
@@ -434,12 +451,62 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
     render(<ReferenceCard reference={reference} index={0} />)
     fireEvent.mouseEnter(screen.getByText('Jane Researcher'))
     const tooltip = await screen.findByRole('tooltip')
-    fireEvent.click(within(tooltip).getByRole('button', { name: /find profile/i }))
 
     await waitFor(() => expect(within(tooltip).getByText(/no confident match/i)).toBeTruthy())
     // No invented metrics inside the popover (no fabrication on a miss).
     expect(within(tooltip).queryByText(/citations/i)).toBeNull()
     expect(within(tooltip).queryByText(/h-index/i)).toBeNull()
+  })
+
+  it('resolves an ORCID for an S2-only author, whose by-id profile can never carry one', async () => {
+    vi.useRealTimers()
+    mockFindAuthorProfile.mockClear()
+    // Semantic Scholar publishes no ORCID, so the by-id profile comes back without one.
+    mockFetchAuthorProfile.mockResolvedValue({
+      data: { available: true, hIndex: 12, papers: [], source: 'semantic_scholar' },
+    })
+    mockFindAuthorProfile.mockResolvedValue({
+      data: { available: true, name: 'Jane Smith', openalex_id: 'A321', orcid: '0000-0003-1111-2222' },
+    })
+    const reference = {
+      status: 'verified',
+      title: 'An S2-only author paper',
+      authors: ['Jane Smith'],
+      year: 2021,
+      enrichment: { authors: [{ name: 'Jane Smith', s2_author_id: '4242' }] },
+      errors: [], warnings: [], suggestions: [],
+    }
+    render(<ReferenceCard reference={reference} index={0} />)
+    fireEvent.click(screen.getByText('Jane Smith'))
+    const dialog = await screen.findByRole('dialog')
+
+    await waitFor(() => expect(within(dialog).getByText('0000-0003-1111-2222')).toBeTruthy())
+    const orcidLink = within(dialog).getAllByRole('link')
+      .find(a => a.getAttribute('href') === 'https://orcid.org/0000-0003-1111-2222')
+    expect(orcidLink).toBeTruthy()
+    // The card still shows the (richer) S2 metrics — the lookup only filled the gap.
+    expect(within(dialog).getAllByText('12').length).toBeGreaterThan(0)
+    // A "no confident match" notice belongs only to authors with no profile at all.
+    expect(within(dialog).queryByText(/no confident match/i)).toBeNull()
+  })
+
+  it('does not spend a name lookup when the ORCID is already known', async () => {
+    vi.useRealTimers()
+    mockFindAuthorProfile.mockClear()
+    mockFetchAuthorProfile.mockResolvedValue({ data: { available: true, papers: [] } })
+    const reference = {
+      status: 'verified',
+      title: 'Known ORCID paper',
+      authors: ['Jane Smith'],
+      year: 2021,
+      enrichment: { authors: [{ name: 'Jane Smith', s2_author_id: '4243', orcid: '0000-0001-2345-6789' }] },
+      errors: [], warnings: [], suggestions: [],
+    }
+    render(<ReferenceCard reference={reference} index={0} />)
+    fireEvent.click(screen.getByText('Jane Smith'))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(within(dialog).getByText('0000-0001-2345-6789')).toBeTruthy())
+    expect(mockFindAuthorProfile).not.toHaveBeenCalled()
   })
 
   it('R36/R53: renders the ORCID page link AND the visible ORCID number, gated to real values', async () => {
@@ -485,6 +552,76 @@ describe('ReferenceCard — author UI cluster (D1)', () => {
     // No orcid.org link anywhere in the pinned panel.
     const orcidLink = within(dialog).queryAllByRole('link').find(a => (a.getAttribute('href') || '').includes('orcid.org'))
     expect(orcidLink).toBeUndefined()
+  })
+
+  it('shows the i10-index alongside the h-index when the profile carries it', async () => {
+    vi.useRealTimers()
+    mockFetchAuthorProfile.mockResolvedValue({
+      data: {
+        available: true,
+        hIndex: 137,
+        i10Index: 300,
+        metricsSource: 'semantic_scholar',
+        i10Source: 'openalex',
+        papers: [],
+      },
+    })
+    const reference = {
+      status: 'verified',
+      title: 'Indexed author paper',
+      authors: ['Ada Index'],
+      year: 2021,
+      enrichment: { authors: [{ name: 'Ada Index', s2_author_id: '55', openalex_id: 'A55' }] },
+      errors: [], warnings: [], suggestions: [],
+    }
+    render(<ReferenceCard reference={reference} index={0} />)
+    fireEvent.click(screen.getByText('Ada Index'))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(within(dialog).getAllByText('300').length).toBeGreaterThan(0))
+    expect(within(dialog).getAllByText('137').length).toBeGreaterThan(0)
+    // Both surfaces render it: the inline header line AND the metric chip row.
+    expect(within(dialog).getAllByTitle(/i10-index \(OpenAlex\)/i).length).toBe(2)
+    expect(within(dialog).getByText('i10-index')).toBeTruthy() // the chip's label
+    // Each index names the corpus it came from, since the two providers differ.
+    expect(within(dialog).getAllByTitle(/h-index \(Semantic Scholar\)/i).length).toBe(2)
+  })
+
+  it('omits the i10-index when the profile has none (no fabrication)', async () => {
+    vi.useRealTimers()
+    mockFetchAuthorProfile.mockResolvedValue({
+      data: { available: true, hIndex: 9, papers: [] },
+    })
+    const reference = {
+      status: 'verified',
+      title: 'No i10 paper',
+      authors: ['Bob Noindex'],
+      year: 2021,
+      enrichment: { authors: [{ name: 'Bob Noindex', s2_author_id: '56' }] },
+      errors: [], warnings: [], suggestions: [],
+    }
+    render(<ReferenceCard reference={reference} index={0} />)
+    fireEvent.click(screen.getByText('Bob Noindex'))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(within(dialog).getAllByText('9').length).toBeGreaterThan(0))
+    expect(within(dialog).queryAllByText(/i10/i).length).toBe(0)
+  })
+
+  it('sends BOTH author ids so the OpenAlex-only i10-index is reachable for S2 authors', async () => {
+    vi.useRealTimers()
+    mockFetchAuthorProfile.mockClear()
+    mockFetchAuthorProfile.mockResolvedValue({ data: { available: true, papers: [] } })
+    const reference = {
+      status: 'verified',
+      title: 'Dual id paper',
+      authors: ['Cara Dual'],
+      year: 2021,
+      enrichment: { authors: [{ name: 'Cara Dual', s2_author_id: '77', openalex_id: 'A77' }] },
+      errors: [], warnings: [], suggestions: [],
+    }
+    render(<ReferenceCard reference={reference} index={0} />)
+    fireEvent.mouseEnter(screen.getByText('Cara Dual'))
+    await waitFor(() => expect(mockFetchAuthorProfile).toHaveBeenCalled())
+    expect(mockFetchAuthorProfile).toHaveBeenCalledWith({ author_id: '77', openalex_id: 'A77' })
   })
 
   it('R37: relabels the inline badge and appends a literature-citation pill when cited_by_count exists', () => {

@@ -144,7 +144,6 @@ class NonArxivReferenceChecker:
         self.headers.pop("x-api-key", None)
         self._api_key_rejected = True
         return True
-
     @staticmethod
     def _coerce_text(value: Any) -> str:
         """Convert mixed scalar/dict values into a safe display/search string."""
@@ -1392,6 +1391,12 @@ class NonArxivReferenceChecker:
         cited_venue = reference.get('journal', '') or reference.get('venue', '')
         
         paper_venue = self.get_venue_from_paper_data(paper_data)
+        raw_paper_venue = self._coerce_text(paper_venue).lower().strip()
+        paper_reports_generic_preprint = (
+            raw_paper_venue in ('arxiv', 'arxiv.org', 'preprint', 'corr') or
+            raw_paper_venue.startswith('arxiv') or
+            raw_paper_venue.startswith('corr')
+        )
         paper_venue, used_doi_venue = resolve_venue_for_validation(
             cited_venue,
             paper_venue,
@@ -1411,7 +1416,7 @@ class NonArxivReferenceChecker:
             if are_venues_substantially_different(cited_venue, paper_venue, paper_title=_ref_title):
                 from refchecker.utils.error_utils import create_venue_warning
                 errors.append(create_venue_warning(cited_venue, paper_venue))
-        elif not cited_venue and paper_venue:
+        elif not cited_venue and paper_venue and not paper_reports_generic_preprint:
             # Reference has no venue but paper has one — skip generic/preprint
             # server venues (arXiv, CoRR) since they're not meaningful venues.
             pv = paper_venue.lower().strip()
@@ -1420,8 +1425,8 @@ class NonArxivReferenceChecker:
                 not pv.startswith('arxiv') and
                 not pv.startswith('corr')):
                 errors.append({
-                    'error_type': 'venue',
-                    'error_details': f"Venue missing: should include '{paper_venue}'",
+                    'warning_type': 'venue',
+                    'warning_details': f"Venue missing: should include '{paper_venue}'",
                     'ref_venue_correct': paper_venue
                 })
 

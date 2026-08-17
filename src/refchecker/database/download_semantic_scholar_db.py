@@ -205,6 +205,17 @@ class SemanticScholarRateLimitError(RuntimeError):
     """
 
 
+class SemanticScholarDiskSpaceError(RuntimeError):
+    """The volume is too full to keep ingesting.
+
+    Nothing about this is retryable within the same run: every remaining file
+    hits the same wall. It has to be distinguishable from a per-file parse
+    error so a catch-up stops on the first occurrence instead of grinding
+    through hundreds of files that cannot possibly succeed, and so the caller
+    never "falls back" to a full dataset download that needs far more room
+    than the incremental one that just ran out.
+    """
+
 class SemanticScholarAuthError(RuntimeError):
     """The datasets API rejected our credentials.
 
@@ -698,8 +709,14 @@ class SemanticScholarDownloader:
             total_updated = 0
             total_deleted = 0
             failed_files = 0
-            
+            # Diffs arrive oldest-first, so each one that lands completely can be
+            # recorded straight away. Without that, an interruption part-way
+            # through a long catch-up throws away every diff already applied and
+            # the next run starts over from the beginning.
+            checkpointed_release = None
+            checkpoints_blocked = False
             for diff in diffs:
+                diff_failed_files = failed_files
                 if diff.get("type") == "full_dataset_update":
                     # Handle full dataset update recommendation by downloading the full dataset
                     logger.info(f"Full dataset update recommended: {diff.get('message')}")
@@ -750,6 +767,8 @@ class SemanticScholarDownloader:
                             logger.info(f"Processing update file: {_redact_signed_url(update_url)}")
                             records_updated = self._process_incremental_file(update_url, "update")
                             total_updated += records_updated
+                        except SemanticScholarDiskSpaceError:
+                            raise
                         except Exception as e:
                             logger.error(f"Error processing update file {_redact_signed_url(update_url)}: {e}")
                             failed_files += 1
@@ -761,10 +780,28 @@ class SemanticScholarDownloader:
                             logger.info(f"Processing delete file: {_redact_signed_url(delete_url)}")
                             records_deleted = self._process_incremental_file(delete_url, "delete")
                             total_deleted += records_deleted
+                        except SemanticScholarDiskSpaceError:
+                            raise
                         except Exception as e:
                             logger.error(f"Error processing delete file {_redact_signed_url(delete_url)}: {e}")
                             failed_files += 1
                             continue
+
+                # Only record a diff once every one of its files landed, and only
+                # while no earlier diff has failed: the release marker is a
+                # watermark, so moving it past a gap would skip those records
+                # permanently.
+                to_release = diff.get("to_release")
+                if failed_files > diff_failed_files:
+                    checkpoints_blocked = True
+                elif to_release and not checkpoints_blocked:
+                    try:
+                        self.set_last_release_id(to_release)
+                        self.set_last_update_time(datetime.now(timezone.utc).isoformat())
+                        checkpointed_release = to_release
+                        logger.info(f"Applied diff through release {to_release}")
+                    except Exception as e:
+                        logger.warning(f"Could not record progress at release {to_release}: {e}")
             
             logger.info(
                 f"Incremental update complete - Updated: {total_updated}, "
@@ -772,15 +809,21 @@ class SemanticScholarDownloader:
             )
 
             if failed_files:
-                # Advancing the release marker after failures would permanently
-                # skip the diffs we could not apply, so stop here and report it.
+                # The marker still sits at the last diff that applied in full, so
+                # the retry resumes there rather than redoing the whole catch-up.
+                resume_note = (
+                    f"progress is recorded through release {checkpointed_release}"
+                    if checkpointed_release
+                    else "the recorded release is unchanged"
+                )
                 logger.error(
-                    f"{failed_files} incremental file(s) failed; leaving the recorded "
-                    "release unchanged so the next run retries them"
+                    f"{failed_files} incremental file(s) failed; {resume_note} "
+                    "so the next run retries from there"
                 )
                 return False
-            
-            # Update metadata after successful incremental update
+
+            # Land on the newest release the API reported, which also covers diff
+            # shapes that carry no to_release to checkpoint on.
             if total_updated > 0 or total_deleted > 0:
                 current_time = datetime.now(timezone.utc).isoformat()
                 self.set_last_update_time(current_time)
@@ -794,7 +837,23 @@ class SemanticScholarDownloader:
                     logger.warning(f"Could not update release ID: {e}")
             
             return total_updated > 0 or total_deleted > 0
-            
+
+        except SemanticScholarDiskSpaceError as e:
+            # Report what did land, then re-raise: the caller must not treat
+            # this as an ordinary failure and escalate to a full download.
+            resume_note = (
+                f"progress is recorded through release {checkpointed_release}, so the "
+                "next run resumes after it"
+                if checkpointed_release
+                else "the recorded release is unchanged so the next run resumes from "
+                "the same diff"
+            )
+            logger.error(
+                f"Stopping incremental update: {e}. "
+                f"Applied {total_updated} update and {total_deleted} delete records "
+                f"before running out of room; {resume_note}."
+            )
+            raise
         except Exception as e:
             logger.error(f"Error processing incremental diffs: {e}")
             return False
@@ -1410,6 +1469,15 @@ class SemanticScholarDownloader:
             # is indistinguishable here from "no incremental updates available".
             logger.error(f"{e}")
             return False
+        except SemanticScholarDiskSpaceError as e:
+            # A full download needs far more room than the incremental catch-up
+            # that just ran out, so escalating is guaranteed to fail and only
+            # buries the real cause under a second, larger failure.
+            logger.error(
+                f"Stopping refresh: {e}. Free space on the volume, then rerun; "
+                "the catch-up resumes from the same diff."
+            )
+            return False
 
         effective_snapshot = self.get_last_release_id() or self.current_snapshot_id
         if effective_snapshot:
@@ -1765,7 +1833,7 @@ class SemanticScholarDownloader:
         except OSError:
             return
         if free < MIN_FREE_DISK_BYTES:
-            raise RuntimeError(
+            raise SemanticScholarDiskSpaceError(
                 f"Only {self._format_size(free)} free on {self.output_dir}; "
                 f"refusing to continue ingest below {self._format_size(MIN_FREE_DISK_BYTES)}"
             )
@@ -2007,6 +2075,12 @@ class SemanticScholarDownloader:
                     except (json.JSONDecodeError, UnicodeDecodeError) as e:
                         malformed.record(line_num, e, records_processed)
                         continue
+                    except SemanticScholarDiskSpaceError:
+                        # Raised by the periodic headroom check above, not by
+                        # the record. Counting it as a malformed line would
+                        # hide a full disk and keep writing rows until the
+                        # malformed-line abort threshold was reached.
+                        raise
                     except Exception as e:
                         malformed.record(line_num, e, records_processed)
                         continue

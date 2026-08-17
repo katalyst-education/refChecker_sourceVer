@@ -36,8 +36,40 @@ from importlib import import_module
 from typing import Dict, List, Tuple, Optional, Any
 
 from refchecker.utils.database_config import DATABASE_LABELS, DATABASE_LOOKUP_ORDER
+from refchecker.utils.reference_fixups import fixup_reference_fields
 
 logger = logging.getLogger(__name__)
+
+
+def _venue_text(venue: Any) -> str:
+    """Flatten a venue value to plain text.
+
+    Venue fields don't always arrive as strings. Semantic Scholar returns
+    ``journal`` as an object (``{'name': ..., 'volume': ...}``) and Crossref
+    returns ``container-title`` as a list, so code that fell back from an empty
+    ``venue`` to ``journal`` could hand a dict to string comparisons. That
+    raised ``AttributeError: 'dict' object has no attribute 'strip'`` inside the
+    wrong-paper check, which the caller recorded as a checker failure — the
+    reference was reported unverified even though the database had matched it.
+    """
+    if venue is None:
+        return ''
+    if isinstance(venue, str):
+        return venue.strip()
+    if isinstance(venue, dict):
+        for key in ('name', 'title', 'container-title', 'fullName', 'display_name'):
+            value = venue.get(key)
+            if value:
+                return _venue_text(value)
+        return ''
+    if isinstance(venue, (list, tuple)):
+        for item in venue:
+            text = _venue_text(item)
+            if text:
+                return text
+        return ''
+    return str(venue).strip()
+
 
 class EnhancedHybridReferenceChecker:
     """
@@ -409,6 +441,23 @@ class EnhancedHybridReferenceChecker:
             'other': f'{api_label}: unexpected checker error',
         }
         return fallback_details.get(failure_type, f'{api_label}: verification failed')
+
+    @staticmethod
+    def _url_failure_message(subreason: str, web_url: str) -> str:
+        """Describe why a cited URL did not confirm the reference.
+
+        The distinction matters: a page we were blocked from reading tells us
+        nothing about its contents, so reporting it as a mismatch states a
+        conclusion that was never actually checked.
+        """
+        subreason = subreason or ''
+        if 'non-existent' in subreason:
+            return f'Non-existent web page: {web_url}'
+        if 'could not be accessed' in subreason:
+            return f'Cited URL could not be accessed to confirm the reference: {web_url}'
+        if 'URL references paper' in subreason:
+            return f'Paper not verified but URL references paper: {web_url}'
+        return f'Cited URL does not reference this paper: {web_url}'
 
     def _build_unverified_error_details(self, attempted_apis: List[str],
                                         failed_apis: List[Dict[str, Any]]) -> str:
@@ -904,8 +953,8 @@ class EnhancedHybridReferenceChecker:
         in doubt, return True (don't trigger wrong-paper rejection on a
         venue we simply can't classify).
         """
-        cv = self._coerce_text(cited_venue).strip()
-        av = self._coerce_text(actual_venue).strip()
+        cv = _venue_text(cited_venue)
+        av = _venue_text(actual_venue)
         if not cv or not av:
             return True  # missing data — don't reject on venue signal
 
@@ -1298,6 +1347,12 @@ class EnhancedHybridReferenceChecker:
             incomplete['openalex'] = last_openalex_result
         if last_doi_mismatch_result:
             incomplete['doi_mismatch'] = last_doi_mismatch_result
+        if best_result is not None:
+            # Preserve the strongest successful-but-incomplete response (for
+            # example Semantic Scholar metadata without an author list) so the
+            # final fallback can still verify the reference after every source
+            # has had a chance to provide a more complete record.
+            incomplete['best'] = best_result
         if force_all_databases and best_result is not None:
             return best_result, {}
         return None, incomplete
@@ -1690,10 +1745,19 @@ class EnhancedHybridReferenceChecker:
         This is the single entry point used by CLI, WebUI, and bulk paths.
         All verification logic lives here so every mode gets identical results.
         """
-        verified_data, errors, url = self._verify_reference_core(
-            reference,
-            force_all_databases=force_all_databases,
-        )
+        # Repair field swaps before comparisons. This shared entry point is
+        # used by CLI, WebUI, and bulk paths, and the fixup is idempotent.
+        fixup_reference_fields(reference)
+
+        if force_all_databases:
+            verified_data, errors, url = self._verify_reference_core(
+                reference,
+                force_all_databases=True,
+            )
+        else:
+            # Keep the default call compatible with lightweight wrappers and
+            # tests that implement the original one-argument core contract.
+            verified_data, errors, url = self._verify_reference_core(reference)
 
         # Post-process: ArXiv re-verify, independent ArXiv ID check
         verified_data, errors, url = self._postprocess_verification(
@@ -1948,6 +2012,7 @@ class EnhancedHybridReferenceChecker:
         crossref_result = incomplete_data.get('crossref') if incomplete_data else None
         openalex_result = incomplete_data.get('openalex') if incomplete_data else None
         doi_mismatch_result = incomplete_data.get('doi_mismatch') if incomplete_data else None
+        parallel_best_result = incomplete_data.get('best') if incomplete_data else None
         
         # PHASE 2: If no API succeeded in Phase 1, retry failed APIs.
         # Skip retries when the local DB definitively returned not_found —
@@ -2023,12 +2088,17 @@ class EnhancedHybridReferenceChecker:
         
         # PHASE 3: If all APIs failed or returned incomplete data, use best available incomplete data as fallback
         incomplete_results = [
-            r for r in [crossref_result, openalex_result, doi_mismatch_result]
+            r for r in [parallel_best_result, crossref_result, openalex_result, doi_mismatch_result]
             if r is not None
         ]
         if incomplete_results:
             # Prefer CrossRef over OpenAlex for incomplete data (usually more reliable)
-            best_incomplete = crossref_result or openalex_result or doi_mismatch_result
+            best_incomplete = (
+                parallel_best_result
+                or crossref_result
+                or openalex_result
+                or doi_mismatch_result
+            )
             logger.debug("Enhanced Hybrid: No complete data found, using incomplete data as fallback")
             return best_incomplete
         
@@ -2070,13 +2140,7 @@ class EnhancedHybridReferenceChecker:
                             'sources_checked': sources_checked,
                             'sources_negative': sources_negative,
                         })
-                        # Use specific message based on what went wrong
-                        if 'non-existent' in subreason:
-                            url_msg = f'Non-existent web page: {web_url}'
-                        elif 'URL references paper' in subreason:
-                            url_msg = f'Paper not verified but URL references paper: {web_url}'
-                        else:
-                            url_msg = f'Cited URL does not reference this paper: {web_url}'
+                        url_msg = self._url_failure_message(subreason, web_url)
                         errors_out.append({
                             'error_type': 'url' if 'URL references paper' not in subreason else 'unverified',
                             'error_details': url_msg,

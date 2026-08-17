@@ -16,6 +16,7 @@ from refchecker.database import local_database_updater as updater
 from refchecker.database.download_semantic_scholar_db import (
     MAX_MALFORMED_LINE_LOGS,
     SemanticScholarAuthError,
+    SemanticScholarDiskSpaceError,
     SemanticScholarDownloader,
 )
 from refchecker.database.local_database_updater import (
@@ -821,9 +822,20 @@ def _make_minimal_s2_db(path, release_id=None):
             )
             """
         )
-        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            """
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         if release_id is not None:
-            conn.execute("INSERT INTO metadata VALUES ('last_release_id', ?)", (release_id,))
+            conn.execute(
+                "INSERT INTO metadata (key, value) VALUES ('last_release_id', ?)",
+                (release_id,),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -1236,6 +1248,173 @@ def test_incremental_ingest_stops_before_filling_the_disk(tmp_path, monkeypatch)
         )
 
         with pytest.raises(RuntimeError, match='refusing to continue'):
+            downloader._process_incremental_file('https://example/diff.gz', 'update')
+    finally:
+        downloader.close()
+
+
+def test_disk_exhaustion_stops_the_catch_up_on_the_first_file(tmp_path, monkeypatch):
+    """A full disk stops the whole run, not one file at a time.
+
+    Every remaining diff hits the same wall, so continuing merely logged 1002
+    identical errors across 499 files. The first failure has to end the run.
+    """
+    payload = _gzipped_jsonl([{'paperId': 'S2-1', 'title': 'Paper', 'year': 2026}])
+    downloader = _incremental_downloader(tmp_path, payload, monkeypatch)
+    try:
+        monkeypatch.setattr(
+            'refchecker.database.download_semantic_scholar_db.shutil.disk_usage',
+            lambda path: collections.namedtuple('u', 'total used free')(100, 100, 1024),
+        )
+        diffs = [{
+            'update_files': [f'https://example/diff-{i}.gz' for i in range(20)],
+            'delete_files': [],
+        }]
+
+        with pytest.raises(SemanticScholarDiskSpaceError):
+            downloader.download_incremental_updates(diffs)
+    finally:
+        downloader.close()
+
+
+def test_disk_exhaustion_does_not_escalate_to_a_full_download(tmp_path, monkeypatch):
+    """A full re-download needs far more room than the catch-up that just ran
+    out, so escalating is guaranteed to fail and buries the real cause."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        monkeypatch.setattr(
+            downloader, 'check_for_updates',
+            lambda: {
+                'has_updates': True,
+                'message': 'updates available',
+                'incremental_updates': [{'update_files': ['u'], 'delete_files': []}],
+            },
+        )
+
+        def _boom(_diffs):
+            raise SemanticScholarDiskSpaceError('Only 4.9 GB free on /data')
+
+        monkeypatch.setattr(downloader, 'download_incremental_updates', _boom)
+
+        called = []
+        monkeypatch.setattr(
+            downloader, 'download_dataset_files',
+            lambda *a, **k: called.append(True) or True,
+        )
+
+        downloader.refresh_database()
+
+        assert called == [], 'must not fall back to a full dataset download'
+    finally:
+        downloader.close()
+
+
+def test_completed_diffs_are_recorded_before_a_later_one_fails(tmp_path, monkeypatch):
+    """A five-month catch-up that dies on the last diff used to discard every
+    diff already applied, so the next run started over from the beginning."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-08-05')
+
+        def _process(file_url, operation_type):
+            if file_url == 'bad':
+                raise RuntimeError('unreadable diff')
+            return 1
+
+        monkeypatch.setattr(downloader, '_process_incremental_file', _process)
+
+        result = downloader.download_incremental_updates([
+            {'to_release': '2026-03-17', 'update_files': ['ok'], 'delete_files': []},
+            {'to_release': '2026-04-07', 'update_files': ['ok'], 'delete_files': []},
+            {'to_release': '2026-05-05', 'update_files': ['bad'], 'delete_files': []},
+        ])
+
+        assert result is False
+        assert downloader.get_last_release_id() == '2026-04-07'
+    finally:
+        downloader.close()
+
+
+def test_checkpoint_stops_at_the_first_failed_diff(tmp_path, monkeypatch):
+    """The release marker is a watermark, so moving it past a diff that failed
+    would skip those records permanently even though later diffs applied."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-08-05')
+
+        def _process(file_url, operation_type):
+            if file_url == 'bad':
+                raise RuntimeError('unreadable diff')
+            return 1
+
+        monkeypatch.setattr(downloader, '_process_incremental_file', _process)
+
+        downloader.download_incremental_updates([
+            {'to_release': '2026-03-17', 'update_files': ['bad'], 'delete_files': []},
+            {'to_release': '2026-04-07', 'update_files': ['ok'], 'delete_files': []},
+        ])
+
+        assert downloader.get_last_release_id() == '2026-03-10'
+    finally:
+        downloader.close()
+
+
+def test_disk_exhaustion_keeps_the_diffs_that_already_landed(tmp_path, monkeypatch):
+    """Running out of room mid-catch-up must not cost the completed diffs; the
+    rerun after a resize should pick up where it stopped."""
+    db_path = tmp_path / 'semantic_scholar.db'
+    _make_minimal_s2_db(db_path, release_id='2026-03-10')
+    downloader = SemanticScholarDownloader(output_dir=str(tmp_path), db_path=str(db_path))
+    try:
+        monkeypatch.setattr(downloader, 'get_latest_release_id', lambda: '2026-08-05')
+
+        def _process(file_url, operation_type):
+            if file_url == 'full':
+                raise SemanticScholarDiskSpaceError('Only 4.9 GB free on /data')
+            return 1
+
+        monkeypatch.setattr(downloader, '_process_incremental_file', _process)
+
+        with pytest.raises(SemanticScholarDiskSpaceError):
+            downloader.download_incremental_updates([
+                {'to_release': '2026-03-17', 'update_files': ['ok'], 'delete_files': []},
+                {'to_release': '2026-04-07', 'update_files': ['full'], 'delete_files': []},
+            ])
+
+        assert downloader.get_last_release_id() == '2026-03-17'
+    finally:
+        downloader.close()
+
+
+def test_disk_check_at_a_commit_point_is_not_counted_as_a_bad_record(tmp_path, monkeypatch):
+    """The periodic headroom check runs inside the per-line try block. Letting
+    the generic handler swallow it hid a full disk and kept writing rows."""
+    records = [{'paperId': f'S2-{i}', 'title': f'Paper {i}', 'year': 2026}
+               for i in range(10001)]
+    payload = _gzipped_jsonl(records)
+    downloader = _incremental_downloader(tmp_path, payload, monkeypatch)
+    try:
+        usage = collections.namedtuple('u', 'total used free')
+        calls = {'n': 0}
+
+        def _disk_usage(path):
+            # Roomy at the start so ingest begins, empty by the first commit.
+            calls['n'] += 1
+            free = 50 * 1024 ** 3 if calls['n'] == 1 else 1024
+            return usage(100, 100, free)
+
+        monkeypatch.setattr(
+            'refchecker.database.download_semantic_scholar_db.shutil.disk_usage',
+            _disk_usage,
+        )
+
+        with pytest.raises(SemanticScholarDiskSpaceError):
             downloader._process_incremental_file('https://example/diff.gz', 'update')
     finally:
         downloader.close()
