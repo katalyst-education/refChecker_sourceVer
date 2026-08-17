@@ -364,8 +364,8 @@ def test_title_mismatch_produces_error(_make_checker):
 
 # ── ArXiv URL suggestion ───────────────────────────────────────────
 
-def test_arxiv_url_suggestion(_make_checker):
-    """When paper has ArXiv ID but reference lacks arXiv URL, an info is produced."""
+def test_arxiv_url_suggestion_not_when_doi_present(_make_checker):
+    """A DOI is sufficient provenance, so do not also suggest an arXiv URL."""
     checker = _make_checker([{
         "paperId": "600",
         "title": "Neural Scaling Laws",
@@ -387,7 +387,32 @@ def test_arxiv_url_suggestion(_make_checker):
     verified_data, errors, url = checker.verify_reference(reference)
     assert verified_data is not None
     url_infos = [e for e in errors if e.get("info_type") == "url"]
-    assert len(url_infos) >= 1, f"Expected arXiv URL suggestion, got: {errors}"
+    assert len(url_infos) == 0, f"Should not suggest arXiv URL when DOI is present: {url_infos}"
+
+
+def test_arxiv_url_suggestion_without_doi(_make_checker):
+    """When no DOI or arXiv URL is cited, the optional arXiv URL is suggested."""
+    checker = _make_checker([{
+        "paperId": "601",
+        "title": "Neural Scaling Laws",
+        "year": 2020,
+        "authors": [{"authorId": "6", "name": "J. Kaplan"}],
+        "venue": "",
+        "externalIds_DOI": "10.1234/scaling",
+        "externalIds_ArXiv": "2001.08361",
+    }])
+
+    reference = {
+        "title": "Neural Scaling Laws",
+        "authors": ["J. Kaplan"],
+        "year": 2020,
+        "url": "https://example.com/paper",
+    }
+
+    verified_data, errors, url = checker.verify_reference(reference)
+    assert verified_data is not None
+    url_infos = [e for e in errors if e.get("info_type") == "url"]
+    assert len(url_infos) == 1, f"Expected arXiv URL suggestion, got: {errors}"
     assert "2001.08361" in url_infos[0]["info_details"]
 
 

@@ -11,6 +11,7 @@ import {
   deleteCustomCitationStyle,
 } from '../../utils/formatters'
 import {
+  decideReferenceWarning,
   verifyReferenceInCheck,
 } from '../../utils/api'
 import { useHistoryStore } from '../../stores/useHistoryStore'
@@ -404,7 +405,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
   // the correction back in BOTH stores so the HealthBadge drops again — then
   // mark it rejected. Without the rollback the badge stayed inflated after the
   // user changed their mind.
-  const rejectCorrection = (ref, i, k) => {
+  const rejectCorrection = async (ref, i, k) => {
     const prevStatus = decisions[k]?.status
     if (prevStatus === 'applied' || prevStatus === 'edited') {
       const refIdForRevert = String(ref.id ?? ref.index ?? i)
@@ -412,6 +413,41 @@ export default function CorrectionsView({ references, isCheckComplete = false })
       useHistoryStore.getState().optimisticRevertCorrection?.(refIdForRevert)
     }
     setDecision(k, { status: 'rejected' })
+
+    const confirmation = (ref.warnings || []).find(w => w.requires_user_confirmation)
+    if (confirmation && selectedCheckId) {
+      try {
+        const response = await decideReferenceWarning(
+          selectedCheckId,
+          toApiRefId(ref, i),
+          {
+            warning_type: confirmation.error_type || confirmation.warning_type,
+            decision: 'dismissed',
+            expected_id: ref?.id ?? null,
+            expected_index: ref?.index ?? null,
+            expected_title: ref?.title ?? null,
+          },
+        )
+        const updated = response?.data?.reference
+        if (updated) {
+          const currentRefs = useCheckStore.getState().references || []
+          const currentPos = currentRefs.findIndex((item, pos) => (
+            String(item?.id ?? item?.index ?? pos) === String(ref?.id ?? ref?.index ?? i)
+          ))
+          if (currentPos >= 0) useCheckStore.getState().updateReference(currentPos, updated)
+
+          const historyRefs = useHistoryStore.getState().selectedCheck?.results || []
+          const historyPos = historyRefs.findIndex((item, pos) => (
+            String(item?.id ?? item?.index ?? pos) === String(ref?.id ?? ref?.index ?? i)
+          ))
+          if (historyPos >= 0) {
+            useHistoryStore.getState().updateHistoryReference(selectedCheckId, historyPos, updated)
+          }
+        }
+      } catch {
+        // Keep the local decision visible; the user can retry after reopening.
+      }
+    }
   }
 
   const applyAllVisible = async () => {
@@ -903,20 +939,25 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                   </div>
                 </div>
                 <div className="flex items-center gap-1 flex-wrap">
+                  {(() => {
+                    const isConfirmation = (ref.warnings || []).some(w => w.requires_user_confirmation)
+                    return <>
                   <button onClick={() => applyAndReverify(ref, i)}
                     className="px-2 py-0.5 rounded text-xs"
                     style={{ backgroundColor: decision?.status === 'applied' ? 'var(--color-success, #22c55e)' : 'var(--color-bg-primary)',
                              color: decision?.status === 'applied' ? 'white' : 'var(--color-text-primary)',
                              border: '1px solid var(--color-border)' }}
                     type="button"
-                  >Apply fix</button>
+                  >{isConfirmation ? 'Approve match' : 'Apply fix'}</button>
                   <button onClick={() => rejectCorrection(ref, i, key)}
                     className="px-2 py-0.5 rounded text-xs"
                     style={{ backgroundColor: decision?.status === 'rejected' ? 'var(--color-text-muted, #94a3b8)' : 'var(--color-bg-primary)',
                              color: decision?.status === 'rejected' ? 'white' : 'var(--color-text-primary)',
                              border: '1px solid var(--color-border)' }}
                     type="button"
-                  >Don't apply</button>
+                  >{isConfirmation ? 'Dismiss' : "Don't apply"}</button>
+                    </>
+                  })()}
                   <button onClick={() => startEditing(key, correctedStr)}
                     className="px-2 py-0.5 rounded text-xs"
                     style={{ backgroundColor: editingKey === key ? 'var(--color-accent, #3b82f6)' : 'var(--color-bg-primary)',

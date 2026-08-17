@@ -7639,6 +7639,83 @@ class _VerifySingleRequest(BaseModel):
     expected_title: Optional[str] = None
 
 
+class _WarningDecisionRequest(BaseModel):
+    warning_type: str
+    decision: str
+    expected_id: Optional[Any] = None
+    expected_index: Optional[int] = None
+    expected_title: Optional[str] = None
+
+
+@app.post("/api/history/{check_id}/references/{ref_id}/warning-decision")
+async def decide_reference_warning(
+    check_id: int,
+    ref_id: str,
+    body: _WarningDecisionRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Persist a user's decision on a verifier warning.
+
+    Approval is handled by the existing apply-correction + reverify route.
+    This endpoint records dismissal of a speculative candidate while keeping
+    the warning in an audit list rather than silently losing it.
+    """
+    if body.decision != "dismissed":
+        raise HTTPException(status_code=400, detail="Unsupported warning decision")
+
+    user_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=user_id)
+    if refs is None:
+        raise HTTPException(status_code=404, detail="Check not found")
+    idx = _find_ref_index_precise(
+        refs,
+        ref_id,
+        expected_id=body.expected_id,
+        expected_index=body.expected_index,
+        expected_title=body.expected_title,
+    )
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+
+    target = refs[idx]
+    kept = []
+    dismissed = list(target.get("dismissed_warnings") or [])
+    found = False
+    for warning in target.get("warnings") or []:
+        warning_type = warning.get("error_type") or warning.get("warning_type")
+        if (
+            not found
+            and warning_type == body.warning_type
+            and warning.get("requires_user_confirmation")
+        ):
+            dismissed.append({**warning, "user_decision": "dismissed"})
+            found = True
+        else:
+            kept.append(warning)
+    if not found:
+        raise HTTPException(status_code=404, detail="Confirmation warning not found")
+
+    target["warnings"] = kept
+    target["dismissed_warnings"] = dismissed
+    if target.get("errors"):
+        target["status"] = "error"
+    elif kept:
+        target["status"] = "warning"
+    elif body.warning_type == "possible_alternative":
+        # Rejecting the fallback does not verify the originally cited work; it
+        # means the checker has no accepted database match for it.
+        target["status"] = "unverified"
+    elif target.get("suggestions"):
+        target["status"] = "suggestion"
+    else:
+        target["status"] = "verified"
+
+    ok = await db.replace_check_references(check_id, refs, user_id=user_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to persist warning decision")
+    return {"decision": "dismissed", "reference": target}
+
+
 @app.get("/api/history/{check_id}/llm-usage")
 async def get_llm_usage(
     check_id: int,

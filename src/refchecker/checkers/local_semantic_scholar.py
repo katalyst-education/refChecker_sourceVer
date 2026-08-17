@@ -37,6 +37,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from refchecker.utils.doi_utils import extract_doi_from_url, compare_dois, construct_doi_url
 from refchecker.utils.error_utils import create_author_error, create_doi_error, create_venue_warning, format_title_mismatch
+from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.text_utils import normalize_author_name, normalize_paper_title, is_name_match, compare_authors, calculate_title_similarity, compare_titles_with_latex_cleaning, strip_latex_commands, are_venues_substantially_different, is_missing_title_spacing_artifact
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, get_best_available_url, construct_semantic_scholar_url
 from refchecker.utils.db_utils import process_semantic_scholar_result, process_semantic_scholar_results
@@ -637,6 +638,7 @@ class LocalNonArxivReferenceChecker:
             - url: URL of the paper if found, None otherwise
         """
         errors = []
+        candidate_warning = None
         
         # Extract reference data
         title = reference.get('title', '')
@@ -667,6 +669,7 @@ class LocalNonArxivReferenceChecker:
             doi = None
         
         paper_data = None
+        selected_via = None
         arxiv_tried = False
         
         # If the reference has an arXiv URL, try arXiv ID first and validate
@@ -685,6 +688,7 @@ class LocalNonArxivReferenceChecker:
                     if title_sim >= SIMILARITY_THRESHOLD:
                         logger.debug(f"ArXiv ID lookup matched title (similarity={title_sim:.2f}), using arXiv result")
                         paper_data = arxiv_paper
+                        selected_via = 'arxiv_id'
                     else:
                         logger.debug(f"ArXiv ID lookup title mismatch (similarity={title_sim:.2f}): "
                                      f"cited '{title}' vs arXiv '{arxiv_title}' — falling back to title/DOI lookup")
@@ -692,6 +696,7 @@ class LocalNonArxivReferenceChecker:
                     # No title to compare — accept the arXiv result
                     logger.debug(f"Found paper by arXiv ID (no title to cross-check)")
                     paper_data = arxiv_paper
+                    selected_via = 'arxiv_id'
             else:
                 logger.debug(f"Could not find paper with arXiv ID: {arxiv_id}")
         
@@ -718,11 +723,13 @@ class LocalNonArxivReferenceChecker:
                     if title_sim >= SIMILARITY_THRESHOLD:
                         logger.debug(f"ArXiv DOI lookup matched title (similarity={title_sim:.2f}), using DOI result")
                         paper_data = doi_paper
+                        selected_via = 'doi'
                     else:
                         logger.debug(f"ArXiv DOI lookup title mismatch (similarity={title_sim:.2f}): "
                                      f"cited '{title}' vs DOI '{doi_title}' — ignoring DOI result")
                 else:
                     paper_data = doi_paper
+                    selected_via = 'doi'
                     logger.debug(f"Found paper by DOI: {doi}")
             else:
                 logger.debug(f"Could not find paper with DOI: {doi}")
@@ -734,6 +741,7 @@ class LocalNonArxivReferenceChecker:
             paper_data = self.find_best_match(title, authors, year)
             
             if paper_data:
+                selected_via = 'title_author_fallback'
                 logger.debug(f"Found paper by title/author search")
             else:
                 logger.debug(f"Could not find matching paper by title/authors")
@@ -768,11 +776,26 @@ class LocalNonArxivReferenceChecker:
             title_similarity = compare_titles_with_latex_cleaning(title, found_title)
             if title_similarity < SIMILARITY_THRESHOLD:
                 clean_cited_title = strip_latex_commands(title)
-                errors.append({
-                    'error_type': 'title',
-                    'error_details': format_title_mismatch(clean_cited_title, found_title),
-                    'ref_title_correct': found_title
-                })
+                if selected_via == 'title_author_fallback':
+                    candidate_warning = {
+                        'warning_type': 'possible_alternative',
+                        'warning_details': (
+                            "Title and authors could not be found. "
+                            "Possibly this title and authors were meant."
+                        ),
+                        'cited_value': clean_cited_title,
+                        'actual_value': found_title,
+                        'ref_title_correct': found_title,
+                        'requires_user_confirmation': True,
+                        'match_provenance': selected_via,
+                    }
+                    errors.append(candidate_warning)
+                else:
+                    errors.append({
+                        'error_type': 'title',
+                        'error_details': format_title_mismatch(clean_cited_title, found_title),
+                        'ref_title_correct': found_title
+                    })
         
         # Verify authors
         if authors and paper_data.get('authors'):
@@ -885,11 +908,7 @@ class LocalNonArxivReferenceChecker:
         elif paper_arxiv_id:
             # No arXiv URL in reference but paper has one — suggest it
             arxiv_url = f"https://arxiv.org/abs/{paper_arxiv_id}"
-            reference_url = reference.get('url', '')
-            has_arxiv_url = arxiv_url in reference_url if reference_url else False
-            arxiv_doi_url = f"https://doi.org/10.48550/arxiv.{paper_arxiv_id}"
-            has_arxiv_doi = arxiv_doi_url.lower() in reference_url.lower() if reference_url else False
-            if not (has_arxiv_url or has_arxiv_doi):
+            if should_suggest_arxiv_url(reference, paper_arxiv_id):
                 errors.append({
                     'info_type': 'url',
                     'info_details': f"Reference could include arXiv URL: {arxiv_url}",
@@ -903,6 +922,11 @@ class LocalNonArxivReferenceChecker:
                 errors,
             )
         
+        # Suppress year/venue/identifier findings derived from a candidate the
+        # user has not accepted yet; they are not independently authoritative.
+        if candidate_warning is not None:
+            errors = [candidate_warning]
+
         if errors:
             logger.debug(f"{self._log_prefix}: Found {len(errors)} errors in reference verification")
         else:

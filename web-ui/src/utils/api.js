@@ -333,6 +333,8 @@ export const suggestAlternativeReference = (checkId, refId) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/suggest-alternative`)
 export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/verify`, opts)
+export const decideReferenceWarning = (checkId, refId, payload) =>
+  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/warning-decision`, payload)
 
 // Per-check LLM token + cost accumulator for the $ badge
 export const getLLMUsage = (checkId) =>

@@ -22,6 +22,31 @@ from cryptography.fernet import Fernet, InvalidToken
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_loaded_reference_results(results: Any) -> Any:
+    """Remove obsolete citation-specific suggestions from stored check rows."""
+    if not isinstance(results, list):
+        return results
+    from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
+
+    cleaned = []
+    for ref in results:
+        if not isinstance(ref, dict):
+            cleaned.append(ref)
+            continue
+        # Result-level arxiv_id may come from the verified database record, so
+        # use the preserved cited URL as the evidence that the citation itself
+        # already contained arXiv. DOI is safe to keep: whether cited or resolved,
+        # it makes an additional optional arXiv URL redundant in the UI.
+        cited = {
+            "url": ref.get("cited_url"),
+            "doi": ref.get("doi"),
+            "DOI": ref.get("DOI"),
+            "verified_doi": ref.get("verified_doi"),
+        }
+        cleaned.append(suppress_redundant_arxiv_suggestions(ref, cited))
+    return cleaned
+
+
 SECRET_VALUE_PREFIX = "enc:"
 SECRET_KEY_ENV_VAR = "REFCHECKER_SECRET_KEY"
 SECRET_KEY_FILE_NAME = ".secret.key"
@@ -1157,7 +1182,9 @@ class Database:
                     # columns can be stale during in-progress runs).
                     if raw_results:
                         try:
-                            parsed_results = json.loads(raw_results)
+                            parsed_results = _sanitize_loaded_reference_results(
+                                json.loads(raw_results)
+                            )
                         except Exception:
                             parsed_results = []
                         if isinstance(parsed_results, list) and parsed_results:
@@ -1214,7 +1241,9 @@ class Database:
                     result = dict(row)
                     # Parse JSON results
                     if result['results_json']:
-                        result['results'] = json.loads(result['results_json'])
+                        result['results'] = _sanitize_loaded_reference_results(
+                            json.loads(result['results_json'])
+                        )
                         if isinstance(result['results'], list) and result['results']:
                             # Pass the stored total so the recompute reconciles it
                             # up to the real processed count (never < processed_refs),
@@ -2566,7 +2595,9 @@ class Database:
             if not row:
                 return None
             try:
-                return json.loads(row["results_json"] or "[]")
+                return _sanitize_loaded_reference_results(
+                    json.loads(row["results_json"] or "[]")
+                )
             except Exception:
                 return []
 

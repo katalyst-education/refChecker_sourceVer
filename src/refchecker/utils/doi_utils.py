@@ -6,7 +6,7 @@ This module provides utilities for DOI handling, extraction, and validation.
 """
 
 import re
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 
 def extract_doi_from_url(url: str) -> Optional[str]:
@@ -46,6 +46,28 @@ def extract_doi_from_url(url: str) -> Optional[str]:
                 return doi_candidate
     
     return None
+
+
+def reference_has_doi(reference: Mapping[str, Any]) -> bool:
+    """Return whether a cited reference already carries a DOI.
+
+    Citation parsers do not all store DOI data in the same place: structured
+    inputs normally use ``doi``, while plain-text/URL inputs may retain only a
+    DOI resolver URL.  Keep this policy shared so bulk, CLI, and WebUI checkers
+    make the same decision about optional arXiv URL suggestions.
+    """
+    if not reference:
+        return False
+
+    for key in ("doi", "DOI", "verified_doi"):
+        if str(reference.get(key) or "").strip():
+            return True
+
+    for key in ("url", "cited_url"):
+        if extract_doi_from_url(str(reference.get(key) or "")):
+            return True
+
+    return False
 
 
 def normalize_doi(doi: str) -> str:

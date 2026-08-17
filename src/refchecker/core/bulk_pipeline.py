@@ -26,6 +26,7 @@ from refchecker.core.hallucination_policy import (
     should_defer_likely_to_llm,
 )
 from refchecker.utils.arxiv_utils import get_bibtex_content
+from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.text_utils import (
     detect_latex_bibliography_format,
     display_reference_value,
@@ -1374,11 +1375,7 @@ def _compare_reference_with_ss_data(checker: Any, reference: Dict[str, Any], pap
 
     # URL info
     external_ids = paper_data.get('externalIds', {})
-    cited_url = reference.get('url', '')
-    if cited_url and external_ids.get('ArXiv'):
-        # Don't add URL info if ArXiv ID already matched
-        pass
-    elif not cited_url and external_ids.get('ArXiv'):
+    if external_ids.get('ArXiv') and should_suggest_arxiv_url(reference, external_ids['ArXiv']):
         arxiv_url = f"https://arxiv.org/abs/{external_ids['ArXiv']}"
         errors.append({
             'info_type': 'url',

@@ -30,6 +30,7 @@ import re
 import html
 from typing import Dict, List, Tuple, Optional, Any, Union
 from refchecker.utils.doi_utils import extract_doi_from_url, is_valid_doi_format
+from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.url_utils import construct_semantic_scholar_url
 from refchecker.utils.text_utils import normalize_text, clean_title_basic, find_best_match, is_name_match, are_venues_substantially_different, calculate_title_similarity, compare_authors, clean_title_for_search, strip_latex_commands, compare_titles_with_latex_cleaning
 from refchecker.utils.error_utils import format_title_mismatch
@@ -922,6 +923,7 @@ class NonArxivReferenceChecker:
         
         paper_data = None
         errors = []
+        candidate_warning = None
         selected_via = None
         
         # Extract reference data
@@ -1330,11 +1332,28 @@ class NonArxivReferenceChecker:
         if found_title and title_similarity < SIMILARITY_THRESHOLD:
             # Clean the title for display (remove LaTeX commands like {LLM}s -> LLMs)
             clean_cited_title = strip_latex_commands(title)
-            errors.append({
-                'error_type': 'title',
-                'error_details': format_title_mismatch(clean_cited_title, found_title),
-                'ref_title_correct': paper_data.get('title', '')
-            })
+            if selected_via == "author_fallback":
+                # This lower-threshold fallback only found a plausible work by
+                # the same author. It is a suggestion, not proof of a bad title.
+                candidate_warning = {
+                    'warning_type': 'possible_alternative',
+                    'warning_details': (
+                        "Title and authors could not be found. "
+                        "Possibly this title and authors were meant."
+                    ),
+                    'cited_value': clean_cited_title,
+                    'actual_value': found_title,
+                    'ref_title_correct': paper_data.get('title', ''),
+                    'requires_user_confirmation': True,
+                    'match_provenance': selected_via,
+                }
+                errors.append(candidate_warning)
+            else:
+                errors.append({
+                    'error_type': 'title',
+                    'error_details': format_title_mismatch(clean_cited_title, found_title),
+                    'ref_title_correct': paper_data.get('title', '')
+                })
         
         # Verify authors
         if authors and paper_data.get('authors'):
@@ -1438,17 +1457,7 @@ class NonArxivReferenceChecker:
             # For arXiv papers, check if reference includes the arXiv URL
             arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
             
-            # Check if the reference already includes this ArXiv URL or equivalent DOI
-            reference_url = reference.get('url', '')
-            
-            # Check for direct arXiv URL match
-            has_arxiv_url = arxiv_url in reference_url
-            
-            # Also check for arXiv DOI URL (e.g., https://doi.org/10.48550/arxiv.2505.11595)
-            arxiv_doi_url = f"https://doi.org/10.48550/arxiv.{arxiv_id}"
-            has_arxiv_doi = arxiv_doi_url.lower() in reference_url.lower()
-            
-            if not (has_arxiv_url or has_arxiv_doi):
+            if should_suggest_arxiv_url(reference, arxiv_id):
                 errors.append({
                     'info_type': 'url',
                     'info_details': f"Reference could include arXiv URL: {arxiv_url}",
@@ -1484,6 +1493,12 @@ class NonArxivReferenceChecker:
                         'ref_doi_correct': paper_doi
                     })
         
+        # Every other comparison below used the same speculative record. Do not
+        # present its year/venue/DOI as independent findings before the user has
+        # approved the candidate.
+        if candidate_warning is not None:
+            errors = [candidate_warning]
+
         # Extract URL from paper data - prioritize arXiv URLs when available
         paper_url = None
         

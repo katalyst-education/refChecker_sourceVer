@@ -64,6 +64,10 @@ def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
             _san['source_years'] = err.get('source_years')
         if err.get('metadata_classification'):
             _san['metadata_classification'] = err.get('metadata_classification')
+        if err.get('requires_user_confirmation'):
+            _san['requires_user_confirmation'] = True
+        if err.get('match_provenance'):
+            _san['match_provenance'] = err.get('match_provenance')
         # Carry the typed correction fields through so the FE corrected-bibtex
         # builder can recover year/venue/title/authors even when the checker
         # only set the typed field.

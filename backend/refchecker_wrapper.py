@@ -1484,6 +1484,10 @@ class ProgressRefChecker:
                 err_obj['source_years'] = err.get('source_years')
             if err.get('metadata_classification'):
                 err_obj['metadata_classification'] = err.get('metadata_classification')
+            if err.get('requires_user_confirmation'):
+                err_obj['requires_user_confirmation'] = True
+            if err.get('match_provenance'):
+                err_obj['match_provenance'] = err.get('match_provenance')
             # Propagate typed correction fields so the FE corrected-bibtex builder
             # always has year/venue/title/authors to insert.
             for _k in ("ref_year_correct", "ref_venue_correct", "ref_title_correct", "ref_authors_correct", "ref_doi_correct"):
@@ -1637,7 +1641,27 @@ class ProgressRefChecker:
             "citation_context": reference.get('citation_context'),
             "citation_count": reference.get('citation_count') or 0,
         }
-        logger.info(f"_format_verification_result output: suggestions={formatted_suggestions}, status={status}")
+        # Keep the concrete fallback candidate available for the existing
+        # user-driven Apply Fix flow. It is only applied after confirmation.
+        if any(w.get("requires_user_confirmation") for w in formatted_warnings):
+            candidate = {}
+            if isinstance(verified_data, dict):
+                for key in ("title", "authors", "year", "venue", "doi", "arxiv_id"):
+                    value = verified_data.get(key)
+                    if value not in (None, "", []):
+                        candidate[key] = value
+            if candidate:
+                result["corrected_reference"] = candidate
+        # The checker emits optional advice before this formatter attaches
+        # verified identifiers and authoritative URLs. Normalize the completed
+        # object so the live WebSocket result cannot display an arXiv URL/DOI
+        # alongside advice to add that same arXiv URL.
+        from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
+        result = suppress_redundant_arxiv_suggestions(result, result)
+        logger.info(
+            "_format_verification_result output: suggestions=%s, status=%s",
+            result.get("suggestions"), result.get("status"),
+        )
         return result
 
     def _format_error_result(
@@ -3973,6 +3997,14 @@ class ProgressRefChecker:
                         cached_result['citation_context'] = reference['citation_context']
                     if reference.get('citation_count'):
                         cached_result['citation_count'] = reference['citation_count']
+                    # Suggestions are citation-specific, while the identity cache
+                    # is paper-specific. Re-evaluate optional arXiv URL advice
+                    # against THIS citation so a stale cache row cannot suggest
+                    # the exact URL the current paper already contains.
+                    from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
+                    cached_result = suppress_redundant_arxiv_suggestions(
+                        cached_result, reference,
+                    )
                     return cached_result
             except Exception as _e:
                 logger.debug("Global cache lookup skipped: %s", _e)

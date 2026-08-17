@@ -5,9 +5,11 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 // best-effort verify which we no-op). The real useReferenceActions hook runs.
 const addReferenceToCheck = vi.hoisted(() => vi.fn())
 const verifyReferenceInCheck = vi.hoisted(() => vi.fn())
+const decideReferenceWarning = vi.hoisted(() => vi.fn())
 vi.mock('../../utils/api', () => ({
   addReferenceToCheck,
   verifyReferenceInCheck,
+  decideReferenceWarning,
   removeReferenceFromCheck: vi.fn(),
   suggestAlternativeReference: vi.fn(),
 }))
@@ -60,6 +62,7 @@ let alertSpy
 beforeEach(() => {
   addReferenceToCheck.mockReset()
   verifyReferenceInCheck.mockReset().mockResolvedValue({ data: {} })
+  decideReferenceWarning.mockReset().mockResolvedValue({ data: {} })
   alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
 })
 afterEach(() => { alertSpy.mockRestore() })
@@ -97,5 +100,25 @@ describe('CorrectionsView — R17 add-form 409 duplicate surfacing', () => {
 
     await waitFor(() => expect(addReferenceToCheck).toHaveBeenCalled())
     expect(alertSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('CorrectionsView — speculative match confirmation', () => {
+  const candidateRef = [{
+    id: 'candidate-1', index: 1, title: 'Original title', status: 'warning',
+    errors: [], suggestions: [],
+    warnings: [{
+      error_type: 'possible_alternative',
+      error_details: 'Title and authors could not be found. Possibly this title and authors were meant.',
+      requires_user_confirmation: true,
+    }],
+    corrected_reference: { title: 'Possible intended title', authors: ['Same Author'] },
+  }]
+
+  it('offers approve and dismiss actions instead of presenting a hard correction', () => {
+    render(<CorrectionsView references={candidateRef} isCheckComplete={true} />)
+
+    expect(screen.getByRole('button', { name: 'Approve match' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
   })
 })
