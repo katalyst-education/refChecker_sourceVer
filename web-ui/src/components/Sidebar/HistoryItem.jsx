@@ -81,6 +81,7 @@ const HistoryItem = memo(function HistoryItem({ item, isSelected, compact = fals
   const totalRefs = summaryCounts.totalRefs
   const processedRefs = summaryCounts.processedRefs
   const progressPercent = summaryCounts.progressPercent
+  const verifiedRefs = summaryCounts.references.verified
   const refsWithErrors = summaryCounts.references.errors
   const refsWithWarningsOnly = summaryCounts.references.warnings
   const refsWithSuggestionsOnly = summaryCounts.references.suggestions
@@ -300,6 +301,19 @@ const HistoryItem = memo(function HistoryItem({ item, isSelected, compact = fals
                             ? (totalRefs > 0 ? `${processedRefs}/${totalRefs}` : 'Extracting...') 
                             : `${totalRefs} refs`)))}
             </span>
+            {!isPlaceholder && verifiedRefs > 0 && (
+              <span
+                className="flex items-center flex-shrink-0"
+                style={{ color: 'var(--color-success)' }}
+                title={`${verifiedRefs} verified reference${verifiedRefs === 1 ? '' : 's'}`}
+              >
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="10" fill="var(--color-success)" />
+                  <path d="M8.5 12.5l2.5 2.5 4.5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span className="ml-0.5">{verifiedRefs}</span>
+              </span>
+            )}
             {/* Show error/warning/suggestion counts with compact icons (only after refs start processing) */}
             {!isPlaceholder && (processedRefs > 0 || isComplete) && (
               <>

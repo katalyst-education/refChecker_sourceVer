@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDebugStore } from '../stores/useDebugStore'
 import { useAuthStore } from '../stores/useAuthStore'
-import { clearCache, clearDatabase } from '../utils/api'
+import { clearCache, clearCachedFiles } from '../utils/api'
 
 /**
  * Debug log panel that shows real-time logs.
@@ -61,16 +61,14 @@ export default function DebugPanel() {
     }
   }
 
-  const handleClearDatabase = async () => {
-    if (!confirm('Clear all data (cache + history)? This cannot be undone.')) return
-    setClearing('database')
+  const handleClearCachedFiles = async () => {
+    if (!confirm('Clear cached AI and reference files? API keys and history will be kept.')) return
+    setClearing('cached-files')
     try {
-      const response = await clearDatabase()
+      const response = await clearCachedFiles()
       alert(response.data.message)
-      // Reload to refresh history panel
-      window.location.reload()
     } catch (err) {
-      alert('Failed to clear database: ' + (err.response?.data?.detail || err.message))
+      alert('Failed to clear cached files: ' + (err.response?.data?.detail || err.message))
     } finally {
       setClearing(null)
     }
@@ -136,13 +134,13 @@ export default function DebugPanel() {
 
             {/* Clear All button */}
             <button
-              onClick={handleClearDatabase}
+              onClick={handleClearCachedFiles}
               disabled={clearing !== null}
               className="text-xs px-2 py-1 rounded"
               style={{ backgroundColor: '#7f1d1d', color: '#fca5a5' }}
-              title="Clear all data (cache + history)"
+              title="Clear cached AI and reference files"
             >
-              {clearing === 'database' ? '...' : 'Clear All'}
+              {clearing === 'cached-files' ? '...' : 'Clear Cached Files'}
             </button>
 
             <div className="w-px h-4 bg-gray-600" />

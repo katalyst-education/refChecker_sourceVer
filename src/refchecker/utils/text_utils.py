@@ -7072,19 +7072,27 @@ def find_best_match(search_results, cleaned_title, year=None, authors=None):
         # letting a different-paper-same-surname candidate sneak past
         # the SIMILARITY_THRESHOLD when the title is only fuzzy-matched.
         if authors and len(authors) > 0 and (year_gap is None or year_gap <= 3):
+            def _author_to_name(author_value):
+                """Normalize mixed author payloads (string/dict) to a comparable name."""
+                if isinstance(author_value, dict):
+                    return str(
+                        author_value.get('name')
+                        or author_value.get('author')
+                        or author_value.get('full_name')
+                        or ''
+                    ).strip()
+                return str(author_value or '').strip()
+
             result_authors = result.get('authors', [])
             if result_authors and len(result_authors) > 0:
-                cited_first_author = authors[0]
+                cited_first_author = _author_to_name(authors[0])
                 result_first_author = result_authors[0]
 
                 # Extract author name from different formats
-                if isinstance(result_first_author, dict):
-                    result_first_author_name = result_first_author.get('name', '')
-                else:
-                    result_first_author_name = str(result_first_author)
+                result_first_author_name = _author_to_name(result_first_author)
 
                 # Check if first authors match using existing name matching logic
-                if is_name_match(cited_first_author, result_first_author_name):
+                if cited_first_author and result_first_author_name and is_name_match(cited_first_author, result_first_author_name):
                     score += 0.2  # Significant bonus for first author match
         
         scored_results.append((score, result))

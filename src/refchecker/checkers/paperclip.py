@@ -27,6 +27,7 @@ no-match result so the surrounding pipeline behaves identically to
 the pre-Paperclip baseline.
 """
 
+import inspect
 import logging
 import os
 import time
@@ -123,7 +124,20 @@ class PaperclipReferenceChecker:
             return
 
         try:
-            self.client = PaperclipClient(api_key=key)
+            init_params = inspect.signature(PaperclipClient.__init__).parameters
+            if 'api_key' in init_params:
+                # Backward compatibility with older gxl-paperclip builds.
+                self.client = PaperclipClient(api_key=key)
+            elif 'auth' in init_params:
+                # Current SDK expects an AuthStrategy object.
+                from gxl_paperclip import APIKeyAuth  # type: ignore
+
+                self.client = PaperclipClient(APIKeyAuth(key))
+            else:
+                raise TypeError(
+                    "Unsupported PaperclipClient constructor signature; "
+                    "expected 'api_key' or 'auth'"
+                )
             self.enabled = True
             logger.debug("Paperclip checker initialized")
         except Exception as e:
@@ -141,9 +155,12 @@ class PaperclipReferenceChecker:
             t0 = time.time()
             result = func(*args, **kwargs)
             logger.debug(f"Paperclip call took {time.time() - t0:.2f}s")
-            # SDK returns either a list of dicts or an iterable; normalise.
+            # SDK returns either an ExecuteResult (new versions) or
+            # list-like values (legacy builds). Normalise to List[dict].
             if result is None:
                 return []
+            if hasattr(result, 'papers'):
+                return list(result.papers)
             if hasattr(result, 'results'):
                 return list(result.results)
             if isinstance(result, list):

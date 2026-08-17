@@ -354,6 +354,7 @@ export function ReferenceRowActions({
   onSuggest,
   onRemove,
   onReverify,
+  onReverifyAllDatabases,
   // Per-action busy flags so Re-verify and Suggest-alternative can
   // run in parallel on the same row without each disabling/clobbering
   // the other's spinner (#18). globalBusy blocks every per-row action
@@ -376,6 +377,7 @@ export function ReferenceRowActions({
   return (
     <div className="px-4 pb-3 pt-1 flex flex-wrap gap-1.5 text-xs">
       <button
+        type="button"
         onClick={() => onReverify(reference, displayIndex)}
         disabled={disableFor(reverifyBusy)}
         className="px-2.5 py-1 rounded-md font-medium"
@@ -385,6 +387,17 @@ export function ReferenceRowActions({
         {reverifyBusy ? '…' : 'Re-verify'}
       </button>
       <button
+        type="button"
+        onClick={() => onReverifyAllDatabases?.(reference, displayIndex)}
+        disabled={disableFor(reverifyBusy)}
+        className="px-2.5 py-1 rounded-md font-medium"
+        style={styleFor(reverifyBusy)}
+        title="Force a fresh search across all configured databases"
+      >
+        {reverifyBusy ? '…' : 'Search all DBs again'}
+      </button>
+      <button
+        type="button"
         onClick={() => onSuggest(reference, displayIndex)}
         disabled={disableFor(suggestBusy)}
         className="px-2.5 py-1 rounded-md font-medium"
@@ -394,6 +407,7 @@ export function ReferenceRowActions({
         {suggestBusy ? '…' : 'Suggest alternative'}
       </button>
       <button
+        type="button"
         onClick={() => onRemove(reference, displayIndex)}
         disabled={disableFor(removeBusy)}
         className="px-2.5 py-1 rounded-md font-medium"

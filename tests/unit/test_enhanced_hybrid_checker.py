@@ -271,6 +271,24 @@ def test_verify_reference_records_matched_database_from_local_checker():
     assert verified_data["_matched_checker"] == "local_s2"
 
 
+def test_semantic_scholar_result_survives_dict_shaped_citation_fields():
+    checker = _build_checker()
+    checker.local_db = None
+    checker.semantic_scholar = LocalMatchChecker()
+    checker.crossref = None
+
+    verified_data, errors, url = checker.verify_reference({
+        "title": "Ontology in computer systems",
+        "authors": ["V. A. Lapshin"],
+        "doi": {"value": "10.1000/example"},
+        "venue": {"text": "M.: Science World"},
+    })
+
+    assert verified_data is not None
+    assert errors == []
+    assert url == "https://www.semanticscholar.org/paper/s2-match-id"
+
+
 def test_doi_mismatch_does_not_stop_search_before_exact_local_doi_match():
     checker = _build_checker()
     mismatching_checker = LocalDoiMismatchChecker()

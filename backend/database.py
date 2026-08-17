@@ -968,7 +968,11 @@ class Database:
                                         (ref.get("arxiv_id") or "").strip() or None,
                                         ref.get("venue"),
                                         ref.get("verified_url"),
-                                        ref.get("matched_db") or ref.get("_matched_database"),
+                                        (
+                                            ref.get("matched_database")
+                                            or ref.get("matched_db")
+                                            or ref.get("_matched_database")
+                                        ),
                                         ref.get("status") or "",
                                         json.dumps(ref, default=str),
                                         check_id,
@@ -2568,6 +2572,26 @@ class Database:
             await db.commit()
             return cursor.rowcount
 
+    async def clear_reference_caches(self) -> Dict[str, int]:
+        """Clear cached verification results and the saved-reference cache.
+
+        This deliberately leaves application settings, encrypted API keys, LLM
+        configurations, and check history untouched.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            verification_cursor = await db.execute("DELETE FROM verification_cache")
+            identity_cursor = await db.execute(
+                "SELECT COUNT(*) FROM verified_reference_identity"
+            )
+            identity_row = await identity_cursor.fetchone()
+            await db.execute("DELETE FROM verified_reference_identity")
+            await db.commit()
+
+        return {
+            "verification_count": max(verification_cursor.rowcount, 0),
+            "reference_count": int(identity_row[0] if identity_row else 0),
+        }
+
     # ---------------------------------------------------------------
     # Identity-keyed reference cache (DOI / ArXiv / normalized title)
     # ---------------------------------------------------------------
@@ -2760,7 +2784,11 @@ class Database:
                     (ref.get("arxiv_id") or "").strip() or None,
                     ref.get("venue"),
                     ref.get("verified_url"),
-                    ref.get("matched_db"),
+                    (
+                        ref.get("matched_database")
+                        or ref.get("matched_db")
+                        or ref.get("_matched_database")
+                    ),
                     status,
                     result_json,
                     check_id,

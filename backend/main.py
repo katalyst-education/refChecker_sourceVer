@@ -87,7 +87,6 @@ from .thumbnail import (
 from .usage_tracking import (
     append_usage_event,
     build_issue_type_counts,
-    clear_usage_log,
     extract_email_domain,
     get_usage_events,
     get_usage_log_path,
@@ -442,6 +441,46 @@ async def _get_configured_cache_dir() -> Optional[str]:
     cache_dir = Path(configured_dir).expanduser() if configured_dir else get_data_dir() / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return str(cache_dir)
+
+
+def _clear_cache_directory(cache_dir: Path, protected_paths: List[Path] = None) -> int:
+    """Remove cache contents while preserving any protected files within it."""
+    if not cache_dir.exists() or not cache_dir.is_dir():
+        return 0
+
+    cache_root = cache_dir.resolve()
+    protected = [path.resolve() for path in (protected_paths or [])]
+
+    def is_protected(path: Path) -> bool:
+        resolved = path.resolve()
+        return any(resolved == item for item in protected)
+
+    def contains_protected(path: Path) -> bool:
+        resolved = path.resolve()
+        return any(item.is_relative_to(resolved) for item in protected)
+
+    removed = 0
+    for child in cache_root.iterdir():
+        if is_protected(child):
+            continue
+        if child.is_symlink() or not child.is_dir():
+            child.unlink(missing_ok=True)
+            removed += 1
+            continue
+        if not contains_protected(child):
+            removed += sum(1 for path in child.rglob("*") if path.is_file() or path.is_symlink())
+            shutil.rmtree(child)
+            continue
+
+        for path in sorted(child.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if is_protected(path):
+                continue
+            if path.is_symlink() or path.is_file():
+                path.unlink(missing_ok=True)
+                removed += 1
+            elif path.is_dir() and not contains_protected(path):
+                path.rmdir()
+    return removed
 
 
 async def _run_semantic_scholar_refresh_subprocess(db_path: Path) -> None:
@@ -6890,30 +6929,31 @@ async def clear_verification_cache(current_user: UserInfo = Depends(require_user
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/api/admin/database")
-async def clear_database(current_user: UserInfo = Depends(require_user)):
-    """Clear all data (cache + history + usage log file) but keep settings and LLM configs"""
+@app.delete("/api/admin/cache-files")
+async def clear_cached_files(current_user: UserInfo = Depends(require_user)):
+    """Clear AI and reference caches without deleting user data or API keys."""
     _require_admin(current_user)
     try:
-        # Clear verification cache
-        cache_count = await db.clear_verification_cache()
-        usage_event_count = await clear_usage_log()
-        
-        # Clear check history
-        async with aiosqlite.connect(db.db_path) as conn:
-            history_cursor = await conn.execute("DELETE FROM check_history")
-            await conn.commit()
-            history_count = history_cursor.rowcount if history_cursor.rowcount != -1 else 0
-        
-        logger.info(f"Cleared database: {cache_count} cache entries, {history_count} history entries, {usage_event_count} usage events")
+        cache_dir = Path(await _get_configured_cache_dir())
+        disk_count = await asyncio.to_thread(
+            _clear_cache_directory,
+            cache_dir,
+            [Path(db.db_path)],
+        )
+        database_counts = await db.clear_reference_caches()
+        logger.info(
+            "Cleared cached files: %d disk files, %d verification results, %d saved references",
+            disk_count,
+            database_counts["verification_count"],
+            database_counts["reference_count"],
+        )
         return {
-            "message": f"Cleared {cache_count} cache entries, {history_count} history entries, and {usage_event_count} usage events",
-            "cache_count": cache_count,
-            "history_count": history_count,
-            "usage_event_count": usage_event_count,
+            "message": "Cached AI and reference data cleared. API keys and check history were kept.",
+            "disk_count": disk_count,
+            **database_counts,
         }
     except Exception as e:
-        logger.error(f"Error clearing database: {e}", exc_info=True)
+        logger.error(f"Error clearing cached files: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -7012,6 +7052,30 @@ def _find_ref_index(refs: list, ref_id: str) -> Optional[int]:
     """
     if not refs:
         return None
+    ref_id = str(ref_id)
+    if ref_id.startswith("id:"):
+        wanted = ref_id[3:]
+        for i, r in enumerate(refs):
+            rid = r.get("id")
+            if rid is not None and str(rid) == wanted:
+                return i
+        return None
+    if ref_id.startswith("index:"):
+        wanted = ref_id[6:]
+        for i, r in enumerate(refs):
+            idx = r.get("index")
+            if idx is not None and str(idx) == wanted:
+                return i
+        return None
+    if ref_id.startswith("pos:"):
+        try:
+            pos = int(ref_id[4:])
+            if 0 <= pos < len(refs):
+                return pos
+        except (TypeError, ValueError):
+            pass
+        return None
+    # Legacy fallback for older callers that still send an untyped value.
     # 1) explicit id match
     for i, r in enumerate(refs):
         rid = r.get("id")
@@ -7030,6 +7094,103 @@ def _find_ref_index(refs: list, ref_id: str) -> Optional[int]:
     except (TypeError, ValueError):
         pass
     return None
+
+
+def _normalize_ref_title_for_match(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip().casefold()
+
+
+def _find_ref_index_precise(
+    refs: list,
+    ref_id: str,
+    expected_id: Optional[Any] = None,
+    expected_index: Optional[Any] = None,
+    expected_title: Optional[str] = None,
+) -> Optional[int]:
+    """Resolve reference index with optional disambiguation hints.
+
+    We first try the route ref_id (legacy behavior), then validate it against
+    any expected hints from the caller. If mismatched, we re-select using
+    hint-based scoring so the clicked UI row is targeted deterministically.
+    """
+    base_idx = _find_ref_index(refs, ref_id)
+    wanted_id = None if expected_id is None else str(expected_id)
+    wanted_index = None if expected_index is None else str(expected_index)
+    wanted_title = _normalize_ref_title_for_match(expected_title)
+
+    def _matches_hints(i: int) -> bool:
+        row = refs[i] if 0 <= i < len(refs) else {}
+        if wanted_id is not None and str(row.get("id")) != wanted_id:
+            return False
+        if wanted_index is not None and str(row.get("index")) != wanted_index:
+            return False
+        if wanted_title and _normalize_ref_title_for_match(row.get("title")) != wanted_title:
+            return False
+        return True
+
+    # If we have no hints, preserve original behavior.
+    if wanted_id is None and wanted_index is None and not wanted_title:
+        return base_idx
+
+    if base_idx is not None and _matches_hints(base_idx):
+        return base_idx
+
+    # Title from the clicked UI row is usually the strongest disambiguator.
+    # Prefer a unique exact title match over potentially shifted index hints.
+    if wanted_title:
+        title_hits = [
+            i for i, row in enumerate(refs or [])
+            if _normalize_ref_title_for_match(row.get("title")) == wanted_title
+        ]
+        if len(title_hits) == 1:
+            chosen = title_hits[0]
+            if base_idx is not None and base_idx != chosen:
+                logger.info(
+                    "Precise ref targeting remapped via title: route_ref_id=%r base_idx=%s -> title_idx=%s",
+                    ref_id,
+                    base_idx,
+                    chosen,
+                )
+            return chosen
+
+    scored: List[Tuple[int, int]] = []
+    for i, row in enumerate(refs or []):
+        score = 0
+        if wanted_id is not None and str(row.get("id")) == wanted_id:
+            score += 100
+        if wanted_index is not None and str(row.get("index")) == wanted_index:
+            score += 50
+        if wanted_title and _normalize_ref_title_for_match(row.get("title")) == wanted_title:
+            score += 10
+        if score > 0:
+            scored.append((score, i))
+
+    if not scored:
+        return base_idx
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score, top_idx = scored[0]
+    top_count = sum(1 for s, _ in scored if s == top_score)
+    if top_count == 1:
+        if base_idx is not None and base_idx != top_idx:
+            logger.info(
+                "Precise ref targeting remapped verify target: route_ref_id=%r base_idx=%s -> hinted_idx=%s",
+                ref_id,
+                base_idx,
+                top_idx,
+            )
+        return top_idx
+
+    # Ambiguous hints: avoid mutating the wrong row; fall back to legacy result.
+    logger.warning(
+        "Precise ref targeting was ambiguous for route_ref_id=%r (top_score=%s, candidates=%s)",
+        ref_id,
+        top_score,
+        top_count,
+    )
+    return base_idx
 
 
 class _AddReferenceRequest(BaseModel):
@@ -7420,6 +7581,14 @@ class _VerifySingleRequest(BaseModel):
     # the ref before calling apply_correction and replays those fields
     # here. Keys recognised: title, authors, year, venue, doi, arxiv_id.
     overrides: Optional[Dict[str, Any]] = None
+    # When true, skip the global identity cache and force a fresh verifier
+    # run across the full configured database/API stack.
+    force_all_databases: bool = False
+    # Hint fields from the UI row the user clicked. Used to disambiguate
+    # refs when legacy route ids collide.
+    expected_id: Optional[Any] = None
+    expected_index: Optional[int] = None
+    expected_title: Optional[str] = None
 
 
 @app.get("/api/history/{check_id}/llm-usage")
@@ -7494,10 +7663,23 @@ async def verify_single_reference(
     refs = await db.get_check_references(check_id, user_id=user_id)
     if refs is None:
         raise HTTPException(status_code=404, detail="Check not found")
-    idx = _find_ref_index(refs, ref_id)
+    idx = _find_ref_index_precise(
+        refs,
+        ref_id,
+        expected_id=(body.expected_id if body else None),
+        expected_index=(body.expected_index if body else None),
+        expected_title=(body.expected_title if body else None),
+    )
     if idx is None:
         raise HTTPException(status_code=404, detail="Reference not found in check")
     target = refs[idx]
+    logger.info(
+        "Per-ref verify target resolved: route_ref_id=%r idx=%s stored_index=%r title=%r",
+        ref_id,
+        idx,
+        target.get("index"),
+        target.get("title"),
+    )
 
     if body and body.apply_correction:
         corrected = target.get("corrected_reference") or {}
@@ -7528,13 +7710,16 @@ async def verify_single_reference(
         target["errors"] = []
         target["warnings"] = []
 
-    # Try the global identity cache first — same shortcut the live pipeline
-    # uses. If we hit, we skip the network call entirely.
+    force_all_databases = bool(body and body.force_all_databases)
+
+    # Try the global identity cache first unless caller explicitly forced a
+    # fresh all-databases re-search.
     cached = None
-    try:
-        cached = await db.lookup_verified_reference(target)
-    except Exception:
-        cached = None
+    if not force_all_databases:
+        try:
+            cached = await db.lookup_verified_reference(target)
+        except Exception:
+            cached = None
 
     def _cache_is_pre_split(cached_result: Dict[str, Any]) -> bool:
         """Entries written before the cited-vs-verified split overwrote
@@ -7598,7 +7783,10 @@ async def verify_single_reference(
         def _run_verify():
             _usage_tracker.set_current_check(str(check_id))
             with _usage_tracker.FlowScope("reverify"):
-                return checker.verify_reference(dict(target))
+                return checker.verify_reference(
+                    dict(target),
+                    force_all_databases=force_all_databases,
+                )
 
         import asyncio
         verified_data, errors, url = await asyncio.to_thread(_run_verify)

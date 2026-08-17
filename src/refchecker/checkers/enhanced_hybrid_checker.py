@@ -274,6 +274,21 @@ class EnhancedHybridReferenceChecker:
         if api_name and api_name not in attempted_apis:
             attempted_apis.append(api_name)
 
+    @staticmethod
+    def _coerce_text(value: Any) -> str:
+        """Normalize mixed payload shapes into plain text."""
+        if value is None:
+            return ''
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ('title', 'name', 'text', 'value', 'venue', 'journal', 'url', 'doi'):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+            return ''
+        return str(value)
+
     def _format_api_name(self, api_name: str) -> str:
         """Convert internal checker names into user-facing labels."""
         if api_name.startswith('local_'):
@@ -340,6 +355,42 @@ class EnhancedHybridReferenceChecker:
             "querying the Semantic Scholar API instead of trusting the miss"
         )
         return False
+
+    def _pick_preferred_result(
+        self,
+        current: Optional[Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]],
+        candidate: Optional[Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]],
+        reference: Dict[str, Any],
+    ) -> Optional[Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]]:
+        """Return the better verification result for a single reference.
+
+        Ranking prefers:
+        1) complete metadata over incomplete
+        2) no DOI mismatch over DOI mismatch
+        3) no major author discrepancy over major discrepancy
+        4) fewer non-unverified errors
+        """
+        if candidate is None:
+            return current
+        if current is None:
+            return candidate
+
+        def _score(result):
+            data, errors, _url = result
+            issues = errors or []
+            non_unverified_errors = sum(
+                1
+                for issue in issues
+                if issue.get('error_type') and str(issue.get('error_type')).lower() != 'unverified'
+            )
+            return (
+                0 if self._is_data_complete(data or {}, reference) else 1,
+                1 if self._has_doi_mismatch(issues) else 0,
+                1 if self._has_major_author_discrepancy(issues) else 0,
+                non_unverified_errors,
+            )
+
+        return candidate if _score(candidate) < _score(current) else current
 
     def _format_failure_detail(self, api_name: str, failure_type: str,
                                detail: Optional[str] = None) -> str:
@@ -501,6 +552,8 @@ class EnhancedHybridReferenceChecker:
             self._update_api_stats(api_name, False, duration)
             failure_type = 'other'
             logger.debug(f"Enhanced Hybrid: {api_name} failed in {duration:.2f}s: {e}")
+            if api_name == 'semantic_scholar':
+                logger.exception("Enhanced Hybrid: Semantic Scholar raised an unexpected error")
             return None, [], None, False, failure_type, self._format_failure_detail(
                 api_name,
                 failure_type,
@@ -520,10 +573,12 @@ class EnhancedHybridReferenceChecker:
         """
         Determine if we should prioritize DOI-based APIs (CrossRef) for this reference
         """
+        url_text = self._coerce_text(reference.get('url')).lower()
+        raw_text = self._coerce_text(reference.get('raw_text')).lower()
         # Check if reference has DOI information
         has_doi = (reference.get('doi') or 
-                  (reference.get('url') and ('doi.org' in reference['url'] or 'doi:' in reference['url'])) or
-                  (reference.get('raw_text') and ('doi' in reference['raw_text'].lower())))
+                  (url_text and ('doi.org' in url_text or 'doi:' in url_text)) or
+                  (raw_text and ('doi' in raw_text)))
         return has_doi
 
     @staticmethod
@@ -613,8 +668,10 @@ class EnhancedHybridReferenceChecker:
         merged_data['_semantic_scholar_url'] = ss_url
         
         # Check for venue mismatch - if paper was published at a venue but citation only says arXiv
-        ss_venue = ss_data.get('venue', '')
-        cited_venue = reference.get('venue', reference.get('journal', '')).strip().lower()
+        ss_venue = self._coerce_text(ss_data.get('venue', ''))
+        cited_venue = self._coerce_text(
+            reference.get('venue', reference.get('journal', ''))
+        ).strip().lower()
         
         # Normalize ArXiv venue names
         is_cited_as_arxiv = (
@@ -674,19 +731,22 @@ class EnhancedHybridReferenceChecker:
 
         # DOI/ArXiv/PMID-anchored matches are authoritative; never reject.
         try:
-            cited_doi = (reference.get('doi') or '').strip()
+            cited_doi = self._coerce_text(reference.get('doi')).strip()
             if cited_doi:
                 for prefix in ('https://doi.org/', 'http://doi.org/', 'doi:'):
                     if cited_doi.lower().startswith(prefix):
                         cited_doi = cited_doi[len(prefix):]
                         break
-                vd_doi = (verified_data.get('doi') or '').strip()
+                vd_doi = self._coerce_text(verified_data.get('doi')).strip()
                 vd_ext = verified_data.get('externalIds') or {}
                 vd_doi = vd_doi or vd_ext.get('DOI') or vd_ext.get('doi') or ''
                 if vd_doi and cited_doi.lower() == str(vd_doi).strip().lower():
                     return False
             # ArXiv ID anchored?
-            ref_url = (reference.get('url') or '') + ' ' + (reference.get('venue') or '')
+            ref_url = (
+                f"{self._coerce_text(reference.get('url'))} "
+                f"{self._coerce_text(reference.get('venue'))}"
+            )
             if 'arxiv.org' in ref_url.lower() or (reference.get('externalIds', {}) or {}).get('ArXiv'):
                 return False
             # PMID anchored?
@@ -775,7 +835,7 @@ class EnhancedHybridReferenceChecker:
 
         # ── Title/venue helpers ──
         def _str(x):
-            return str(x or '').strip()
+            return self._coerce_text(x).strip()
 
         cited_title = _str(reference.get('title'))
         actual_title = _str(verified_data.get('title'))
@@ -844,8 +904,8 @@ class EnhancedHybridReferenceChecker:
         in doubt, return True (don't trigger wrong-paper rejection on a
         venue we simply can't classify).
         """
-        cv = (cited_venue or '').strip()
-        av = (actual_venue or '').strip()
+        cv = self._coerce_text(cited_venue).strip()
+        av = self._coerce_text(actual_venue).strip()
         if not cv or not av:
             return True  # missing data — don't reject on venue signal
 
@@ -1039,7 +1099,14 @@ class EnhancedHybridReferenceChecker:
 
         return result
 
-    def _verify_non_arxiv_parallel(self, reference, failed_apis, attempted_apis, skip_ss: bool = False):
+    def _verify_non_arxiv_parallel(
+        self,
+        reference,
+        failed_apis,
+        attempted_apis,
+        skip_ss: bool = False,
+        force_all_databases: bool = False,
+    ):
         """Try Semantic Scholar first (highest hit rate), then fallback APIs in parallel.
         
         Returns (result, incomplete_results) where result is a complete
@@ -1051,6 +1118,7 @@ class EnhancedHybridReferenceChecker:
         last_crossref_result = None
         last_openalex_result = None
         last_doi_mismatch_result = None
+        best_result = None
         doi_first = self._should_try_doi_apis_first(reference)
 
         # A cited DOI is more authoritative than a title match.  Ask CrossRef
@@ -1063,7 +1131,12 @@ class EnhancedHybridReferenceChecker:
             )
             if success:
                 result = (verified_data, errors, url)
-                if self._is_data_complete(verified_data, reference) and not self._has_doi_mismatch(errors):
+                best_result = self._pick_preferred_result(best_result, result, reference)
+                if (
+                    not force_all_databases
+                    and self._is_data_complete(verified_data, reference)
+                    and not self._has_doi_mismatch(errors)
+                ):
                     return result, {}
                 last_crossref_result = result
                 if self._has_doi_mismatch(errors):
@@ -1082,12 +1155,23 @@ class EnhancedHybridReferenceChecker:
         # if it's not in the DB, it's almost certainly not on the SS API either,
         # and the API call just wastes time and rate-limit budget.
         if self.semantic_scholar and not skip_ss:
+            if force_all_databases:
+                logger.info(
+                    "Force-all re-verify: attempting Semantic Scholar lookup for title=%r doi=%r",
+                    reference.get('title', ''),
+                    reference.get('doi', ''),
+                )
             self._append_attempted_api(attempted_apis, 'semantic_scholar')
             verified_data, errors, url, success, failure_type, failure_detail = self._try_api('semantic_scholar', self.semantic_scholar, reference)
             if success:
                 result = (verified_data, errors, url)
-                if self._is_data_complete(verified_data, reference) and not (
+                best_result = self._pick_preferred_result(best_result, result, reference)
+                if (
+                    not force_all_databases
+                    and self._is_data_complete(verified_data, reference)
+                    and not (
                     doi_first and self._has_doi_mismatch(errors)
+                    )
                 ):
                     return (verified_data, errors, url), {}
                 if doi_first and self._has_doi_mismatch(errors):
@@ -1100,6 +1184,12 @@ class EnhancedHybridReferenceChecker:
                     'failure_detail': failure_detail,
                     'active': True,
                 })
+        elif self.semantic_scholar and skip_ss:
+            logger.info(
+                "Skipping Semantic Scholar lookup due to local-S2 authoritative miss for title=%r doi=%r",
+                reference.get('title', ''),
+                reference.get('doi', ''),
+            )
         
         # SS failed or incomplete — fire remaining APIs in parallel
         fallback_apis = []
@@ -1142,16 +1232,20 @@ class EnhancedHybridReferenceChecker:
                         'active': True,
                     })
                 if success:
-                    if self._is_data_complete(verified_data, reference):
+                    result = (verified_data, errors, url)
+                    best_result = self._pick_preferred_result(best_result, result, reference)
+                    if (not force_all_databases) and self._is_data_complete(verified_data, reference):
                         return (verified_data, errors, url), {}
                     if api_name == 'crossref':
-                        last_crossref_result = (verified_data, errors, url)
+                        last_crossref_result = result
                     elif api_name == 'openalex':
-                        last_openalex_result = (verified_data, errors, url)
+                        last_openalex_result = result
 
         arxiv_title_result = self._try_arxiv_title_search(reference, attempted_apis)
         if arxiv_title_result is not None:
-            return arxiv_title_result, {}
+            best_result = self._pick_preferred_result(best_result, arxiv_title_result, reference)
+            if not force_all_databases:
+                return arxiv_title_result, {}
         
         # Try OpenReview as a secondary step (not parallelized — rare path)
         if self.openreview:
@@ -1159,7 +1253,10 @@ class EnhancedHybridReferenceChecker:
                 self._append_attempted_api(attempted_apis, 'openreview')
                 verified_data, errors, url, success, failure_type, failure_detail = self._try_api('openreview', self.openreview, reference)
                 if success:
-                    return (verified_data, errors, url), {}
+                    result = (verified_data, errors, url)
+                    best_result = self._pick_preferred_result(best_result, result, reference)
+                    if not force_all_databases:
+                        return result, {}
                 if failure_type not in ('none', 'not_found'):
                     failed_apis.append({
                         'name': 'openreview',
@@ -1169,7 +1266,9 @@ class EnhancedHybridReferenceChecker:
                         'active': True,
                     })
             elif hasattr(self.openreview, 'verify_reference_by_search'):
-                venue = reference.get('venue', reference.get('journal', '')).lower()
+                venue = self._coerce_text(
+                    reference.get('venue', reference.get('journal', ''))
+                ).lower()
                 openreview_venues = ['iclr', 'icml', 'neurips', 'nips', 'aaai', 'ijcai',
                     'international conference on learning representations',
                     'international conference on machine learning',
@@ -1178,7 +1277,10 @@ class EnhancedHybridReferenceChecker:
                     self._append_attempted_api(attempted_apis, 'openreview')
                     verified_data, errors, url, success, failure_type, failure_detail = self._try_openreview_search(reference)
                     if success:
-                        return (verified_data, errors, url), {}
+                        result = (verified_data, errors, url)
+                        best_result = self._pick_preferred_result(best_result, result, reference)
+                        if not force_all_databases:
+                            return result, {}
                     if failure_type not in ('none', 'not_found'):
                         failed_apis.append({
                             'name': 'openreview',
@@ -1196,6 +1298,8 @@ class EnhancedHybridReferenceChecker:
             incomplete['openalex'] = last_openalex_result
         if last_doi_mismatch_result:
             incomplete['doi_mismatch'] = last_doi_mismatch_result
+        if force_all_databases and best_result is not None:
+            return best_result, {}
         return None, incomplete
 
     def _try_arxiv_title_search(self, reference, attempted_apis):
@@ -1203,7 +1307,7 @@ class EnhancedHybridReferenceChecker:
         if not self.arxiv_citation or not hasattr(self.arxiv_citation, 'find_arxiv_id_by_title'):
             return None
 
-        title = reference.get('title', '').strip()
+        title = self._coerce_text(reference.get('title', '')).strip()
         if not title:
             return None
 
@@ -1365,7 +1469,7 @@ class EnhancedHybridReferenceChecker:
         if not actual_paper:
             return []
 
-        expected_title = reference.get('title', '').strip()
+        expected_title = self._coerce_text(reference.get('title', '')).strip()
         if not expected_title:
             return []
 
@@ -1576,13 +1680,20 @@ class EnhancedHybridReferenceChecker:
 
         return verified_data, errors or [], url
 
-    def verify_reference(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+    def verify_reference(
+        self,
+        reference: Dict[str, Any],
+        force_all_databases: bool = False,
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """Verify a reference and apply post-processing checks.
 
         This is the single entry point used by CLI, WebUI, and bulk paths.
         All verification logic lives here so every mode gets identical results.
         """
-        verified_data, errors, url = self._verify_reference_core(reference)
+        verified_data, errors, url = self._verify_reference_core(
+            reference,
+            force_all_databases=force_all_databases,
+        )
 
         # Post-process: ArXiv re-verify, independent ArXiv ID check
         verified_data, errors, url = self._postprocess_verification(
@@ -1687,7 +1798,11 @@ class EnhancedHybridReferenceChecker:
             deduped.append(s)
         verified_data['_verified_by'] = deduped
 
-    def _verify_reference_core(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+    def _verify_reference_core(
+        self,
+        reference: Dict[str, Any],
+        force_all_databases: bool = False,
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """Core verification logic — parallel API calls + retries + fallbacks."""
         # Check if this is a URL-only reference (should skip verification)
         authors = reference.get('authors', [])
@@ -1695,8 +1810,8 @@ class EnhancedHybridReferenceChecker:
             logger.debug("Enhanced Hybrid: Skipping verification for URL reference")
             return None, [], reference.get('cited_url') or reference.get('url')
         
-        title = reference.get('title', '').strip()
-        cited_url = reference.get('cited_url') or reference.get('url')
+        title = self._coerce_text(reference.get('title', '')).strip()
+        cited_url = self._coerce_text(reference.get('cited_url') or reference.get('url'))
         if not title and cited_url:
             logger.debug(f"Enhanced Hybrid: Skipping verification for URL-only reference: {cited_url}")
             return None, [], cited_url
@@ -1706,6 +1821,7 @@ class EnhancedHybridReferenceChecker:
         db_not_found = False
         incomplete_data = None
         local_doi_mismatch_result = None
+        forced_best_result = None
         is_arxiv = self.arxiv_citation and self.arxiv_citation.is_arxiv_reference(reference)
         
         # ── PHASE 1: Parallel API calls ──
@@ -1772,6 +1888,19 @@ class EnhancedHybridReferenceChecker:
                             "Enhanced Hybrid: %s returned a DOI mismatch; continuing authoritative DOI lookup",
                             local_key,
                         )
+                        if force_all_databases:
+                            forced_best_result = self._pick_preferred_result(
+                                forced_best_result,
+                                (verified_data, errors, url),
+                                reference,
+                            )
+                        continue
+                    if force_all_databases:
+                        forced_best_result = self._pick_preferred_result(
+                            forced_best_result,
+                            (verified_data, errors, url),
+                            reference,
+                        )
                         continue
                     return verified_data, errors, url
                 if failure_type not in ('none', 'not_found'):
@@ -1788,7 +1917,26 @@ class EnhancedHybridReferenceChecker:
             
             # Skip SS API when the 233M-paper local DB returned not_found —
             # if it's not in the DB, it's almost certainly not on SS either.
-            result, incomplete_data = self._verify_non_arxiv_parallel(reference, failed_apis, attempted_apis, skip_ss=db_not_found)
+            result, incomplete_data = self._verify_non_arxiv_parallel(
+                reference,
+                failed_apis,
+                attempted_apis,
+                # In explicit force-all mode we must not suppress Semantic Scholar
+                # based on local-DB miss heuristics.
+                skip_ss=(db_not_found and not force_all_databases),
+                force_all_databases=force_all_databases,
+            )
+            if result is not None:
+                if force_all_databases:
+                    forced_best_result = self._pick_preferred_result(
+                        forced_best_result,
+                        result,
+                        reference,
+                    )
+                else:
+                    return result
+            if force_all_databases and forced_best_result is not None:
+                return forced_best_result
             if result is not None:
                 return result
             if local_doi_mismatch_result is not None:

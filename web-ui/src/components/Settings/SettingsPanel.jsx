@@ -31,9 +31,9 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   } = useSettingsStore()
   const panelRef = useRef(null)
   const [activeSection, setActiveSection] = useState('General')
-  const [dbClearLoading, setDbClearLoading] = useState(false)
-  const [dbClearSuccess, setDbClearSuccess] = useState(false)
-  const [dbClearError, setDbClearError] = useState(null)
+  const [cacheClearLoading, setCacheClearLoading] = useState(false)
+  const [cacheClearSuccess, setCacheClearSuccess] = useState(false)
+  const [cacheClearError, setCacheClearError] = useState(null)
 
   // Honor deep-links from the onboarding banner (and anywhere else that
   // calls openSettings(section)) by jumping to the requested pane.
@@ -312,22 +312,22 @@ export default function SettingsPanel({ theme, onThemeChange }) {
     }
   }
 
-  const handleClearDatabase = async () => {
+  const handleClearCachedFiles = async () => {
     if (!window.confirm(
-        'This will permanently delete all check history and the verification cache.\n\n' +
-        'You will need to re-run checks to see results again.\n\nAre you sure?'
+        'This will permanently delete cached AI responses, references, and downloaded paper data.\n\n' +
+        'Your API keys, settings, and check history will be kept.\n\nAre you sure?'
     )) return
-    setDbClearLoading(true)
-    setDbClearSuccess(false)
-    setDbClearError(null)
+    setCacheClearLoading(true)
+    setCacheClearSuccess(false)
+    setCacheClearError(null)
     try {
-      await api.clearDatabase()
-      setDbClearSuccess(true)
-      setTimeout(() => setDbClearSuccess(false), 4000)
+      await api.clearCachedFiles()
+      setCacheClearSuccess(true)
+      setTimeout(() => setCacheClearSuccess(false), 4000)
     } catch (err) {
-      setDbClearError(err?.response?.data?.detail || err.message || 'Failed to clear database')
+      setCacheClearError(err?.response?.data?.detail || err.message || 'Failed to clear cached files')
     } finally {
-      setDbClearLoading(false)
+      setCacheClearLoading(false)
     }
   }
 
@@ -1954,43 +1954,43 @@ export default function SettingsPanel({ theme, onThemeChange }) {
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 200 }}>
             <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 2 }}>
-              Clear Check History &amp; Cache
+              Clear Cached Files
             </div>
             <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)' }}>
-              Deletes all past check results and the verification cache from the local database.
-              Use this if old results are displaying incorrectly after an update.
+              Deletes cached AI responses, references, and downloaded paper data.
+              Your API keys, settings, and check history are kept.
             </div>
           </div>
 
           <button
-              onClick={handleClearDatabase}
-              disabled={dbClearLoading}
+              onClick={handleClearCachedFiles}
+              disabled={cacheClearLoading}
               style={{
                 flexShrink: 0,
                 padding: '6px 14px',
                 borderRadius: 8,
                 fontSize: '0.85rem',
                 fontWeight: 500,
-                cursor: dbClearLoading ? 'not-allowed' : 'pointer',
+                cursor: cacheClearLoading ? 'not-allowed' : 'pointer',
                 background: 'transparent',
                 border: '1px solid var(--color-error, #ef4444)',
                 color: 'var(--color-error, #ef4444)',
-                opacity: dbClearLoading ? 0.6 : 1,
+                opacity: cacheClearLoading ? 0.6 : 1,
                 transition: 'opacity 0.15s',
               }}
           >
-            {dbClearLoading ? 'Clearing…' : 'Clear Database'}
+            {cacheClearLoading ? 'Clearing…' : 'Clear Cached Files'}
           </button>
         </div>
 
-        {dbClearSuccess && (
+        {cacheClearSuccess && (
             <div style={{ marginTop: 8, fontSize: '0.8rem', color: 'var(--color-success, #22c55e)' }}>
-              ✓ Database cleared successfully. Re-run your checks to populate fresh results.
+              ✓ Cached files cleared successfully. Re-run checks to populate fresh data.
             </div>
         )}
-        {dbClearError && (
+        {cacheClearError && (
             <div style={{ marginTop: 8, fontSize: '0.8rem', color: 'var(--color-error, #ef4444)' }}>
-              {dbClearError}
+              {cacheClearError}
             </div>
         )}
       </div>

@@ -131,6 +131,12 @@ const STYLE_FONT = {
   plaintext: "'Charter', 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Times New Roman', Times, Georgia, serif",
 }
 
+const toApiRefId = (ref, i) => {
+  if (ref?.id != null && String(ref.id) !== '') return `id:${String(ref.id)}`
+  if (ref?.index != null && String(ref.index) !== '') return `index:${String(ref.index)}`
+  return `pos:${String(i)}`
+}
+
 export default function CorrectionsView({ references, isCheckComplete = false }) {
   const format = useStyleStore(s => s.format)
   const setFormat = useStyleStore(s => s.setFormat)
@@ -311,6 +317,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     setDecision(k, { status: 'applied' })
     if (selectedCheckId) {
       const refIdStr = String(ref.id ?? ref.index ?? i)
+      const apiRefId = toApiRefId(ref, i)
       // Optimistically flip status + merge corrected metadata in BOTH
       // stores so the citation-health chip moves immediately. The
       // useHistoryStore update covers historical-view checks; the
@@ -327,7 +334,12 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         // Reset/Restore unable to roll the badge back. The optimistic update is
         // the displayed source of truth; the authoritative state loads on the
         // next natural navigation.
-        await verifyReferenceInCheck(selectedCheckId, refIdStr, { apply_correction: true })
+        await verifyReferenceInCheck(selectedCheckId, apiRefId, {
+          apply_correction: true,
+          expected_id: ref?.id ?? null,
+          expected_index: ref?.index ?? null,
+          expected_title: ref?.title ?? null,
+        })
         // NOTE (merge with upstream "Persist citation style preferences"):
         // upstream added selectCheck({force:true}) here, but that wipes the
         // _pre_correction optimistic snapshots and breaks Reset/Restore — kept
@@ -365,10 +377,16 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     setDecision(k, null)
     if (!selectedCheckId) return
     const refIdStr = String(ref.id ?? ref.index ?? i)
+    const apiRefId = toApiRefId(ref, i)
     try {
       // Persist the revert server-side; no force-reload (it would wipe the
       // optimistic snapshots — see applyAndReverify).
-      await verifyReferenceInCheck(selectedCheckId, refIdStr, { overrides: snap })
+      await verifyReferenceInCheck(selectedCheckId, apiRefId, {
+        overrides: snap,
+        expected_id: ref?.id ?? null,
+        expected_index: ref?.index ?? null,
+        expected_title: ref?.title ?? null,
+      })
       // (see applyAndReverify) keep our no-force-reload behaviour so the
       // optimistic Reset/Restore snapshots survive.
     } catch {
@@ -435,7 +453,14 @@ export default function CorrectionsView({ references, isCheckComplete = false })
       const worker = async () => {
         while (queue.length) {
           const { ref, i } = queue.shift()
-          try { await verifyReferenceInCheck(selectedCheckId, String(ref.id ?? ref.index ?? i), { apply_correction: true }) } catch (_e) { /* best-effort */ }
+          try {
+            await verifyReferenceInCheck(selectedCheckId, toApiRefId(ref, i), {
+              apply_correction: true,
+              expected_id: ref?.id ?? null,
+              expected_index: ref?.index ?? null,
+              expected_title: ref?.title ?? null,
+            })
+          } catch (_e) { /* best-effort */ }
         }
       }
       await Promise.all([worker(), worker(), worker(), worker()])

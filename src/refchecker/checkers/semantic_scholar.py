@@ -144,6 +144,47 @@ class NonArxivReferenceChecker:
         self.headers.pop("x-api-key", None)
         self._api_key_rejected = True
         return True
+
+    @staticmethod
+    def _coerce_text(value: Any) -> str:
+        """Convert mixed scalar/dict values into a safe display/search string."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("title", "text", "name", "url", "value"):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested
+            return str(value)
+        return str(value)
+
+    @classmethod
+    def _normalize_reference_authors(cls, authors_raw: Any) -> List[str]:
+        """Normalize cited authors into a plain list of author-name strings."""
+        if authors_raw is None:
+            return []
+        if isinstance(authors_raw, list):
+            raw_list = authors_raw
+        else:
+            raw_list = [authors_raw]
+
+        normalized: List[str] = []
+        for author in raw_list:
+            if isinstance(author, dict):
+                value = (
+                    author.get("name")
+                    or author.get("author")
+                    or author.get("full_name")
+                    or author.get("value")
+                )
+            else:
+                value = author
+            name = cls._coerce_text(value).strip()
+            if name:
+                normalized.append(name)
+        return normalized
     
     def search_paper(self, query: str, year: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -492,6 +533,9 @@ class NonArxivReferenceChecker:
         for source in sources:
             if not source:
                 continue
+            source = self._coerce_text(source)
+            if not source:
+                continue
             
             for pattern in arxiv_id_patterns:
                 match = re.search(pattern, source, re.IGNORECASE)
@@ -591,7 +635,7 @@ class NonArxivReferenceChecker:
         if not latest_version_num or latest_version_num <= 1:
             # Only one version exists or couldn't determine
             return errors, None
-        
+
         # Check if reference explicitly cites a specific older version
         cited_version_num = None
         if cited_version:
@@ -619,7 +663,7 @@ class NonArxivReferenceChecker:
             return errors, None
         
         # Check if reference metadata matches a historical version
-        cited_title = reference.get('title', '').strip()
+        cited_title = self._coerce_text(reference.get('title', '')).strip()
         
         if not cited_title:
             return errors, None
@@ -708,6 +752,65 @@ class NonArxivReferenceChecker:
             return warnings, best_match_version if warnings != errors else None
         
         return errors, None
+
+    @staticmethod
+    def _strip_leading_author_like_prefix(title: str) -> str:
+        """Drop citation-style leading author blobs from title-like strings.
+
+        Some parsed references carry ``"Surname, X.: Real title ..."`` in the
+        title field (especially technical reports and older citation styles).
+        Searching that full string often misses obvious Semantic Scholar hits.
+        """
+        if not isinstance(title, str):
+            return title
+        if ":" not in title:
+            return title
+
+        left, right = title.split(":", 1)
+        prefix = left.strip()
+        remainder = right.strip()
+        if not remainder:
+            return title
+
+        # Conservative "author-like" heuristic: short blob with a comma and
+        # initials / et al marker.
+        if len(prefix.split()) <= 8:
+            prefix_lc = prefix.lower()
+            has_comma = "," in prefix
+            has_initials = bool(re.search(r"(?:\b[A-Z]\.){1,4}|\b[A-Z]\b", prefix))
+            has_et_al = "et al" in prefix_lc
+            if has_comma and (has_initials or has_et_al):
+                return remainder
+        return title
+
+    def _log_search_candidates(
+            self,
+            stage: str,
+            query: str,
+            cited_title: str,
+            results: List[Dict[str, Any]],
+            year: Optional[int] = None,
+    ) -> None:
+        """Log compact Semantic Scholar candidates for console debugging."""
+        candidates = []
+        cited_norm = normalize_text(cited_title or "").lower().strip()
+        for idx, result in enumerate((results or [])[:3], start=1):
+            result_title = (result.get('title') or '').strip()
+            result_norm = normalize_text(result_title).lower().strip() if result_title else ""
+            score = calculate_title_similarity(cited_norm, result_norm) if cited_norm and result_norm else 0.0
+            external_ids = result.get('externalIds') or {}
+            candidates.append(
+                f"#{idx}(score={score:.3f},year={result.get('year')},paperId={result.get('paperId')},"
+                f"doi={external_ids.get('DOI')},title={result_title[:90]!r})"
+            )
+        logger.info(
+            "[S2_TRACE] stage=%s query=%r year=%r result_count=%d top_candidates=%s",
+            stage,
+            (query or "")[:200],
+            year,
+            len(results or []),
+            "; ".join(candidates) if candidates else "none",
+        )
 
     def _version_metadata_changed_for_issue(
             self,
@@ -820,13 +923,18 @@ class NonArxivReferenceChecker:
         
         paper_data = None
         errors = []
+        selected_via = None
         
         # Extract reference data
-        title = reference.get('title', '')
-        authors = reference.get('authors', [])
-        year = reference.get('year', 0)
-        url = reference.get('url', '')
-        raw_text = reference.get('raw_text', '')
+        title = self._coerce_text(reference.get('title', '')).strip()
+        authors = self._normalize_reference_authors(reference.get('authors', []))
+        year_raw = reference.get('year', 0)
+        try:
+            year = int(year_raw) if year_raw not in (None, '') else 0
+        except (TypeError, ValueError):
+            year = 0
+        url = self._coerce_text(reference.get('url', '')).strip()
+        raw_text = self._coerce_text(reference.get('raw_text', '')).strip()
         
         # First, check if we have a Semantic Scholar URL (API format)
         if url and 'api.semanticscholar.org/CorpusID:' in url:
@@ -855,6 +963,7 @@ class NonArxivReferenceChecker:
                         
                         if response.status_code == 200:
                             paper_data = response.json()
+                            selected_via = "corpus_id"
                             logger.debug(f"Found paper by Semantic Scholar CorpusID: {corpus_id}")
                             break
                         elif response.status_code == 404:
@@ -889,6 +998,7 @@ class NonArxivReferenceChecker:
             paper_data = self.get_paper_by_doi(doi)
             
             if paper_data:
+                selected_via = "doi"
                 logger.debug(f"Found paper by DOI: {doi}")
             else:
                 logger.debug(f"Could not find paper with DOI: {doi}")
@@ -898,6 +1008,7 @@ class NonArxivReferenceChecker:
         # identifiers and more reliable than title matching, which can return
         # corrupt/duplicate Semantic Scholar entries.
         found_title = ''
+        cleaned_title = clean_title_for_search(title) if title else ""
         arxiv_id_mismatch_detected = False
         arxiv_id = None
         if not paper_data:
@@ -913,6 +1024,7 @@ class NonArxivReferenceChecker:
                         if title_similarity >= SIMILARITY_THRESHOLD:
                             paper_data = direct_result
                             found_title = result_title
+                            selected_via = "arxiv_direct"
                             logger.debug(f"Found paper by direct ArXiv ID lookup: {arxiv_id} (similarity {title_similarity:.2f})")
                         else:
                             arxiv_id_mismatch_detected = True
@@ -924,40 +1036,80 @@ class NonArxivReferenceChecker:
                     else:
                         paper_data = direct_result
                         found_title = result_title
+                        selected_via = "arxiv_direct"
 
         # If we couldn't get the paper by ArXiv ID or DOI, try finding by title
         if not paper_data and title:
             # Clean up the title for search using centralized utility function
             cleaned_title = clean_title_for_search(title)
+            stripped_title = self._strip_leading_author_like_prefix(cleaned_title)
+            if stripped_title != cleaned_title:
+                logger.info(
+                    "Semantic Scholar search: stripped author-like title prefix %r -> %r",
+                    cleaned_title[:120],
+                    stripped_title[:120],
+                )
+                cleaned_title = stripped_title
 
             # Try exact title match endpoint first — faster than relevance search.
             # If it finds a match (even partial), use it and skip the search.
             # Only fall through to the slower search if match returns nothing.
             match_result = self.match_paper_by_title(cleaned_title)
+            self._log_search_candidates(
+                "title_match_endpoint",
+                cleaned_title,
+                cleaned_title,
+                [match_result] if match_result else [],
+                year,
+            )
             if match_result:
                 match_title = match_result.get('title', '')
                 match_score = calculate_title_similarity(
                     normalize_text(cleaned_title),
                     normalize_text(match_title),
                 )
+                logger.info(
+                    "[S2_TRACE] stage=title_match_score score=%.3f threshold=%.3f accepted=%s matched_title=%r",
+                    match_score,
+                    SIMILARITY_THRESHOLD,
+                    match_score >= SIMILARITY_THRESHOLD,
+                    match_title[:160],
+                )
                 if match_score >= SIMILARITY_THRESHOLD:
                     paper_data = match_result
                     found_title = match_title
+                    selected_via = "title_match"
                     logger.debug(f"Found paper by title match with similarity {match_score:.2f}: {cleaned_title}")
                 else:
-                    logger.debug(f"Title match returned low-score result ({match_score:.2f}), skipping search")
+                    logger.debug(f"Title match returned low-score result ({match_score:.2f}), continuing with broader search")
 
-            # Fall back to relevance search ONLY if match endpoint returned nothing
-            if not paper_data and not match_result:
+            # Fall back to relevance search whenever title-match did not clear
+            # the similarity threshold (including low-score false positives).
+            if not paper_data:
                 search_results = self.search_paper(cleaned_title, year)
+                self._log_search_candidates(
+                    "title_relevance_search",
+                    cleaned_title,
+                    cleaned_title,
+                    search_results,
+                    year,
+                )
 
                 if search_results:
                     best_match, best_score = find_best_match(search_results, cleaned_title, year, authors)
+                    logger.info(
+                        "[S2_TRACE] stage=title_relevance_best score=%.3f threshold=%.3f accepted=%s matched_title=%r",
+                        best_score,
+                        SIMILARITY_THRESHOLD,
+                        bool(best_match and best_score >= SIMILARITY_THRESHOLD),
+                        ((best_match or {}).get('title') or "")[:160],
+                    )
 
                     # Consider it a match if similarity is above threshold
                     if best_match and best_score >= SIMILARITY_THRESHOLD:
                         paper_data = best_match
                         found_title = best_match['title']
+                        selected_via = "title_relevance"
                         logger.debug(f"Found paper by title search with similarity {best_score:.2f}: {cleaned_title}")
                     else:
                         logger.debug(f"No good match found for title: {cleaned_title}")
@@ -971,16 +1123,31 @@ class NonArxivReferenceChecker:
                 first_author = authors[0]
                 if len(first_author) > 3 and first_author.lower() not in ('et al', 'et al.', 'others'):
                     # Build a combined query: first author + a few distinctive title words
-                    title_words = [w for w in clean_title_for_search(title).split() if len(w) > 3][:4]
+                    title_words = [w for w in cleaned_title.split() if len(w) > 3][:4]
                     author_query = f"{first_author} {' '.join(title_words)}"
                     logger.debug(f"Trying author-based S2 search: '{author_query}'")
                     search_results = self.search_paper(author_query, year)
+                    self._log_search_candidates(
+                        "author_fallback_search",
+                        author_query,
+                        cleaned_title,
+                        search_results,
+                        year,
+                    )
                     if search_results:
                         best_match, best_score = find_best_match(search_results, cleaned_title, year, authors)
+                        logger.info(
+                            "[S2_TRACE] stage=author_fallback_best score=%.3f threshold=%.3f accepted=%s matched_title=%r",
+                            best_score,
+                            0.5,
+                            bool(best_match and best_score >= 0.5),
+                            ((best_match or {}).get('title') or "")[:160],
+                        )
                         # Use a lower threshold since the title may have changed
                         if best_match and best_score >= 0.5:
                             paper_data = best_match
                             found_title = best_match['title']
+                            selected_via = "author_fallback"
                             logger.debug(f"Found paper by author-based search with score {best_score:.2f}")
                         else:
                             logger.debug(f"Author-based search best score {best_score:.2f} below threshold")
@@ -991,6 +1158,13 @@ class NonArxivReferenceChecker:
             if arxiv_id:
                 logger.debug(f"Trying ArXiv search fallback for: {arxiv_id}")
                 search_results = self.search_paper(f"arXiv:{arxiv_id}")
+                self._log_search_candidates(
+                    "arxiv_search_fallback",
+                    f"arXiv:{arxiv_id}",
+                    title,
+                    search_results,
+                    year,
+                )
             
                 if search_results:
                     # For ArXiv searches, check if the found paper matches the cited title
@@ -1010,6 +1184,7 @@ class NonArxivReferenceChecker:
                                 if title_similarity >= SIMILARITY_THRESHOLD:
                                     paper_data = result
                                     found_title = result['title']
+                                    selected_via = "arxiv_search"
                                     logger.debug(f"Found matching paper by ArXiv ID: {arxiv_id}")
                                 else:
                                     logger.debug(f"ArXiv ID points to different paper (similarity: {title_similarity:.3f})")
@@ -1018,6 +1193,7 @@ class NonArxivReferenceChecker:
                                 # If no title to compare, accept the paper (fallback)
                                 paper_data = result
                                 found_title = result['title']
+                                selected_via = "arxiv_search"
                                 logger.debug(f"Found paper by ArXiv ID (no title comparison): {arxiv_id}")
                             break
                 
@@ -1043,6 +1219,7 @@ class NonArxivReferenceChecker:
                             if title_similarity >= SIMILARITY_THRESHOLD:
                                 paper_data = arxiv_paper
                                 found_title = arxiv_paper['title']
+                                selected_via = "arxiv_api_fallback"
                                 logger.debug(f"Found matching paper in ArXiv API: {arxiv_id}")
                             else:
                                 logger.debug(f"ArXiv paper title doesn't match cited title (similarity: {title_similarity:.3f})")
@@ -1099,15 +1276,30 @@ class NonArxivReferenceChecker:
             
             # Search for the paper using normalized query
             search_results = self.search_paper(normalized_raw_query) if search_query else []
+            self._log_search_candidates(
+                "raw_text_search",
+                normalized_raw_query if search_query else "",
+                cleaned_title,
+                search_results,
+                year,
+            )
             
             if search_results:
                 # Take the first result as a best guess
                 best_match, best_score = find_best_match(search_results, cleaned_title, year, authors)
+                logger.info(
+                    "[S2_TRACE] stage=raw_text_best score=%.3f threshold=%.3f accepted=%s matched_title=%r",
+                    best_score,
+                    SIMILARITY_THRESHOLD,
+                    bool(best_match and best_score >= SIMILARITY_THRESHOLD),
+                    ((best_match or {}).get('title') or "")[:160],
+                )
                 
                 # Consider it a match if similarity is above threshold
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
                     paper_data = best_match
                     found_title = best_match['title']
+                    selected_via = "raw_text"
                     logger.debug(f"Found paper by raw text search")
                 else:
                     logger.debug(f"No good match found for raw text search: {search_query}")
@@ -1118,6 +1310,14 @@ class NonArxivReferenceChecker:
         if not paper_data:
             logger.debug(f"Could not find matching paper for reference: {title}")
             logger.debug(f"Tried: DOI search, title search, ArXiv ID search, ArXiv API fallback, raw text search")
+            logger.info(
+                "[S2_TRACE] stage=final status=not_found title=%r year=%r cited_doi=%r api_failed=%s failure_reason=%r",
+                title[:200],
+                year,
+                doi,
+                self._api_failed,
+                self._failure_reason,
+            )
             
             # If API failed during search, return error indicating retryable failure
             if self._api_failed:
@@ -1322,6 +1522,15 @@ class NonArxivReferenceChecker:
         # reference card's Abstract / Claim / citation & reference counts depend
         # on it carrying those fields. No-op when already complete or no paperId.
         paper_data = self._enrich_matched_paper(paper_data)
+        resolved_external_ids = paper_data.get('externalIds', {}) if isinstance(paper_data, dict) else {}
+        logger.info(
+            "[S2_TRACE] stage=final status=found selected_via=%s title=%r year=%r paperId=%r doi=%r",
+            selected_via or "unknown",
+            (paper_data.get('title', '') if isinstance(paper_data, dict) else '')[:200],
+            paper_data.get('year') if isinstance(paper_data, dict) else None,
+            paper_data.get('paperId') if isinstance(paper_data, dict) else None,
+            (resolved_external_ids or {}).get('DOI') if isinstance(resolved_external_ids, dict) else None,
+        )
 
         return paper_data, errors, paper_url
     

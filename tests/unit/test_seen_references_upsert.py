@@ -33,8 +33,15 @@ def test_seen_refs_upsert_records_and_dedups():
         # Would raise NameError('result_json') before the fix.
         key = await db.upsert_verified_reference(
             {'title': 'A study of widgets', 'authors': ['Jane Smith'],
-             'year': 2020, 'status': 'verified', 'doi': '10.1/abc'})
+             'year': 2020, 'status': 'verified', 'doi': '10.1/abc',
+             # The WebUI result formatter uses this public field name.
+             # Preserve it in the seen-references index rather than dropping
+             # the source after a completed check is reloaded.
+             'matched_database': 'Semantic Scholar'})
         assert key  # a non-None identity key came back
+
+        rows = await db.list_verified_references()
+        assert rows[0]['matched_db'] == 'Semantic Scholar'
 
         await db.upsert_verified_reference(
             {'title': 'A different paper on gadgets', 'authors': ['John Doe'],

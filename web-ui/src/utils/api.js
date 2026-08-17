@@ -135,7 +135,7 @@ export const recheck = (id) => api.post(`/recheck/${id}`)
 
 // Admin operations
 export const clearCache = () => api.delete('/admin/cache')
-export const clearDatabase = () => api.delete('/admin/database')
+export const clearCachedFiles = () => api.delete('/admin/cache-files')
 
 // Admin analytics panel. `days = 0` means "all time" for every one of these.
 // Sessions are synthesized from check timestamps (there is no sessions table),
@@ -481,5 +481,5 @@ export default {
   recheck,
   createWebSocket,
   clearCache,
-  clearDatabase,
+  clearCachedFiles,
 }

@@ -48,7 +48,7 @@ joblib>=1.5.3
 # PAPERCLIP_API_KEY in Settings; no extra pip step. The checker
 # (src/refchecker/checkers/paperclip.py) is inert when the key is
 # missing, so shipping this dep is safe by default.
-gxl-paperclip>=0.1.0
+gxl-paperclip @ https://github.com/GXL-ai/paperclip/archive/refs/heads/main.zip
 
 # vLLM support (for local model inference) - optional, install separately
 # These have complex dependency chains (torch, numba, etc.)

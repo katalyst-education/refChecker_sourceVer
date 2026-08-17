@@ -25,6 +25,12 @@ const leaveBusy = (setter, ident) =>
     return next
   })
 
+const toApiRefId = (ref, i) => {
+  if (ref?.id != null && String(ref.id) !== '') return `id:${String(ref.id)}`
+  if (ref?.index != null && String(ref.index) !== '') return `index:${String(ref.index)}`
+  return `pos:${String(i)}`
+}
+
 export default function useReferenceActions() {
   const selectedCheckId = useHistoryStore(s => s.selectedCheckId)
   // Per-action in-flight tracking, so Re-verify and Suggest-alternative
@@ -113,6 +119,7 @@ export default function useReferenceActions() {
   const handleRemoveRef = async (ref, i) => {
     if (!selectedCheckId) return
     const ident = String(ref.id ?? ref.index ?? i)
+    const apiRefId = toApiRefId(ref, i)
     enterBusy(setRemoveBusy, ident)
     // Snapshot the ref so Undo can re-create it. We stash the metadata
     // the add endpoint needs, plus a synthetic key so the UI can render
@@ -152,7 +159,7 @@ export default function useReferenceActions() {
     // immediately when displayRefs reads selectedCheck.results (not checkStore).
     useHistoryStore.getState().optimisticRemoveReference?.(ident)
     try {
-      await removeReferenceFromCheck(selectedCheckId, ident)
+      await removeReferenceFromCheck(selectedCheckId, apiRefId)
       setRemovedRefs(prev => [snapshot, ...prev].slice(0, 20))
       await reloadCheck()
     } catch (e) {
@@ -231,10 +238,11 @@ export default function useReferenceActions() {
   const handleSuggestAlt = async (ref, i) => {
     if (!selectedCheckId) return
     const ident = String(ref.id ?? ref.index ?? i)
+    const apiRefId = toApiRefId(ref, i)
     enterBusy(setSuggestBusy, ident)
     latestSuggestRef.current = ident
     try {
-      const res = await suggestAlternativeReference(selectedCheckId, ident)
+      const res = await suggestAlternativeReference(selectedCheckId, apiRefId)
       // Discard the result if the user has since started a newer Suggest
       // (e.g. clicked Suggest on a different row while this one was slow).
       // Without this, a slower earlier response can overwrite the panel
@@ -249,12 +257,18 @@ export default function useReferenceActions() {
     }
   }
 
-  const handleReverify = async (ref, i) => {
+  const handleReverify = async (ref, i, opts = {}) => {
     if (!selectedCheckId) return
     const ident = String(ref.id ?? ref.index ?? i)
+    const apiRefId = toApiRefId(ref, i)
     enterBusy(setReverifyBusy, ident)
     try {
-      await verifyReferenceInCheck(selectedCheckId, ident)
+      await verifyReferenceInCheck(selectedCheckId, apiRefId, {
+        ...opts,
+        expected_id: ref?.id ?? null,
+        expected_index: ref?.index ?? null,
+        expected_title: ref?.title ?? null,
+      })
       await reloadCheck()
     } catch (e) {
       alert(e?.response?.data?.detail || e?.message || 'Re-verify failed')
@@ -262,6 +276,9 @@ export default function useReferenceActions() {
       leaveBusy(setReverifyBusy, ident)
     }
   }
+
+  const handleReverifyAllDatabases = async (ref, i) =>
+    handleReverify(ref, i, { force_all_databases: true })
 
   // Back-compat: a few callers (AddReferencePanel) still expect a single
   // `busyKey` string. Map the global slot onto it so '__add__'/'__restore__'
@@ -286,6 +303,7 @@ export default function useReferenceActions() {
     handleRemoveRef,
     handleSuggestAlt,
     handleReverify,
+    handleReverifyAllDatabases,
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,

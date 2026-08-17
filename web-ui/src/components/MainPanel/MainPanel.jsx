@@ -190,6 +190,9 @@ export default function MainPanel() {
   // Fall back to checkStore only if selectedCheck isn't loaded yet for current check
   const isCurrentCheck = selectedCheckId === currentCheckId
   const hasSelectedCheckData = selectedCheck && selectedCheck.id === selectedCheckId
+  const useLiveCheckStore = isCurrentCheck && (
+    checkStoreStatus === 'checking' || checkStoreStatus === 'in_progress'
+  )
   
   // Determine status
   const displayStatus = hasSelectedCheckData 
@@ -209,7 +212,7 @@ export default function MainPanel() {
   // For current check, prefer live checkStore data; for other checks, use selectedCheck
   const displayRefs = useMemo(() => {
     // Current check: use live WebSocket data from checkStore
-    if (isCurrentCheck && checkStoreRefs && checkStoreRefs.length > 0) {
+    if (useLiveCheckStore && checkStoreRefs && checkStoreRefs.length > 0) {
       return checkStoreRefs
     }
     
@@ -223,13 +226,13 @@ export default function MainPanel() {
     }
     
     return []
-  }, [isCurrentCheck, checkStoreRefs, hasSelectedCheckData, selectedCheck])
+  }, [useLiveCheckStore, checkStoreRefs, hasSelectedCheckData, selectedCheck])
 
   // Build unified stats
   // For current check, prefer live checkStore stats; for other checks, compute from selectedCheck
   const displayStats = useMemo(() => {
     // Current check: use live WebSocket data from checkStore
-    if (isCurrentCheck && checkStoreStats && checkStoreStats.total_refs > 0) {
+    if (useLiveCheckStore && checkStoreStats && checkStoreStats.total_refs > 0) {
       return checkStoreStats
     }
     
@@ -304,15 +307,15 @@ export default function MainPanel() {
       refs_with_warnings_only: 0,
       progress_percent: 0,
     }
-  }, [isCurrentCheck, checkStoreStats, hasSelectedCheckData, selectedCheck, displayRefs, isInProgress])
+  }, [useLiveCheckStore, checkStoreStats, hasSelectedCheckData, selectedCheck, displayRefs, isInProgress])
 
   // Document-level AI-generated-text detection: live result for the current
   // check, else the persisted result on a selected historical check.
   const displayAiDetection = useMemo(() => {
-    if (isCurrentCheck && checkStoreAiDetection) return checkStoreAiDetection
+    if (useLiveCheckStore && checkStoreAiDetection) return checkStoreAiDetection
     if (hasSelectedCheckData && selectedCheck.ai_detection) return selectedCheck.ai_detection
     return null
-  }, [isCurrentCheck, checkStoreAiDetection, hasSelectedCheckData, selectedCheck])
+  }, [useLiveCheckStore, checkStoreAiDetection, hasSelectedCheckData, selectedCheck])
 
   return (
     <main 
