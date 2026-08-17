@@ -3329,7 +3329,16 @@ async def _resolve_article_assistant(req: _ArticleSummaryRequest, user_id: int, 
     usage meter (the on-screen token/$ badge) so follow-up chat / summarize
     calls tick the badge up live, with their own per-flow breakdown.
     """
-    provider, model, api_key, endpoint = await _resolve_llm_config_for_request(
+    (
+        provider,
+        model,
+        api_key,
+        endpoint,
+        reasoning_effort,
+        max_tokens,
+        _context_length,
+        timeout_seconds,
+    ) = await _resolve_llm_config_for_request(
         user_id=user_id,
         use_llm=True,
         llm_config_id=req.llm_config_id,
@@ -3342,6 +3351,7 @@ async def _resolve_article_assistant(req: _ArticleSummaryRequest, user_id: int, 
     from backend.article_chat import ArticleAssistant
     return ArticleAssistant(
         provider=provider, api_key=api_key, endpoint=endpoint, model=model, check_id=check_id,
+        reasoning_effort=reasoning_effort, max_tokens=max_tokens, timeout_seconds=timeout_seconds,
     )
 
 

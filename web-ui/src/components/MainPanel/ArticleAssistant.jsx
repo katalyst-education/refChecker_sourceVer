@@ -173,8 +173,8 @@ function ReferenceGroundingBanner({ grounding, fetching, hasFullText }) {
     return (
       <div className="text-xs mt-2 mb-2 rounded-md px-2.5 py-1.5"
         style={{ color: 'var(--color-success)', background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-success)' }}>
-        Grounded in the full text of this reference — answers come only from the fetched document.
-        The assistant won’t invent details beyond what it says.
+        Text was extracted from an open-access PDF of this reference. The assistant is instructed
+        to use the available extracted text, but responses may be incomplete or inaccurate.
       </div>
     )
   }
@@ -186,9 +186,9 @@ function ReferenceGroundingBanner({ grounding, fetching, hasFullText }) {
   return (
     <div className="text-xs mt-2 mb-2 rounded-md px-2.5 py-1.5"
       style={{ color: 'var(--color-warning)', background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-warning)' }}>
-      The reference’s full text isn’t available here, so answers are grounded only in {what}.
-      The assistant won’t invent details beyond what’s shown — if something isn’t in the reference’s
-      available text, it will say so.
+      Text from an open-access PDF of this reference isn’t available, so the reference context is
+      limited to {what}. The assistant is instructed to use the available text, but responses may
+      be incomplete or inaccurate.
     </div>
   )
 }
@@ -395,8 +395,8 @@ export default function ArticleAssistant({ checkId, reference = null, label = nu
     <Button size="pill" variant="outline" onClick={openPanel} icon={CHAT_ICON}
       className={grid ? 'rc-grid-trigger' : ''}
       title={isRefMode
-        ? 'Chat about this reference or summarize it, grounded only in the reference’s available text'
-        : 'Summarize this article or ask questions, answered only from the article’s own text'}>
+        ? 'Chat about this reference or summarize it with the reference’s available text supplied as context'
+        : 'Summarize this article or ask questions with the article’s own text supplied as context'}>
       {label || (isRefMode ? 'Chat about this reference' : 'Chat & Summarize')}
     </Button>
   )
@@ -463,8 +463,8 @@ export default function ArticleAssistant({ checkId, reference = null, label = nu
                 {hasChatModel && messages.length === 0 && (
                   <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
                     {isRefMode
-                      ? 'Ask a question about this reference. Answers come only from the reference’s available text shown above — if it isn’t there, the assistant will say so.'
-                      : 'Ask a question about this article. Answers come only from the article’s own text — if it isn’t in the article, the assistant will say so.'}
+                      ? 'Ask a question about this reference. The assistant is instructed to use the available reference text, but responses may be incomplete or inaccurate.'
+                      : 'Ask a question about this article. The assistant is instructed to use the available article text, but responses may be incomplete or inaccurate.'}
                   </div>
                 )}
                 {messages.map((m, i) => (

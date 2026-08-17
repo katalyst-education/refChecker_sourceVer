@@ -252,30 +252,31 @@ describe('ArticleAssistant — per-reference full-text grounding (R43)', () => {
     expect(screen.getByText(/Fetching full text…/i)).toBeTruthy()
   })
 
-  it('switches to the "grounded in the full text" banner on an OA hit', async () => {
+  it('shows an honest extracted-PDF-text banner on an OA hit', async () => {
     postReferenceFulltext.mockResolvedValue({ data: { source: 'pdf', grounding: 'FULL REAL TEXT'.repeat(50) } })
     openRef()
-    await screen.findByText(/Grounded in the full text of this reference/i)
+    await screen.findByText(/Text was extracted from an open-access PDF of this reference/i)
+    expect(screen.getByText(/responses may be incomplete or inaccurate/i)).toBeTruthy()
     // The TL;DR-only disclaimer is NOT shown when we have the real full text.
-    expect(screen.queryByText(/full text isn’t available here/i)).toBeNull()
+    expect(screen.queryByText(/PDF of this reference isn’t available/i)).toBeNull()
   })
 
   it('keeps the TL;DR-only disclaimer VERBATIM on an OA miss (no fabrication)', async () => {
     postReferenceFulltext.mockResolvedValue({ data: { source: 'tldr', grounding: null } })
     openRef()
     await waitFor(() => expect(postReferenceFulltext).toHaveBeenCalled())
-    await screen.findByText(/full text isn’t available here/i)
+    await screen.findByText(/PDF of this reference isn’t available/i)
     // Falls back to the reference's real TL;DR claim wording, not the full-text banner.
     expect(screen.getByText(/one-line claim \(TL;DR\)/i)).toBeTruthy()
-    expect(screen.queryByText(/Grounded in the full text of this reference/i)).toBeNull()
+    expect(screen.queryByText(/Text was extracted from an open-access PDF/i)).toBeNull()
   })
 
   it('keeps the TL;DR disclaimer when retrieval errors (soft-fail, no fabrication)', async () => {
     postReferenceFulltext.mockRejectedValue(new Error('network down'))
     openRef()
     await waitFor(() => expect(postReferenceFulltext).toHaveBeenCalled())
-    await screen.findByText(/full text isn’t available here/i)
-    expect(screen.queryByText(/Grounded in the full text of this reference/i)).toBeNull()
+    await screen.findByText(/PDF of this reference isn’t available/i)
+    expect(screen.queryByText(/Text was extracted from an open-access PDF/i)).toBeNull()
   })
 
   it('grounds the chat in the fetched full text after an OA hit', async () => {
@@ -283,7 +284,7 @@ describe('ArticleAssistant — per-reference full-text grounding (R43)', () => {
     postReferenceFulltext.mockResolvedValue({ data: { source: 'pdf', grounding: FULL } })
     postArticleChat.mockResolvedValue({ data: { source: 'pdf', answer: 'It uses 8 heads.' } })
     openRef()
-    await screen.findByText(/Grounded in the full text of this reference/i)
+    await screen.findByText(/Text was extracted from an open-access PDF of this reference/i)
     fireEvent.click(screen.getByRole('tab', { name: /^Chat$/i }))
     fireEvent.change(screen.getByPlaceholderText(/Ask about this reference/i), { target: { value: 'How many heads?' } })
     fireEvent.click(screen.getByRole('button', { name: /^Send$/i }))

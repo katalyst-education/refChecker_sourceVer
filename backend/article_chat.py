@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+_LOCAL_OPENAI_PROVIDERS = frozenset({'vllm', 'lmstudio'})
+
 # Cap the grounding block so a whole book can't blow past provider context
 # limits. The reference checker already caps extracted text at 600k chars; for
 # chat/summarize a tighter cap keeps latency + cost sane while covering the
@@ -95,6 +97,9 @@ class ArticleAssistant:
         endpoint: Optional[str] = None,
         model: Optional[str] = None,
         check_id: Optional[Any] = None,
+        reasoning_effort: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[int] = None,
     ):
         # check_id (when supplied by the FastAPI layer) attributes chat /
         # summarize spend to the per-check usage meter that drives the
@@ -120,7 +125,17 @@ class ArticleAssistant:
         self.api_key = api_key or resolve_api_key(self.provider)
         self.endpoint = endpoint or resolve_endpoint(self.provider)
         self.model = model or default_models.get(self.provider, default_models.get('openai'))
+        self.reasoning_effort = str(reasoning_effort or 'none').strip().lower()
+        self.max_tokens = int(max_tokens) if max_tokens else 900
+        self.timeout_seconds = int(timeout_seconds) if timeout_seconds else 120
         self.client = None
+
+        # Local OpenAI-compatible servers do not require authentication, but
+        # the OpenAI SDK requires a non-empty api_key when constructing its
+        # client. Match the shared vLLM/LM Studio providers by supplying a
+        # harmless placeholder that local servers ignore.
+        if not self.api_key and self.provider in _LOCAL_OPENAI_PROVIDERS:
+            self.api_key = 'EMPTY' if self.provider == 'vllm' else 'lm-studio'
 
         if not self.api_key:
             logger.debug('No API key for ArticleAssistant (provider=%s)', self.provider)
@@ -145,12 +160,17 @@ class ArticleAssistant:
 
     def _init_openai(self) -> None:
         import openai
-        kwargs: Dict[str, Any] = {'api_key': self.api_key}
+        kwargs: Dict[str, Any] = {
+            'api_key': self.api_key,
+            'timeout': float(self.timeout_seconds),
+        }
         if self.endpoint:
-            base = self.endpoint
+            base = self.endpoint.rstrip('/')
             for suffix in ('/chat/completions', '/completions'):
                 if base.endswith(suffix):
                     base = base[: -len(suffix)]
+            if self.provider in _LOCAL_OPENAI_PROVIDERS and not base.endswith('/v1'):
+                base = f'{base}/v1'
             kwargs['base_url'] = base
         self.client = openai.OpenAI(**kwargs)
         logger.debug('ArticleAssistant initialized (provider=%s, model=%s)', self.provider, self.model)
@@ -176,21 +196,59 @@ class ArticleAssistant:
     def _call_openai_chat(self, system_prompt: str, messages: List[Dict[str, str]]) -> str:
         try:
             from refchecker.llm.providers import _openai_token_kwargs, _is_openai_reasoning_model
-            token_kwargs = _openai_token_kwargs(self.model, 900)
+            token_kwargs = _openai_token_kwargs(self.model, self.max_tokens)
             is_reasoning = _is_openai_reasoning_model(self.model)
         except Exception:  # pragma: no cover - exercised only without deps
-            token_kwargs = {'max_tokens': 900}
+            token_kwargs = {'max_tokens': self.max_tokens}
             is_reasoning = False
-        kwargs = dict(
-            model=self.model,
-            messages=[{'role': 'system', 'content': system_prompt}, *messages],
-            **token_kwargs,
-        )
-        if not is_reasoning:
-            kwargs['temperature'] = 0.0
-        resp = self.client.chat.completions.create(**kwargs)
-        self._record_usage('openai', resp)
-        return (resp.choices[0].message.content or '').strip()
+
+        def make_request(reasoning_effort: Optional[str] = None):
+            kwargs = dict(
+                model=self.model,
+                messages=[{'role': 'system', 'content': system_prompt}, *messages],
+                **token_kwargs,
+            )
+            if not is_reasoning:
+                kwargs['temperature'] = 0.0
+            if self.provider == 'lmstudio' and reasoning_effort not in (None, 'default'):
+                kwargs['extra_body'] = {'reasoning_effort': reasoning_effort}
+            response = self.client.chat.completions.create(**kwargs)
+            self._record_usage('openai', response)
+            return response
+
+        resp = make_request(self.reasoning_effort if self.provider == 'lmstudio' else None)
+        choice = resp.choices[0]
+        content = (choice.message.content or '').strip()
+        reasoning_content = (getattr(choice.message, 'reasoning_content', '') or '').strip()
+
+        # Some reasoning models served by LM Studio can exhaust their output
+        # budget on hidden reasoning and return an empty final answer. Mirror
+        # the shared LM Studio provider: retry once with reasoning disabled so
+        # Chat & Summarize receives displayable final content.
+        if (
+            self.provider == 'lmstudio'
+            and not content
+            and reasoning_content
+            and self.reasoning_effort != 'none'
+        ):
+            logger.warning(
+                'LM Studio article assistant returned reasoning but no final content '
+                '(finish_reason=%s, reasoning_effort=%s, reasoning_chars=%d); '
+                'retrying once with reasoning disabled',
+                getattr(choice, 'finish_reason', None),
+                self.reasoning_effort,
+                len(reasoning_content),
+            )
+            resp = make_request('none')
+            choice = resp.choices[0]
+            content = (choice.message.content or '').strip()
+
+        if not content:
+            raise RuntimeError(
+                'The LLM returned no final answer. Increase its output-token limit '
+                'or disable reasoning for Chat & Summarize.'
+            )
+        return content
 
     def _call_anthropic_chat(self, system_prompt: str, messages: List[Dict[str, str]]) -> str:
         resp = self.client.messages.create(

@@ -10,6 +10,7 @@ These exercise ``backend.article_chat.ArticleAssistant`` with a MOCK provider
 """
 
 import pytest
+import openai
 
 from backend.article_chat import (
     ArticleAssistant,
@@ -28,8 +29,15 @@ except Exception:  # pragma: no cover - depends on local env
 
 
 class _FakeOpenAIResponse:
-    def __init__(self, text):
-        self.choices = [type("C", (), {"message": type("M", (), {"content": text})()})()]
+    def __init__(self, text, reasoning_content="", finish_reason="stop"):
+        message = type(
+            "M",
+            (),
+            {"content": text, "reasoning_content": reasoning_content},
+        )()
+        self.choices = [
+            type("C", (), {"message": message, "finish_reason": finish_reason})()
+        ]
         self.usage = None
 
 
@@ -55,6 +63,73 @@ def _assistant_with_mock(capture):
     a = ArticleAssistant(provider="openai", api_key="test-key", model="gpt-4o-mini")
     a.client = _FakeOpenAIClient(capture)
     return a
+
+
+@pytest.mark.parametrize(
+    ("provider", "placeholder_key"),
+    [("vllm", "EMPTY"), ("lmstudio", "lm-studio")],
+)
+def test_local_provider_needs_no_api_key(monkeypatch, provider, placeholder_key):
+    client_config = {}
+    fake_client = object()
+
+    monkeypatch.setattr(
+        "refchecker.config.settings.resolve_api_key",
+        lambda _provider: None,
+    )
+
+    def _fake_openai(**kwargs):
+        client_config.update(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(openai, "OpenAI", _fake_openai)
+
+    assistant = ArticleAssistant(
+        provider=provider,
+        endpoint="http://localhost:1234",
+        model="qwen/qwen3.6-35b-a3b",
+    )
+
+    assert assistant.available
+    assert assistant.client is fake_client
+    assert client_config["api_key"] == placeholder_key
+    assert str(client_config["base_url"]).rstrip("/") == "http://localhost:1234/v1"
+
+
+def test_lmstudio_retries_reasoning_only_article_response(monkeypatch):
+    calls = []
+
+    class _ReasoningThenAnswerCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return _FakeOpenAIResponse(
+                    "",
+                    reasoning_content="thinking " * 100,
+                    finish_reason="length",
+                )
+            return _FakeOpenAIResponse("A displayable final answer.")
+
+    client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": _ReasoningThenAnswerCompletions()})()},
+    )()
+    monkeypatch.setattr(openai, "OpenAI", lambda **_kwargs: client)
+
+    assistant = ArticleAssistant(
+        provider="lmstudio",
+        endpoint="http://localhost:1234",
+        model="qwen/qwen3.6-35b-a3b",
+        reasoning_effort="low",
+        max_tokens=4000,
+    )
+    result = assistant.summarize("Grounding text.")
+
+    assert result["summary"] == "A displayable final answer."
+    assert calls[0]["extra_body"] == {"reasoning_effort": "low"}
+    assert calls[1]["extra_body"] == {"reasoning_effort": "none"}
+    assert calls[0]["max_tokens"] == 4000
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +200,50 @@ def test_source_badge_passthrough_for_abstract():
     assistant = _assistant_with_mock(capture)
     result = assistant.summarize("Short abstract only.", source="abstract")
     assert result["source"] == "abstract"
+
+
+@pytest.mark.skipif(not _HAS_MAIN, reason="backend.main needs full runtime deps")
+def test_article_assistant_accepts_extended_llm_config(monkeypatch):
+    """Chat config resolution stays compatible with all shared settings."""
+    import asyncio
+    import backend.article_chat as article_chat
+    import backend.main as main
+
+    async def _fake_resolve(**_kwargs):
+        return (
+            "vllm",
+            "qwen/qwen3.6-35b-a3b",
+            "dummy-key",
+            "http://localhost:8000/v1",
+            None,
+            2048,
+            32768,
+            120,
+        )
+
+    captured = {}
+
+    class _FakeAssistant:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(main, "_resolve_llm_config_for_request", _fake_resolve)
+    monkeypatch.setattr(article_chat, "ArticleAssistant", _FakeAssistant)
+
+    req = main._ArticleSummaryRequest(llm_config_id=1)
+    assistant = asyncio.run(main._resolve_article_assistant(req, user_id=1, check_id=42))
+
+    assert isinstance(assistant, _FakeAssistant)
+    assert captured == {
+        "provider": "vllm",
+        "api_key": "dummy-key",
+        "endpoint": "http://localhost:8000/v1",
+        "model": "qwen/qwen3.6-35b-a3b",
+        "check_id": 42,
+        "reasoning_effort": None,
+        "max_tokens": 2048,
+        "timeout_seconds": 120,
+    }
 
 
 # --------------------------------------------------------------------------- #
