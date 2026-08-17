@@ -27,7 +27,9 @@ const { historyState, checkState, styleState, mkStore } = vi.hoisted(() => {
   return {
     historyState: {
       selectedCheckId: 5,
+      selectedCheck: null,
       selectCheck: vi.fn().mockResolvedValue(undefined),
+      updateHistoryReference: vi.fn(),
       optimisticApplyCorrection: vi.fn(),
       optimisticRevertCorrection: vi.fn(),
       optimisticRemoveReference: vi.fn(),
@@ -35,6 +37,7 @@ const { historyState, checkState, styleState, mkStore } = vi.hoisted(() => {
     checkState: {
       statusFilter: [],
       references: [],
+      updateReference: vi.fn(),
       removeReference: vi.fn(),
       restoreReference: vi.fn(),
       applyCorrectionInStore: vi.fn(),
@@ -63,6 +66,10 @@ beforeEach(() => {
   addReferenceToCheck.mockReset()
   verifyReferenceInCheck.mockReset().mockResolvedValue({ data: {} })
   decideReferenceWarning.mockReset().mockResolvedValue({ data: {} })
+  checkState.references = []
+  checkState.updateReference.mockReset()
+  historyState.selectedCheck = null
+  historyState.updateHistoryReference.mockReset()
   alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
 })
 afterEach(() => { alertSpy.mockRestore() })
@@ -112,13 +119,55 @@ describe('CorrectionsView — speculative match confirmation', () => {
       error_details: 'Title and authors could not be found. Possibly this title and authors were meant.',
       requires_user_confirmation: true,
     }],
-    corrected_reference: { title: 'Possible intended title', authors: ['Same Author'] },
+    corrected_reference: { title: 'Possible intended title', authors: [{ name: 'Same Author' }] },
   }]
 
-  it('offers approve and dismiss actions instead of presenting a hard correction', () => {
+  it('shows the candidate and makes the replace-versus-retain choice explicit', () => {
     render(<CorrectionsView references={candidateRef} isCheckComplete={true} />)
 
-    expect(screen.getByRole('button', { name: 'Approve match' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
+    expect(document.body.textContent).toContain('Possible intended title')
+    expect(document.body.textContent).toContain('Original title')
+    expect(screen.getByRole('button', { name: 'Use matched paper' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Keep cited reference' })).toBeInTheDocument()
+  })
+
+  it('keeps the cited metadata when the possible match is rejected', async () => {
+    render(<CorrectionsView references={candidateRef} isCheckComplete={true} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Keep cited reference' }))
+
+    await waitFor(() => expect(decideReferenceWarning).toHaveBeenCalledWith(
+      5,
+      'id:candidate-1',
+      expect.objectContaining({ decision: 'dismissed' }),
+    ))
+    expect(verifyReferenceInCheck).not.toHaveBeenCalled()
+  })
+
+  it('does not accept a possible match through the bulk apply action', () => {
+    render(<CorrectionsView references={candidateRef} isCheckComplete={true} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply all visible' }))
+
+    expect(verifyReferenceInCheck).not.toHaveBeenCalled()
+  })
+
+  it('updates the clicked id rather than a neighbouring row with the same numeric index', async () => {
+    const ref = { ...candidateRef[0], id: 14, index: 15 }
+    checkState.references = [
+      { index: 14, title: 'Neighbouring reference' },
+      ref,
+    ]
+    decideReferenceWarning.mockResolvedValue({
+      data: { reference: { ...ref, status: 'unverified', warnings: [], match_decision: 'kept_cited' } },
+    })
+    render(<CorrectionsView references={[ref]} isCheckComplete={true} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Keep cited reference' }))
+
+    await waitFor(() => expect(checkState.updateReference).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ match_decision: 'kept_cited' }),
+    ))
   })
 })

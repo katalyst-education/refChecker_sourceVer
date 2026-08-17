@@ -701,13 +701,18 @@ function getCorrectedReferenceData(ref) {
   })()
 
   const corrected = {
-    title: ref.title,
-    authors: ref.authors,
-    year: displayReferenceValue(ref.year),
-    venue: displayReferenceValue(ref.venue),
+    // `apply_correction` merges corrected_reference into the stored citation.
+    // Start the preview from that same payload so accepting a speculative
+    // database match can never apply metadata that was hidden from the user.
+    title: ref.corrected_reference?.title || ref.title,
+    authors: ref.corrected_reference?.authors || ref.authors,
+    year: displayReferenceValue(ref.corrected_reference?.year || ref.year),
+    venue: displayReferenceValue(ref.corrected_reference?.venue || ref.venue),
     doi: _doiIssueValue
+      || ref.corrected_reference?.doi
       || ref.doi || (doiFromUrls ? doiFromUrls.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : null),
-    arxivId: ref.arxiv_id || (arxivFromUrls ? arxivFromUrls.replace(/^https?:\/\/arxiv\.org\/abs\//i, '') : null),
+    arxivId: ref.corrected_reference?.arxiv_id
+      || ref.arxiv_id || (arxivFromUrls ? arxivFromUrls.replace(/^https?:\/\/arxiv\.org\/abs\//i, '') : null),
     citedUrl: ref.cited_url || null,
     url: ref.authoritative_urls?.[0]?.url || ref.cited_url,
   }
@@ -780,6 +785,10 @@ function getCorrectedReferenceData(ref) {
   
   corrected.year = displayReferenceValue(corrected.year)
   corrected.venue = displayReferenceValue(corrected.venue)
+  // Database APIs commonly return authors as objects (`{name: ...}` or CSL
+  // `{given, family}`), while citation exporters require strings. Normalize at
+  // this shared boundary so every style renders the same candidate safely.
+  corrected.authors = normalizeAuthors(corrected.authors)
   return corrected
 }
 

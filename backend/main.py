@@ -7697,6 +7697,16 @@ async def decide_reference_warning(
 
     target["warnings"] = kept
     target["dismissed_warnings"] = dismissed
+    if body.warning_type == "possible_alternative":
+        # Persist the semantic outcome, not merely the absence of a warning.
+        # Clearing the active correction prevents a rejected candidate from
+        # returning as a generic "Apply fix" after refresh; retain it only in
+        # the audit field for diagnostics.
+        target["match_decision"] = "kept_cited"
+        candidate = target.get("corrected_reference")
+        if candidate:
+            target["dismissed_corrected_reference"] = candidate
+        target["corrected_reference"] = None
     if target.get("errors"):
         target["status"] = "error"
     elif kept:

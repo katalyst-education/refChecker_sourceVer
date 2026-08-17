@@ -57,7 +57,16 @@ function classifyReference(ref, isCheckComplete) {
 
 /** Reference shell with cited values (no corrections) for AS CITED rendering. */
 function citedShell(ref) {
-  return { ...ref, errors: [], warnings: [], suggestions: [], authoritative_urls: [] }
+  return {
+    ...ref,
+    errors: [],
+    warnings: [],
+    suggestions: [],
+    authoritative_urls: [],
+    // The left side must remain the original citation. The right side is the
+    // only side allowed to overlay the candidate correction payload.
+    corrected_reference: null,
+  }
 }
 
 function DiffSide({ ops, side, fontFamily }) {
@@ -76,7 +85,7 @@ function DiffSide({ ops, side, fontFamily }) {
               backgroundColor: 'rgba(239,68,68,0.12)',
               padding: '0 1px',
               borderRadius: 2,
-            }}>{op.word}</span>
+            }}>{op.word + op.sep}</span>
           )
         }
         if (side === 'corrected' && op.type === 'add') {
@@ -87,7 +96,7 @@ function DiffSide({ ops, side, fontFamily }) {
               backgroundColor: 'rgba(34,197,94,0.12)',
               padding: '0 1px',
               borderRadius: 2,
-            }}>{op.word}</span>
+            }}>{op.word + op.sep}</span>
           )
         }
         if ((side === 'cited' && op.type === 'add') || (side === 'corrected' && op.type === 'del')) {
@@ -136,6 +145,30 @@ const toApiRefId = (ref, i) => {
   if (ref?.id != null && String(ref.id) !== '') return `id:${String(ref.id)}`
   if (ref?.index != null && String(ref.index) !== '') return `index:${String(ref.index)}`
   return `pos:${String(i)}`
+}
+
+// Locate the same logical reference without ever comparing one row's `id`
+// against another row's `index`. Numeric ids and citation indices frequently
+// overlap (for example id=14 on citation index=15), and coalescing the two
+// identities caused a warning decision for one row to overwrite its neighbour.
+const findReferencePosition = (list, target, fallbackPos = -1) => {
+  const refs = Array.isArray(list) ? list : []
+  if (target?.id != null && String(target.id) !== '') {
+    const byId = refs.findIndex(item => item?.id != null && String(item.id) === String(target.id))
+    if (byId >= 0) return byId
+  }
+  if (target?.index != null && String(target.index) !== '') {
+    const byIndex = refs.findIndex(item => item?.index != null && String(item.index) === String(target.index))
+    if (byIndex >= 0) return byIndex
+  }
+  const title = String(target?.title || '').trim().toLowerCase()
+  if (title) {
+    const hits = refs
+      .map((item, pos) => ({ item, pos }))
+      .filter(({ item }) => String(item?.title || '').trim().toLowerCase() === title)
+    if (hits.length === 1) return hits[0].pos
+  }
+  return fallbackPos >= 0 && fallbackPos < refs.length ? fallbackPos : -1
 }
 
 export default function CorrectionsView({ references, isCheckComplete = false }) {
@@ -431,15 +464,11 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         const updated = response?.data?.reference
         if (updated) {
           const currentRefs = useCheckStore.getState().references || []
-          const currentPos = currentRefs.findIndex((item, pos) => (
-            String(item?.id ?? item?.index ?? pos) === String(ref?.id ?? ref?.index ?? i)
-          ))
+          const currentPos = findReferencePosition(currentRefs, ref)
           if (currentPos >= 0) useCheckStore.getState().updateReference(currentPos, updated)
 
           const historyRefs = useHistoryStore.getState().selectedCheck?.results || []
-          const historyPos = historyRefs.findIndex((item, pos) => (
-            String(item?.id ?? item?.index ?? pos) === String(ref?.id ?? ref?.index ?? i)
-          ))
+          const historyPos = findReferencePosition(historyRefs, ref)
           if (historyPos >= 0) {
             useHistoryStore.getState().updateHistoryReference(selectedCheckId, historyPos, updated)
           }
@@ -461,6 +490,9 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     filtered.forEach(({ ref }, i) => {
       const k = keyFor(ref, i)
       if (decisions[k]?.status === 'edited') return
+      // A possible alternative may be a completely different paper. Require
+      // an explicit per-row decision; never accept it via the bulk action.
+      if ((ref.warnings || []).some(w => w.requires_user_confirmation)) return
       targets.push({ ref, i, k })
     })
     // Snapshot every targeted ref BEFORE marking decisions, so Restore
@@ -892,6 +924,9 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         {filtered.map(({ ref, tags }, i) => {
           const key = keyFor(ref, i)
           const decision = decisions[key]
+          const isConfirmation = (ref.warnings || []).some(w => w.requires_user_confirmation)
+          const keptCited = ref.match_decision === 'kept_cited'
+            || (decision?.status === 'rejected' && isConfirmation)
           const correctedStr = renderCorrected(ref, i)
           const citedStr = renderCited(ref, i)
           const ops = showDiff && decision?.status !== 'edited' ? wordDiff(citedStr, correctedStr) : null
@@ -939,25 +974,33 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                   </div>
                 </div>
                 <div className="flex items-center gap-1 flex-wrap">
-                  {(() => {
-                    const isConfirmation = (ref.warnings || []).some(w => w.requires_user_confirmation)
-                    return <>
+                  {keptCited ? (
+                    <span className="px-2 py-0.5 rounded text-xs" style={{
+                      backgroundColor: 'var(--color-text-muted, #94a3b8)',
+                      color: 'white',
+                    }}>Kept as cited</span>
+                  ) : (<>
                   <button onClick={() => applyAndReverify(ref, i)}
                     className="px-2 py-0.5 rounded text-xs"
                     style={{ backgroundColor: decision?.status === 'applied' ? 'var(--color-success, #22c55e)' : 'var(--color-bg-primary)',
                              color: decision?.status === 'applied' ? 'white' : 'var(--color-text-primary)',
                              border: '1px solid var(--color-border)' }}
                     type="button"
-                  >{isConfirmation ? 'Approve match' : 'Apply fix'}</button>
+                    title={isConfirmation
+                      ? 'Replace the cited metadata with the matched paper shown under Suggested correction.'
+                      : 'Apply the metadata shown under Suggested correction.'}
+                  >{isConfirmation ? 'Use matched paper' : 'Apply fix'}</button>
                   <button onClick={() => rejectCorrection(ref, i, key)}
                     className="px-2 py-0.5 rounded text-xs"
                     style={{ backgroundColor: decision?.status === 'rejected' ? 'var(--color-text-muted, #94a3b8)' : 'var(--color-bg-primary)',
                              color: decision?.status === 'rejected' ? 'white' : 'var(--color-text-primary)',
                              border: '1px solid var(--color-border)' }}
                     type="button"
-                  >{isConfirmation ? 'Dismiss' : "Don't apply"}</button>
-                    </>
-                  })()}
+                    title={isConfirmation
+                      ? 'Keep the reference exactly as cited and reject this possible match.'
+                      : 'Keep the reference as cited and do not apply this correction.'}
+                  >{isConfirmation ? 'Keep cited reference' : "Don't apply"}</button>
+                  </>)}
                   <button onClick={() => startEditing(key, correctedStr)}
                     className="px-2 py-0.5 rounded text-xs"
                     style={{ backgroundColor: editingKey === key ? 'var(--color-accent, #3b82f6)' : 'var(--color-bg-primary)',
@@ -1038,10 +1081,14 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                 </div>
                 <div className="p-3" style={{ borderLeft: '1px solid var(--color-border)', minWidth: 0 }}>
                   <div className="text-[10px] uppercase tracking-wider mb-1 flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
-                    Suggested correction
+                    {keptCited ? 'Outcome' : 'Suggested correction'}
                     {decision?.status === 'edited' && <span style={{ color: 'var(--color-accent, #3b82f6)' }}>(edited)</span>}
                   </div>
-                  {editingKey === key ? (
+                    {keptCited ? (
+                      <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                        Kept exactly as cited. The possible database match was rejected.
+                      </div>
+                    ) : editingKey === key ? (
                     <div className="space-y-2">
                       <textarea
                         value={editBuffer}

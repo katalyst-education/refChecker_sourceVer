@@ -43,7 +43,24 @@ def _sanitize_loaded_reference_results(results: Any) -> Any:
             "DOI": ref.get("DOI"),
             "verified_doi": ref.get("verified_doi"),
         }
-        cleaned.append(suppress_redundant_arxiv_suggestions(ref, cited))
+        normalized = suppress_redundant_arxiv_suggestions(ref, cited)
+        # Backfill the explicit state for decisions stored before
+        # `match_decision` existed. Those rows already recorded the rejected
+        # confirmation warning, but still carried an active correction and
+        # therefore reappeared as a generic "Apply fix" after refresh.
+        dismissed_possible_match = any(
+            (warning.get("error_type") or warning.get("warning_type")) == "possible_alternative"
+            and warning.get("user_decision") == "dismissed"
+            for warning in (normalized.get("dismissed_warnings") or [])
+            if isinstance(warning, dict)
+        )
+        if dismissed_possible_match:
+            normalized["match_decision"] = "kept_cited"
+            candidate = normalized.get("corrected_reference")
+            if candidate and not normalized.get("dismissed_corrected_reference"):
+                normalized["dismissed_corrected_reference"] = candidate
+            normalized["corrected_reference"] = None
+        cleaned.append(normalized)
     return cleaned
 
 

@@ -202,6 +202,30 @@ describe('formatters', () => {
   })
 
   describe('exportReferenceAsBibtex — corrected values', () => {
+    it('previews the same matched candidate that apply_correction will store', () => {
+      const ref = {
+        title: 'Original cited title',
+        authors: ['Original Author'],
+        year: 2007,
+        venue: 'Original venue',
+        warnings: [{ error_type: 'possible_alternative', requires_user_confirmation: true }],
+        corrected_reference: {
+          title: 'Possible intended title',
+          authors: [{ name: 'Candidate Author' }],
+          year: 2009,
+          venue: 'Candidate venue',
+        },
+      }
+
+      const bibtex = exportReferenceAsBibtex(ref, 0)
+
+      expect(bibtex).toContain('title = {Possible intended title}')
+      expect(bibtex).toContain('author = {Candidate Author}')
+      expect(bibtex).toContain('year = {2009}')
+      expect(bibtex).toContain('journal = {Candidate venue}')
+      expect(bibtex).not.toContain('Original cited title')
+    })
+
     it('includes year + venue + DOI named by errors/warnings (no authoritative_urls)', () => {
       // Regression for #53 (R06/R07): warnings name the missing year/venue via
       // typed correction fields, and a doi-type error names the verified DOI.
