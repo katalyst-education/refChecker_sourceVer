@@ -15,6 +15,8 @@ import pytest
 
 from refchecker.utils.reference_fixups import (
     fixup_reference_fields,
+    is_suspicious_venue,
+    recover_acronym_year_venue,
     strip_citation_tail_from_venue,
 )
 
@@ -63,6 +65,51 @@ class TestSharedImplementation:
         ref = _ref(venue='"A title," in ab, 2024')
         strip_citation_tail_from_venue(ref)
         assert ref['venue'] == ''
+
+    @pytest.mark.parametrize('venue', [
+        r'08\)',
+        "'24)",
+        '7]',
+        '---',
+    ])
+    def test_impossible_venue_fragments_are_detected_and_blanked(self, venue):
+        assert is_suspicious_venue(venue)
+        ref = _ref(venue=venue)
+        fixup_reference_fields(ref)
+        assert ref['venue'] == ''
+
+    @pytest.mark.parametrize(('venue', 'expected'), [
+        ("ICML'24", 'ICML'),
+        ('ACL\u201923', 'ACL'),
+        (r'LREC\`08', 'LREC'),
+        ('(NeurIPS`9)', 'NeurIPS'),
+    ])
+    def test_generic_acronym_year_venue_is_normalized(self, venue, expected):
+        ref = _ref(venue=venue)
+        fixup_reference_fields(ref)
+        assert ref['venue'] == expected
+
+    def test_acronym_year_is_recovered_from_raw_text(self):
+        ref = _ref(
+            venue=r'08\)',
+            raw_text=r"Councill et al. ParsCit. In (LREC\`08), 2008.",
+        )
+        fixup_reference_fields(ref)
+        assert ref['venue'] == 'LREC'
+
+    def test_full_parenthesized_venue_wins_over_damaged_prefix(self):
+        ref = _ref(venue=r'08\)(International Conference on Language Resources and Evaluation)')
+        fixup_reference_fields(ref)
+        assert ref['venue'] == 'International Conference on Language Resources and Evaluation'
+
+    @pytest.mark.parametrize('venue', [
+        '3DV',
+        '2024 Conference on Empirical Methods in Natural Language Processing',
+        'ICML 2024',
+    ])
+    def test_numbered_legitimate_venues_are_not_suspicious(self, venue):
+        assert not is_suspicious_venue(venue)
+        assert recover_acronym_year_venue(venue) == ''
 
 
 class TestPathParity:

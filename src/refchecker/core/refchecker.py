@@ -5714,6 +5714,11 @@ class ArxivReferenceChecker:
             # Use LLM-specific structured reference creation
             structured_ref = self._create_structured_llm_references(ref_text)
             if structured_ref:
+                # Validate and repair venue metadata at the extraction boundary,
+                # before a corrupt field can reach any database checker. The
+                # shared verification-entry fixup runs again later by design;
+                # fixup_reference_fields is idempotent.
+                fixup_reference_fields(structured_ref)
                 processed_refs.append(structured_ref)
         
         return processed_refs

@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 from refchecker.core.refchecker import ArxivReferenceChecker
 
@@ -49,6 +50,38 @@ def test_standard_verification_falls_back_to_academic_checker_when_not_webpage()
     result = checker.verify_reference_standard(None, reference)
 
     assert result == (None, "https://arxiv.org/abs/1706.03762", {"title": "Attention Is All You Need"})
+    checker.non_arxiv_checker.verify_reference.assert_called_once_with(reference)
+
+
+def test_arxiv_url_is_dispatched_to_scholarly_checker_not_generic_webpage():
+    checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+    checker.verify_github_reference = MagicMock(return_value=None)
+    checker.non_arxiv_checker = MagicMock()
+    verified = {
+        "title": "Scaling author name disambiguation with CNF blocking",
+        "authors": ["Kunho Kim", "Acar Sefid", "C. Lee Giles"],
+        "year": 2017,
+        "_matched_database": "ArXiv",
+    }
+    checker.non_arxiv_checker.verify_reference.return_value = (
+        verified,
+        [],
+        "https://arxiv.org/abs/1709.09657",
+    )
+    reference = {
+        "title": "Scaling author name disambiguation with cnf blocking",
+        "authors": ["K Kim", "A Sefid", "C L Giles"],
+        "year": 2017,
+        "url": "https://arxiv.org/abs/arXiv:1709.09657",
+    }
+
+    with patch(
+        "refchecker.checkers.webpage_checker.WebPageChecker.verify_reference"
+    ) as generic_web_verify:
+        result = checker.verify_reference_standard(None, reference)
+
+    assert result == (None, "https://arxiv.org/abs/1709.09657", verified)
+    generic_web_verify.assert_not_called()
     checker.non_arxiv_checker.verify_reference.assert_called_once_with(reference)
 
 

@@ -88,6 +88,26 @@ class TestCitationStringAsTitle:
         assert 'gpt-4' in result['title'].lower()
 
 
+class TestLlmVenueValidationBoundary:
+    """Corrupt venue fields are repaired before leaving LLM extraction."""
+
+    def test_damaged_prefix_recovers_full_parenthesized_venue(self, checker):
+        refs = checker._process_llm_extracted_references([
+            r"I. Councill*C. L. Giles*M.-Y. Kan#ParsCit: an open-source CRF reference string parsing package#08\)(International Conference on Language Resources and Evaluation)#2008#"
+        ])
+
+        assert len(refs) == 1
+        assert refs[0]['venue'] == 'International Conference on Language Resources and Evaluation'
+
+    def test_unrecoverable_year_fragment_is_blanked(self, checker):
+        refs = checker._process_llm_extracted_references([
+            r"A. Author#A sufficiently long paper title#08\)#2008#"
+        ])
+
+        assert len(refs) == 1
+        assert refs[0]['venue'] == ''
+
+
 class TestExplicitUrlPreservation:
     """Test that explicit structured URLs survive arXiv-like venue text."""
 

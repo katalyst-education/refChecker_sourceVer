@@ -382,9 +382,9 @@ export function ReferenceRowActions({
         disabled={disableFor(reverifyBusy)}
         className="px-2.5 py-1 rounded-md font-medium"
         style={styleFor(reverifyBusy)}
-        title="Re-verify this reference now"
+        title="Extract this reference again from the document, then verify it"
       >
-        {reverifyBusy ? '…' : 'Re-verify'}
+        {reverifyBusy ? '…' : 'Re-extract & verify'}
       </button>
       <button
         type="button"
@@ -392,9 +392,9 @@ export function ReferenceRowActions({
         disabled={disableFor(reverifyBusy)}
         className="px-2.5 py-1 rounded-md font-medium"
         style={styleFor(reverifyBusy)}
-        title="Force a fresh search across all configured databases"
+        title="Keep the saved citation fields and search every configured database"
       >
-        {reverifyBusy ? '…' : 'Search all DBs again'}
+        {reverifyBusy ? '…' : 'Search all DBs'}
       </button>
       <button
         type="button"

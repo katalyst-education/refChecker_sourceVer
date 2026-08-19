@@ -3222,19 +3222,30 @@ async def get_check_retractions(check_id: int, current_user: UserInfo = Depends(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _extract_paper_text_for_check(check_id: int, check: Dict[str, Any]) -> str:
+async def _extract_paper_text_for_check(
+    check_id: int,
+    check: Dict[str, Any],
+    *,
+    fresh_from_document: bool = False,
+) -> str:
     """Best-effort extracted body text for a check (cache-first), for analyses
-    that need the full paper body. Mirrors get_paper_text's retrieval."""
-    try:
-        cache_dir = await _get_configured_cache_dir()
-        if cache_dir:
-            p = os.path.join(str(cache_dir), "paper_text", f"{check_id}.txt")
-            if os.path.exists(p) and os.path.getsize(p) > 0:
-                cached = await asyncio.to_thread(_read_cached_paper_text, p)
-                if cached and cached.strip():
-                    return cached
-    except Exception as _e:
-        logger.debug("citation-integrity cache read skipped: %s", _e)
+    that need the full paper body. Mirrors get_paper_text's retrieval.
+
+    ``fresh_from_document`` deliberately bypasses the extracted-text cache. It
+    is used by the per-reference Re-verify action, where the user's intent is
+    to parse the source document again rather than reuse a prior extraction.
+    """
+    if not fresh_from_document:
+        try:
+            cache_dir = await _get_configured_cache_dir()
+            if cache_dir:
+                p = os.path.join(str(cache_dir), "paper_text", f"{check_id}.txt")
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    cached = await asyncio.to_thread(_read_cached_paper_text, p)
+                    if cached and cached.strip():
+                        return cached
+        except Exception as _e:
+            logger.debug("citation-integrity cache read skipped: %s", _e)
     source_type = check.get("source_type", "") or ""
     paper_source = check.get("paper_source", "") or ""
     from backend.refchecker_wrapper import _extract_pdf_text_cli_style
@@ -3248,6 +3259,20 @@ async def _extract_paper_text_for_check(check_id: int, check: Dict[str, Any]) ->
                     text = fh.read()
             except Exception:
                 text = ""
+    if not (text or "").strip() and source_type == "text" and paper_source:
+        if os.path.exists(paper_source):
+            if paper_source.lower().endswith(".pdf"):
+                text = await asyncio.to_thread(_extract_pdf_text_cli_style, paper_source, None)
+            else:
+                try:
+                    with open(paper_source, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                except Exception:
+                    text = ""
+        elif len(paper_source) > 200:
+            # Short text sources are paths/identifiers; long values are the
+            # originally pasted document body stored directly in the record.
+            text = paper_source
     if not (text or "").strip() and paper_source:
         try:
             from refchecker.utils.cache_utils import get_cached_artifact_path
@@ -8084,11 +8109,14 @@ async def verify_single_reference(
     body: Optional[_VerifySingleRequest] = None,
     current_user: UserInfo = Depends(require_user),
 ):
-    """Run the verifier on a single reference and persist the result.
+    """Re-extract and verify one reference, then persist the result.
 
-    Lets the user re-verify a manually-added or edited reference without
-    rerunning the whole check. We instantiate EnhancedHybridReferenceChecker
-    directly (cheap — no LLM init) and replace the stored ref in-place.
+    A normal Re-verify starts by extracting the reference again from the
+    original document, so its cited metadata is not limited to an earlier,
+    potentially imperfect extraction. It then uses the same shared verifier as
+    the CLI and bulk paths. Explicit correction / restore requests intentionally
+    skip document re-extraction: those actions must verify the fields the user
+    has just chosen.
 
     When called with ``apply_correction: true``, the stored ref's metadata
     is first overwritten with its ``corrected_reference`` (the verifier's
@@ -8148,10 +8176,103 @@ async def verify_single_reference(
 
     force_all_databases = bool(body and body.force_all_databases)
 
+    # Re-extract the selected entry from the source document for the ordinary
+    # Re-verify button. Do this before looking in the identity cache: otherwise
+    # a stale cached verification could mask newly extracted cited metadata.
+    reextract_from_document = not force_all_databases and not (
+        body and (body.apply_correction or bool(body.overrides))
+    )
+    if reextract_from_document:
+        check = await db.get_check_by_id(check_id, user_id=user_id)
+        if not check:
+            raise HTTPException(status_code=404, detail="Check not found")
+
+        paper_text = await _extract_paper_text_for_check(
+            check_id, check, fresh_from_document=True
+        )
+        if not paper_text.strip():
+            raise HTTPException(
+                status_code=409,
+                detail="The original document is unavailable, so this reference cannot be extracted again.",
+            )
+
+        try:
+            from backend.refchecker_wrapper import ProgressRefChecker
+
+            extraction_mode = (
+                await db.get_setting("extraction_mode")
+                or os.environ.get("REFCHECKER_EXTRACTION_MODE")
+                or "cascade"
+            )
+            (
+                llm_provider,
+                llm_model,
+                api_key,
+                endpoint,
+                reasoning_effort,
+                max_tokens,
+                context_length,
+                timeout_seconds,
+            ) = await _resolve_llm_config_for_request(
+                user_id=user_id,
+                use_llm=bool(check.get("llm_provider")),
+                llm_config_id=None,
+                llm_provider=check.get("llm_provider"),
+                llm_model=check.get("llm_model"),
+                api_key=None,
+            )
+            extractor = ProgressRefChecker(
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                api_key=api_key,
+                endpoint=endpoint,
+                reasoning_effort=reasoning_effort,
+                max_tokens=max_tokens,
+                context_length=context_length,
+                timeout_seconds=timeout_seconds,
+                use_llm=bool(llm_provider),
+                check_id=check_id,
+                extraction_mode=extraction_mode,
+            )
+            extracted_references = await extractor._extract_references(paper_text)
+        except Exception as exc:
+            logger.exception("Single-reference document re-extraction failed")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not extract references from the original document: {exc}",
+            )
+
+        # Reference order is the document's citation order across all supported
+        # extraction paths. Keep the saved row identity, but replace only the
+        # cited fields with the newly parsed entry at the same position.
+        if idx >= len(extracted_references):
+            raise HTTPException(
+                status_code=409,
+                detail="This reference was not found when the document was extracted again.",
+            )
+        fresh_reference = extracted_references[idx]
+        for field in (
+            "title", "authors", "year", "venue", "journal", "doi",
+            "arxiv_id", "url", "cited_url", "raw", "raw_text", "type",
+        ):
+            if field in fresh_reference:
+                target[field] = fresh_reference[field]
+            else:
+                target.pop(field, None)
+        # These describe a previous verification, correction, or document
+        # context and must not survive a new source extraction.
+        for field in (
+            "corrected_reference", "verified_title", "verified_authors",
+            "verified_year", "verified_venue", "verified_doi",
+            "verified_arxiv_id", "verified_url", "authoritative_urls",
+            "matched_db", "enrichment", "citation_context", "errors", "warnings",
+        ):
+            target.pop(field, None)
+
     # Try the global identity cache first unless caller explicitly forced a
     # fresh all-databases re-search.
     cached = None
-    if not force_all_databases:
+    if not force_all_databases and not reextract_from_document:
         try:
             cached = await db.lookup_verified_reference(target)
         except Exception:

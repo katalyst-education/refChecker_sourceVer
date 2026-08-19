@@ -93,14 +93,14 @@ class WebPageChecker:
         return any(indicator in url.lower() for indicator in doc_indicators) or self._is_likely_webpage(url)
 
     def is_explicit_web_reference(self, reference: Dict[str, Any]) -> bool:
-        """Whether a citation explicitly identifies its URL as a web source.
+        """Whether a citation URL should use generic web-page verification.
 
         Any URL printed in a reference is evidence supplied by the author.
-        Fetch it before a database title search, regardless of whether its
-        host or venue looks like conventional documentation.  The fetched
-        page must still identify the cited title before it can verify the
-        reference; otherwise the caller may continue to database search and
-        present a possible match as a suggestion.
+        Scholarly source URLs are excluded here because the shared hybrid
+        checker has provider-specific metadata readers for them. Treating an
+        arXiv paper (or a publisher landing page) as a generic web page loses
+        its author metadata and incorrectly compares the cited authors with
+        the hosting organization.
         """
         url = self._reference_url(reference)
         if not url:
@@ -118,7 +118,61 @@ class WebPageChecker:
         if 'api.semanticscholar.org/corpusid:' in url_lower:
             return False
         non_web_extensions = ('.doc', '.docx', '.zip', '.tar.gz', '.exe', '.dmg')
-        return not any(url_lower.endswith(extension) for extension in non_web_extensions)
+        if any(url_lower.endswith(extension) for extension in non_web_extensions):
+            return False
+        return not self.is_scholarly_source_url(url)
+
+    def is_scholarly_source_url(self, url: str) -> bool:
+        """Return whether ``url`` belongs to a scholarly metadata provider.
+
+        These hosts must reach the academic checker pipeline first. The list
+        intentionally covers identifier services, scholarly indexes,
+        repositories, and publisher landing pages that expose publication
+        metadata rather than ordinary organizational authorship.
+        """
+        try:
+            hostname = (urlparse(url).hostname or '').lower().rstrip('.')
+        except (TypeError, ValueError):
+            return False
+        if not hostname:
+            return False
+
+        scholarly_domains = (
+            'arxiv.org',
+            'doi.org',
+            'openreview.net',
+            'semanticscholar.org',
+            'aclanthology.org',
+            'openalex.org',
+            'dblp.org',
+            'crossref.org',
+            'pubmed.ncbi.nlm.nih.gov',
+            'ncbi.nlm.nih.gov',
+            'researchgate.net',
+            'academia.edu',
+            'ssrn.com',
+            'jstor.org',
+            'ieee.org',
+            'acm.org',
+            'springer.com',
+            'springerlink.com',
+            'sciencedirect.com',
+            'elsevier.com',
+            'wiley.com',
+            'nature.com',
+            'science.org',
+            'cell.com',
+            'thelancet.com',
+            'plos.org',
+            'sagepub.com',
+            'tandfonline.com',
+            'oup.com',
+            'cambridge.org',
+        )
+        return any(
+            hostname == domain or hostname.endswith(f'.{domain}')
+            for domain in scholarly_domains
+        )
     
     def _is_likely_webpage(self, url: str) -> bool:
         """Check if URL pattern suggests it's a webpage"""

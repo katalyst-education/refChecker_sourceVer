@@ -43,14 +43,31 @@ def test_any_cited_web_url_is_an_explicit_web_reference():
     })
 
 
-def test_academic_source_url_is_checked_before_database_search():
+def test_academic_source_url_is_reserved_for_scholarly_checker():
     checker = WebPageChecker()
 
-    assert checker.is_explicit_web_reference({
+    assert not checker.is_explicit_web_reference({
         "title": "Some paper",
         "venue": "arxiv.org",
         "url": "https://arxiv.org/abs/2402.07314",
     })
+
+
+def test_scholarly_hosts_are_not_treated_as_organization_authored_pages():
+    checker = WebPageChecker()
+
+    urls = [
+        "https://arxiv.org/abs/arXiv:1709.09657",
+        "https://doi.org/10.1145/1234.5678",
+        "https://dl.acm.org/doi/10.1145/1234.5678",
+        "https://ieeexplore.ieee.org/document/1234567",
+        "https://link.springer.com/article/10.1007/example",
+        "https://pubmed.ncbi.nlm.nih.gov/12345678/",
+    ]
+
+    for url in urls:
+        assert checker.is_scholarly_source_url(url)
+        assert not checker.is_explicit_web_reference({"title": "Paper", "url": url})
 
 
 def test_unrecognised_cited_site_is_fetched_before_title_search(monkeypatch):
