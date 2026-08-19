@@ -19,7 +19,11 @@ import { useStyleStore } from '../../stores/useStyleStore'
 import useReferenceActions from '../../hooks/useReferenceActions'
 import { wordDiff } from '../../utils/wordDiff'
 import { useCheckStore } from '../../stores/useCheckStore'
-import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
+import {
+  citedReferenceShell,
+  classifyCorrectionReference,
+  hasActionableCorrection,
+} from '../../utils/correctionUtils'
 
 /**
  * Mirrors the chip ids exposed by the Summary panel above the tab.
@@ -32,41 +36,6 @@ const CATEGORY_META = {
   unverified:    { label: 'Unverified',    color: 'var(--color-text-secondary)' },
   hallucination: { label: 'Hallucinated',  color: 'var(--color-hallucination, #a855f7)' },
   suggestion:    { label: 'Suggestions',   color: 'var(--color-suggestion, #3b82f6)' },
-}
-
-function classifyReference(ref, isCheckComplete) {
-  // Use the same single-category resolver the References list and the
-  // Summary chip counts use, so a ref with both an error and a warning
-  // is counted as an error in both places — not as both. The Set return
-  // type stays for backward compatibility with the filter/badge code.
-  const tags = new Set()
-  const status = getEffectiveReferenceStatus(ref, isCheckComplete)
-  if (status === 'error') tags.add('error')
-  else if (status === 'warning') tags.add('warning')
-  else if (status === 'suggestion') tags.add('suggestion')
-  else if (status === 'unverified') tags.add('unverified')
-  else if (status === 'hallucinated' || status === 'hallucination') tags.add('hallucination')
-  // Hallucination is an extra signal that can co-exist with errors when the
-  // verifier confirms it — keep both tags so the filter can find it via
-  // either chip.
-  if (ref.hallucination_assessment?.verdict?.toUpperCase?.() === 'LIKELY') {
-    tags.add('hallucination')
-  }
-  return tags
-}
-
-/** Reference shell with cited values (no corrections) for AS CITED rendering. */
-function citedShell(ref) {
-  return {
-    ...ref,
-    errors: [],
-    warnings: [],
-    suggestions: [],
-    authoritative_urls: [],
-    // The left side must remain the original citation. The right side is the
-    // only side allowed to overlay the candidate correction payload.
-    corrected_reference: null,
-  }
 }
 
 function DiffSide({ ops, side, fontFamily }) {
@@ -200,12 +169,15 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     deleteCustomCitationStyle(id)
     refreshCustom()
   }
+  const effectiveOptions = useMemo(() => {
+    const styleDefaults = CITATION_STYLE_DEFAULTS[format] || {}
+    return {
+      max_authors: styleOptions.max_authors ?? styleDefaults.max_authors,
+      et_al_threshold: styleOptions.et_al_threshold ?? styleDefaults.et_al_threshold,
+      include_url: styleOptions.include_url ?? styleDefaults.include_url,
+    }
+  }, [format, styleOptions])
   const styleDefaults = CITATION_STYLE_DEFAULTS[format] || {}
-  const effectiveOptions = {
-    max_authors: styleOptions.max_authors ?? styleDefaults.max_authors,
-    et_al_threshold: styleOptions.et_al_threshold ?? styleDefaults.et_al_threshold,
-    include_url: styleOptions.include_url ?? styleDefaults.include_url,
-  }
 
   // Per-reference decision state: keyed by ref id (or fallback "ref-N").
   //   { status: 'applied' | 'rejected' | 'edited', text?: string }
@@ -277,8 +249,16 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     return (styleFilteredRefs || [])
       .map((ref, i) => {
         const k = ref.id || `ref-${ref.index ?? i}`
-        return { ref, tags: classifyReference(ref, isCheckComplete), _decisionKey: k }
+        return {
+          ref,
+          tags: classifyCorrectionReference(ref, isCheckComplete),
+          _decisionKey: k,
+          _hasCorrection: hasActionableCorrection(ref, format, i, effectiveOptions),
+        }
       })
+      // Status issues remain available in References and Summary counts. The
+      // Corrections tab only shows rows where the rendered suggestion actually
+      // differs from the cited reference; otherwise Apply fix would be a no-op.
       // Keep the row visible if EITHER the ref still has flagged tags OR
       // the user has already recorded a decision (applied / edited /
       // rejected). Otherwise applying a fix made the row vanish — the
@@ -286,13 +266,15 @@ export default function CorrectionsView({ references, isCheckComplete = false })
       // that the fix landed was the health badge moving. Surfacing
       // accepted rows lets the user reset them via the per-row "Don't
       // apply" / "Reset decisions" buttons or the new "↺ Restore" button.
-      .filter(({ tags, _decisionKey }) => tags.size > 0 || !!decisions[_decisionKey])
+      .filter(({ tags, _decisionKey, _hasCorrection }) => (
+        (tags.size > 0 && _hasCorrection) || !!decisions[_decisionKey]
+      ))
       .sort((a, b) => {
         const ai = typeof a.ref?.index === 'number' ? a.ref.index : 999999
         const bi = typeof b.ref?.index === 'number' ? b.ref.index : 999999
         return ai - bi
       })
-  }, [styleFilteredRefs, isCheckComplete, decisions])
+  }, [styleFilteredRefs, isCheckComplete, decisions, format, effectiveOptions])
 
   const filtered = useMemo(() => {
     if (!summaryActive) return categorized
@@ -311,7 +293,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     try { return exportReferenceAsStyle(ref, format, i, effectiveOptions) } catch { return '(could not render)' }
   }
   const renderCited = (ref, i) => {
-    try { return exportReferenceAsStyle(citedShell(ref), format, i, effectiveOptions) } catch { return '' }
+    try { return exportReferenceAsStyle(citedReferenceShell(ref), format, i, effectiveOptions) } catch { return '' }
   }
 
   const setDecision = (k, payload) => {
@@ -410,7 +392,6 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     }
     setDecision(k, null)
     if (!selectedCheckId) return
-    const refIdStr = String(ref.id ?? ref.index ?? i)
     const apiRefId = toApiRefId(ref, i)
     try {
       // Persist the revert server-side; no force-reload (it would wipe the
@@ -599,7 +580,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         backgroundColor: 'var(--color-bg-secondary)',
         color: 'var(--color-text-secondary)',
       }}>
-        No corrections needed — every flagged reference has been verified clean.
+        No actionable corrections.
       </div>
     )
   }

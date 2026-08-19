@@ -26,7 +26,8 @@ import { useHistoryStore } from '../../stores/useHistoryStore'
 import { useStyleStore } from '../../stores/useStyleStore'
 import { useShallow } from 'zustand/react/shallow'
 import { applyStatusFilter } from '../../utils/referenceStatus'
-import { filterIssuesForStyle } from '../../utils/formatters'
+import { CITATION_STYLE_DEFAULTS, filterIssuesForStyle } from '../../utils/formatters'
+import { classifyCorrectionReference, hasActionableCorrection } from '../../utils/correctionUtils'
 
 /**
  * Segmented toggle for the panel-level view switch (Current check / Seen
@@ -142,7 +143,16 @@ export default function MainPanel() {
   const { selectedCheck, selectedCheckId, isLoadingDetail, selectedBatchId, backToBatch } = useHistoryStore()
   // Subscribe so the tab badges re-evaluate the style-aware corrections
   // count whenever the user flips the citation style dropdown.
-  const activeStyle = useStyleStore(s => s.format)
+  const { activeStyle, activeStyleOptions } = useStyleStore(useShallow(s => ({
+    activeStyle: s.format,
+    activeStyleOptions: s.styleOptions,
+  })))
+  const activeStyleDefaults = CITATION_STYLE_DEFAULTS[activeStyle] || {}
+  const activeEffectiveOptions = {
+    max_authors: activeStyleOptions.max_authors ?? activeStyleDefaults.max_authors,
+    et_al_threshold: activeStyleOptions.et_al_threshold ?? activeStyleDefaults.et_al_threshold,
+    include_url: activeStyleOptions.include_url ?? activeStyleDefaults.include_url,
+  }
 
   // Track scroll position to show/hide scroll-to-top button
   useEffect(() => {
@@ -468,14 +478,20 @@ export default function MainPanel() {
                 const refsForCount = (statusFilter || []).length
                   ? applyStatusFilter(displayRefs, statusFilter, isComplete)
                   : (displayRefs || [])
-                const correctionsCount = (refsForCount || []).filter(r => {
+                const correctionsCount = (refsForCount || []).filter((r, index) => {
                   const filteredErrors = filterIssuesForStyle(r.errors, r, activeStyle)
                   const filteredWarnings = filterIssuesForStyle(r.warnings, r, activeStyle)
-                  return (
-                    (filteredErrors || []).length ||
-                    (filteredWarnings || []).length ||
-                    r.status === 'unverified' ||
-                    r.status === 'hallucinated'
+                  const styleFilteredRef = {
+                    ...r,
+                    errors: filteredErrors,
+                    warnings: filteredWarnings,
+                  }
+                  const tags = classifyCorrectionReference(styleFilteredRef, isComplete)
+                  return tags.size > 0 && hasActionableCorrection(
+                    styleFilteredRef,
+                    activeStyle,
+                    index,
+                    activeEffectiveOptions,
                   )
                 }).length
                 return [

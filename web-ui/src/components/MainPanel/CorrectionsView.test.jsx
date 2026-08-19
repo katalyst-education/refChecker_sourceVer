@@ -59,6 +59,7 @@ const FLAGGED_REFS = [{
   id: 'ref-1', index: 1, title: 'A Flagged Reference', status: 'error',
   errors: [{ error_type: 'doi', error_details: 'DOI mismatch' }],
   warnings: [], suggestions: [],
+  corrected_reference: { doi: '10.1000/corrected' },
 }]
 
 let alertSpy
@@ -169,5 +170,76 @@ describe('CorrectionsView — speculative match confirmation', () => {
       1,
       expect.objectContaining({ match_decision: 'kept_cited' }),
     ))
+  })
+})
+
+describe('CorrectionsView — unverified references', () => {
+  it('omits a not-found reference whose suggested correction would be unchanged', () => {
+    const notFoundRef = {
+      id: 'gorleben',
+      index: 2,
+      title: 'Gorleben',
+      authors: ['Michael Bogacki'],
+      year: 2016,
+      cited_url: 'http://www.gns.de/gorleben',
+      status: 'unverified',
+      errors: [{ error_type: 'unverified', error_details: 'Web page not found (404)' }],
+      warnings: [],
+      suggestions: [],
+      corrected_reference: null,
+    }
+
+    render(<CorrectionsView references={[notFoundRef]} isCheckComplete={true} />)
+
+    expect(screen.getByText('No actionable corrections.')).toBeInTheDocument()
+    expect(screen.queryByText('Gorleben')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Apply fix' })).not.toBeInTheDocument()
+  })
+
+  it('omits warning rows whose suggested correction is identical to the citation', () => {
+    const warningRefs = [
+      {
+        id: 'energiewende', index: 12, title: 'Vorbild Deutsche Energiewende',
+        authors: ['Forsa'], year: 2016, status: 'warning',
+        cited_url: 'http://www.kernenergie.de/kernenergie-wAssets/docs/themen/2013-05-forsa-umfrage-kernkraft.pdf',
+        errors: [],
+        warnings: [{ error_type: 'url', error_details: 'Web page not found (404)' }],
+        suggestions: [], corrected_reference: null,
+      },
+      {
+        id: 'direkt-strom', index: 31, title: 'Direkt Strom',
+        authors: ['Mirko Ravens'], year: 2016, status: 'warning',
+        cited_url: 'https://www.eon.de/pk/de/strom/optimalstrom/optimalstrom-oeko.html',
+        errors: [],
+        warnings: [{ error_type: 'url', error_details: 'Source could not be confirmed' }],
+        suggestions: [], corrected_reference: null,
+      },
+    ]
+
+    render(<CorrectionsView references={warningRefs} isCheckComplete={true} />)
+
+    expect(screen.getByText('No actionable corrections.')).toBeInTheDocument()
+    expect(screen.queryByText(/Vorbild Deutsche Energiewende/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Direkt Strom/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Apply fix' })).not.toBeInTheDocument()
+  })
+
+  it('continues to show genuine correction errors beside an unverified result', () => {
+    const notFoundRef = {
+      id: 'missing', index: 2, title: 'Missing web page', status: 'unverified',
+      errors: [{ error_type: 'unverified', error_details: 'Web page not found (404)' }],
+      warnings: [], suggestions: [], corrected_reference: null,
+    }
+    const actionableRef = {
+      id: 'wrong-year', index: 3, title: 'Actionable reference', status: 'error',
+      errors: [{ error_type: 'year', error_details: 'Publication year differs' }],
+      warnings: [], suggestions: [], corrected_reference: { year: 2022 },
+    }
+
+    render(<CorrectionsView references={[notFoundRef, actionableRef]} isCheckComplete={true} />)
+
+    expect(screen.queryByText('Missing web page')).not.toBeInTheDocument()
+    expect(screen.getByText(/Actionable reference/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Apply fix' })).toBeInTheDocument()
   })
 })
