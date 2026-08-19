@@ -1147,6 +1147,7 @@ class ProgressRefChecker:
                  title_update_callback: Optional[Callable] = None,
                  bibliography_source_callback: Optional[Callable] = None,
                  semantic_scholar_api_key: Optional[str] = None,
+                 google_books_api_key: Optional[str] = None,
                  db_path: Optional[str] = None,
                  db_paths: Optional[Dict[str, str]] = None,
                  cache_dir: Optional[str] = None,
@@ -1220,6 +1221,7 @@ class ProgressRefChecker:
             str(k).strip().lower() for k in (ai_detection_detectors or []) if str(k).strip()
         ]
         self.paperclip_api_key = paperclip_api_key
+        self.google_books_api_key = google_books_api_key
         # Cross-source enrichment backfill is ON by default (mirrors the web/API
         # default). The CLI exposes a `--no-enrich` opt-out which sets this to
         # False so verification results carry no backfilled counts/abstract/tldr.
@@ -1354,6 +1356,7 @@ class ProgressRefChecker:
         self.checker = EnhancedHybridReferenceChecker(
             semantic_scholar_api_key=ss_api_key,
             paperclip_api_key=self.paperclip_api_key,
+            google_books_api_key=self.google_books_api_key,
             db_path=db_path,
             db_paths=db_paths,
             debug_mode=False,

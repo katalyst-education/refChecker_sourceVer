@@ -107,6 +107,13 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [ssError, setSsError] = useState(null)
   const [ssServerHasKey, setSsServerHasKey] = useState(false)
   const [ssKeyStorage, setSsKeyStorage] = useState(null)
+  const [gbApiKey, setGbApiKey] = useState('')
+  const [gbIsEditing, setGbIsEditing] = useState(false)
+  const [gbIsSaving, setGbIsSaving] = useState(false)
+  const [gbIsValidating, setGbIsValidating] = useState(false)
+  const [gbError, setGbError] = useState(null)
+  const [gbServerHasKey, setGbServerHasKey] = useState(false)
+  const [gbKeyStorage, setGbKeyStorage] = useState(null)
   const [contactEmail, setContactEmail] = useState('')
   const [contactEmailDraft, setContactEmailDraft] = useState('')
   const [contactEmailEditing, setContactEmailEditing] = useState(false)
@@ -114,10 +121,12 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [contactEmailError, setContactEmailError] = useState(null)
   const [contactEmailStorage, setContactEmailStorage] = useState(null)
   const ssHasKey = hasKey('semantic_scholar') || ssServerHasKey
+  const gbHasKey = hasKey('google_books') || gbServerHasKey
   const pcHasKey = hasKey('paperclip') || pcServerHasKey
   // Server env keys ("environment" storage) serve all sessions, like env
   // LLM keys — users can override with a browser key but not remove them.
   const ssEnvKey = ssKeyStorage === 'environment'
+  const gbEnvKey = gbKeyStorage === 'environment'
   const pcEnvKey = pcKeyStorage === 'environment'
 
   // Local DB path state
@@ -462,6 +471,14 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   }
   useEffect(refreshSsKeyStatus, [])
 
+  const refreshGbKeyStatus = () => {
+    api.getGoogleBooksKeyStatus().then(res => {
+      setGbServerHasKey(res.data.has_key)
+      setGbKeyStorage(res.data.storage || null)
+    }).catch(() => {})
+  }
+  useEffect(refreshGbKeyStatus, [])
+
   // Same for Paperclip — server tells us whether a shared key is on file
   // (single-user database key, or a server environment key in multi-user
   // mode), while useKeyStore tracks the user's browser-cached key.
@@ -588,6 +605,68 @@ export default function SettingsPanel({ theme, onThemeChange }) {
     setSsIsEditing(false)
     setSsApiKey('')
     setSsError(null)
+  }
+
+  const handleGbSave = async () => {
+    if (!gbApiKey.trim()) {
+      setGbError('API key cannot be empty')
+      return
+    }
+    try {
+      setGbIsSaving(true)
+      setGbIsValidating(true)
+      setGbError(null)
+      const validationResponse = await api.validateGoogleBooksKey(gbApiKey.trim())
+      if (!validationResponse.data.valid) {
+        setGbError(validationResponse.data.message || 'Invalid API key')
+        return
+      }
+      if (multiuser) {
+        setKey('google_books', gbApiKey.trim())
+        refreshGbKeyStatus()
+      } else {
+        await api.setGoogleBooksKey(gbApiKey.trim())
+        deleteKey('google_books')
+        setGbServerHasKey(true)
+      }
+      notifyApiKeyStatusChanged()
+      setGbIsEditing(false)
+      setGbApiKey('')
+    } catch (err) {
+      logger.error('SettingsPanel', 'Failed to save Google Books key', err)
+      setGbError(formatApiError(err.response?.data?.detail, 'Failed to save API key'))
+    } finally {
+      setGbIsValidating(false)
+      setGbIsSaving(false)
+    }
+  }
+
+  const handleGbDelete = async () => {
+    setGbIsSaving(true)
+    try {
+      if (multiuser) {
+        deleteKey('google_books')
+        refreshGbKeyStatus()
+      } else {
+        await api.deleteGoogleBooksKey()
+        deleteKey('google_books')
+        setGbServerHasKey(false)
+      }
+      setGbIsEditing(false)
+      setGbApiKey('')
+      setGbError(null)
+      notifyApiKeyStatusChanged()
+    } catch (err) {
+      setGbError(formatApiError(err.response?.data?.detail, 'Failed to remove API key'))
+    } finally {
+      setGbIsSaving(false)
+    }
+  }
+
+  const handleGbCancel = () => {
+    setGbIsEditing(false)
+    setGbApiKey('')
+    setGbError(null)
   }
 
   const handleContactEmailSave = async () => {
@@ -2241,6 +2320,52 @@ export default function SettingsPanel({ theme, onThemeChange }) {
           </div>
         )}
       </div>
+      {/* Google Books is key-gated and runs only after every earlier metadata source. */}
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>Google Books API Key</div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Optional. Used only for book citations when all other configured databases return no sufficiently complete result.
+              {multiuser && (gbEnvKey
+                ? ' A server-provided key is active; a browser key overrides it for your checks.'
+                : ' Stored in this browser only.')}
+            </div>
+          </div>
+          {!gbIsEditing && (
+            <div className="flex items-center gap-2">
+              <button onClick={() => setGbIsEditing(true)} className="text-xs px-2 py-1 rounded cursor-pointer" style={{ color: 'var(--color-accent)' }}>
+                {gbHasKey ? 'Edit' : 'Set'}
+              </button>
+              {(multiuser ? hasKey('google_books') : gbHasKey) && (
+                <button onClick={handleGbDelete} disabled={gbIsSaving} className="text-xs px-2 py-1 rounded cursor-pointer" style={{ color: 'var(--color-error)' }}>Remove</button>
+              )}
+            </div>
+          )}
+        </div>
+        {gbIsEditing && (
+          <div className="mt-2 space-y-2">
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={gbApiKey}
+                onChange={(e) => setGbApiKey(e.target.value)}
+                placeholder="Enter Google Books API key…"
+                className="flex-1 px-2 py-1.5 text-sm rounded border"
+                style={{ backgroundColor: 'var(--color-bg-primary)', borderColor: gbError ? 'var(--color-error)' : 'var(--color-border)', color: 'var(--color-text-primary)' }}
+                disabled={gbIsSaving || gbIsValidating}
+                autoFocus
+                onKeyDown={(e) => { if (e.key === 'Enter' && gbApiKey.trim()) handleGbSave(); if (e.key === 'Escape') handleGbCancel() }}
+              />
+              <button onClick={handleGbSave} disabled={gbIsSaving || gbIsValidating || !gbApiKey.trim()} className="px-3 py-1.5 text-xs rounded cursor-pointer" style={{ backgroundColor: 'var(--color-accent)', color: 'white', opacity: gbIsSaving || gbIsValidating || !gbApiKey.trim() ? 0.5 : 1 }}>
+                {gbIsValidating || gbIsSaving ? '…' : 'Save'}
+              </button>
+              <button onClick={handleGbCancel} disabled={gbIsSaving || gbIsValidating} className="px-3 py-1.5 text-xs rounded border cursor-pointer" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}>Cancel</button>
+            </div>
+            {gbError && <div className="text-xs" style={{ color: 'var(--color-error)' }}>{gbError}</div>}
+          </div>
+        )}
+      </div>
       <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
         <div className="flex items-center justify-between">
           <div>
@@ -2253,6 +2378,37 @@ export default function SettingsPanel({ theme, onThemeChange }) {
             <input type="number" min="0.34" max="10" step="0.01" value={settings?.open_library_rate_limit_delay?.value ?? 1.0} onChange={(e) => { const value = parseFloat(e.target.value); if (!isNaN(value) && value >= 0.34) updateSetting('open_library_rate_limit_delay', value) }} className="w-20 px-2 py-1 text-sm rounded border text-right" style={{ backgroundColor: 'var(--color-bg-primary)', borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }} />
             <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>s</span>
           </div>
+        </div>
+      </div>
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>Google Books Request Delay</div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Minimum delay between final-resort Google Books requests. The active quota is shown in your Google Cloud project.
+            </div>
+          </div>
+          <div className="flex items-center gap-2 ml-4">
+            <input type="number" min="0" max="10" step="0.1" value={settings?.google_books_rate_limit_delay?.value ?? 1.0} onChange={(e) => { const value = parseFloat(e.target.value); if (!isNaN(value) && value >= 0) updateSetting('google_books_rate_limit_delay', value) }} className="w-20 px-2 py-1 text-sm rounded border text-right" style={{ backgroundColor: 'var(--color-bg-primary)', borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }} />
+            <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>s</span>
+          </div>
+        </div>
+      </div>
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>Magazine fallback</div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Query Google Books for explicitly identified magazines only after every earlier source fails. Scholarly journal articles remain excluded.
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            aria-label="Enable Google Books magazine fallback"
+            checked={String(settings?.google_books_include_magazines?.value ?? true).toLowerCase() === 'true'}
+            onChange={(e) => updateSetting('google_books_include_magazines', e.target.checked)}
+            className="h-4 w-4 shrink-0"
+          />
         </div>
       </div>
       {/* Semantic Scholar Rate Limit */}

@@ -11,7 +11,8 @@ New API Integration Priority:
 2. Semantic Scholar API (reliable, good coverage)  
 3. OpenAlex API (excellent reliability, replaces Google Scholar)
 4. CrossRef API (best for DOI-based verification)
-5. Google Scholar (final fallback, kept for legacy support)
+5. Open Library and specialist indexes
+6. Google Books (keyed, book-only final fallback)
 
 Usage:
     from enhanced_hybrid_checker import EnhancedHybridReferenceChecker
@@ -98,9 +99,12 @@ class EnhancedHybridReferenceChecker:
                  db_paths: Optional[Dict[str, str]] = None,
                  contact_email: Optional[str] = None,
                  paperclip_api_key: Optional[str] = None,
+                 google_books_api_key: Optional[str] = None,
                  enable_openalex: bool = True,
                  enable_crossref: bool = True,
                  enable_open_library: bool = True,
+                 enable_google_books: Optional[bool] = None,
+                 google_books_include_magazines: Optional[bool] = None,
                  enable_arxiv_citation: bool = True,
                  enable_acl_anthology: bool = True,
                  enable_paperclip: Optional[bool] = None,
@@ -112,11 +116,14 @@ class EnhancedHybridReferenceChecker:
         Args:
             semantic_scholar_api_key: Optional API key for Semantic Scholar
             paperclip_api_key: Optional API key for Paperclip secondary verification
+            google_books_api_key: Optional API key for the final Google Books fallback
             db_path: Optional path to local Semantic Scholar database
             contact_email: Email for polite pool access to APIs
             enable_openalex: Whether to use OpenAlex API
             enable_crossref: Whether to use CrossRef API
             enable_open_library: Whether to use Open Library as a book-reference fallback
+            enable_google_books: Whether to use Google Books as the final book/magazine fallback
+            google_books_include_magazines: Whether explicit magazine citations may use that fallback
             enable_arxiv_citation: Whether to use ArXiv Citation checker as authoritative source
             enable_acl_anthology: Whether to use ACL Anthology API
             debug_mode: Whether to enable debug logging
@@ -190,6 +197,23 @@ class EnhancedHybridReferenceChecker:
                 'open_library', 'OpenLibraryReferenceChecker', 'Open Library API', email=contact_email
             )
 
+        if enable_google_books is None:
+            enable_google_books = bool(
+                google_books_api_key or os.environ.get('GOOGLE_BOOKS_API_KEY')
+            )
+        if google_books_include_magazines is None:
+            google_books_include_magazines = str(
+                os.environ.get('REFCHECKER_GOOGLE_BOOKS_INCLUDE_MAGAZINES', 'true')
+            ).strip().lower() in {'1', 'true', 'yes', 'on'}
+        self.google_books_include_magazines = bool(google_books_include_magazines)
+        self.google_books = None
+        if enable_google_books:
+            self.google_books = self._initialize_checker(
+                'google_books', 'GoogleBooksReferenceChecker', 'Google Books API',
+                api_key=google_books_api_key,
+                include_magazines=self.google_books_include_magazines,
+            )
+
         
         # Initialize OpenReview checker
         self.openreview = self._initialize_checker(
@@ -242,7 +266,8 @@ class EnhancedHybridReferenceChecker:
         self.cache_dir = cache_dir
         all_local_checkers = [checker for _, _, checker in self.local_db_checkers]
         for checker in (self.arxiv_citation, *all_local_checkers, self.semantic_scholar,
-                        self.openalex, self.crossref, self.open_library, self.openreview, self.dblp,
+                        self.openalex, self.crossref, self.open_library, self.google_books,
+                        self.openreview, self.dblp,
                         self.acl_anthology, self.paperclip):
             if checker is not None:
                 checker.cache_dir = cache_dir
@@ -254,6 +279,7 @@ class EnhancedHybridReferenceChecker:
             'openalex': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'crossref': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'open_library': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'google_books': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'openreview': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'dblp': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'acl_anthology': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
@@ -281,6 +307,7 @@ class EnhancedHybridReferenceChecker:
             'crossref': threading.Semaphore(3),
             'openalex': threading.Semaphore(3),
             'open_library': threading.Semaphore(1),
+            'google_books': threading.Semaphore(1),
             'dblp': threading.Semaphore(2),
             'openreview': threading.Semaphore(2),
             'acl_anthology': threading.Semaphore(2),
@@ -345,6 +372,7 @@ class EnhancedHybridReferenceChecker:
             'openalex': 'OpenAlex',
             'crossref': 'CrossRef',
             'open_library': 'Open Library',
+            'google_books': 'Google Books',
             'dblp': 'DBLP',
             'openreview': 'OpenReview',
             'acl_anthology': 'ACL Anthology',
@@ -641,6 +669,28 @@ class EnhancedHybridReferenceChecker:
                   (url_text and ('doi.org' in url_text or 'doi:' in url_text)) or
                   (raw_text and ('doi' in raw_text)))
         return has_doi
+
+    def _is_google_books_reference(
+        self,
+        reference: Dict[str, Any],
+        best_result: Optional[Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]] = None,
+    ) -> bool:
+        """Return whether a citation is safely eligible for Google Books.
+
+        Avoid querying it for ordinary papers merely because all
+        scholarly sources missed them. Open Library identifying the best match
+        is itself strong evidence that the citation is a book.
+        """
+        from .google_books import GoogleBooksReferenceChecker
+
+        print_type = GoogleBooksReferenceChecker.infer_print_type(reference)
+        if print_type == 'magazines':
+            return self.google_books_include_magazines
+        if print_type == 'books':
+            return True
+        if best_result and isinstance(best_result[0], dict):
+            return best_result[0].get('_matched_checker') == 'open_library'
+        return False
 
     @staticmethod
     def _has_doi_mismatch(errors: List[Dict[str, Any]]) -> bool:
@@ -1352,6 +1402,66 @@ class EnhancedHybridReferenceChecker:
                             'failure_detail': failure_detail,
                             'active': True,
                         })
+
+        # Google Books is intentionally sequential and last. It is never
+        # launched with the normal fallback pool, so a complete result from
+        # Open Library or any scholarly source consumes no Google quota.
+        google_books_eligible = force_all_databases or self._is_google_books_reference(
+            reference, best_result
+        )
+        if not self.google_books and google_books_eligible:
+            logger.info(
+                "GOOGLE_BOOKS_API_TRACE event=skipped reason=not_configured title=%r",
+                reference.get('title', ''),
+            )
+        elif self.google_books and not google_books_eligible:
+            logger.info(
+                "GOOGLE_BOOKS_API_TRACE event=skipped reason=not_eligible title=%r",
+                reference.get('title', ''),
+            )
+        elif self.google_books:
+            logger.info(
+                "GOOGLE_BOOKS_API_TRACE event=fallback_reached forced=%s title=%r",
+                force_all_databases,
+                reference.get('title', ''),
+            )
+            self._append_attempted_api(attempted_apis, 'google_books')
+            google_books_reference = reference
+            if force_all_databases:
+                google_books_reference = {
+                    **reference,
+                    '_google_books_force_all': True,
+                }
+            verified_data, errors, url, success, failure_type, failure_detail = self._try_api(
+                'google_books', self.google_books, google_books_reference,
+            )
+            if success:
+                logger.info(
+                    "GOOGLE_BOOKS_API_TRACE event=fallback_result outcome=match title=%r",
+                    reference.get('title', ''),
+                )
+                result = (verified_data, errors, url)
+                best_result = self._pick_preferred_result(best_result, result, reference)
+                if not force_all_databases and self._is_data_complete(verified_data, reference):
+                    return result, {}
+            elif failure_type not in ('none', 'not_found'):
+                logger.info(
+                    "GOOGLE_BOOKS_API_TRACE event=fallback_result outcome=%s title=%r",
+                    failure_type,
+                    reference.get('title', ''),
+                )
+                failed_apis.append({
+                    'name': 'google_books',
+                    'instance': self.google_books,
+                    'failure_type': failure_type,
+                    'failure_detail': failure_detail,
+                    'active': True,
+                })
+            else:
+                logger.info(
+                    "GOOGLE_BOOKS_API_TRACE event=fallback_result outcome=no_match title=%r",
+                    reference.get('title', ''),
+                )
         
         # Return None with any incomplete results for Phase 3 fallback
         incomplete = {}

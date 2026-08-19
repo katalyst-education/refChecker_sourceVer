@@ -6,6 +6,7 @@ from .semantic_scholar import NonArxivReferenceChecker
 from .local_semantic_scholar import LocalNonArxivReferenceChecker
 from .enhanced_hybrid_checker import EnhancedHybridReferenceChecker
 from .openalex import OpenAlexReferenceChecker
+from .google_books import GoogleBooksReferenceChecker
 from .crossref import CrossRefReferenceChecker
 from .open_library import OpenLibraryReferenceChecker
 from .arxiv_citation import ArXivCitationChecker
@@ -15,7 +16,8 @@ __all__ = [
     "NonArxivReferenceChecker",
     "LocalNonArxivReferenceChecker",
     "EnhancedHybridReferenceChecker",
-    "OpenAlexReferenceChecker", 
+    "OpenAlexReferenceChecker",
+    "GoogleBooksReferenceChecker",
     "CrossRefReferenceChecker",
     "OpenLibraryReferenceChecker",
     "ArXivCitationChecker",

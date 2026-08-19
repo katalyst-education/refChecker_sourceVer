@@ -216,6 +216,8 @@ export default function InputSection() {
       if (hallucinationKey) formData.append('hallucination_api_key', hallucinationKey)
       const ssKey = keyStore.getKey('semantic_scholar')
       if (ssKey) formData.append('semantic_scholar_api_key', ssKey)
+      const googleBooksKey = keyStore.getKey('google_books')
+      if (googleBooksKey) formData.append('google_books_api_key', googleBooksKey)
       const paperclipKey = keyStore.getKey('paperclip')
       if (paperclipKey) formData.append('paperclip_api_key', paperclipKey)
       appendAiDetection(formData)
@@ -331,6 +333,7 @@ export default function InputSection() {
       const llmKey = getConfigApiKey(keyStore, config)
       const hallucinationKey = getConfigApiKey(keyStore, hallucinationConfig)
       const ssKey = keyStore.getKey('semantic_scholar')
+      const googleBooksKey = keyStore.getKey('google_books')
       const paperclipKey = keyStore.getKey('paperclip')
       
       let response
@@ -352,6 +355,7 @@ export default function InputSection() {
           hallucination_api_key: hallucinationKey,
           semantic_scholar_api_key: ssKey,
           paperclip_api_key: paperclipKey,
+          ...(googleBooksKey ? { google_books_api_key: googleBooksKey } : {}),
           ...(aiDetectionValues() || {}),
         })
       } else {
@@ -375,6 +379,7 @@ export default function InputSection() {
         if (llmKey) formData.append('api_key', llmKey)
         if (hallucinationKey) formData.append('hallucination_api_key', hallucinationKey)
         if (ssKey) formData.append('semantic_scholar_api_key', ssKey)
+        if (googleBooksKey) formData.append('google_books_api_key', googleBooksKey)
         if (paperclipKey) formData.append('paperclip_api_key', paperclipKey)
         appendAiDetection(formData)
 

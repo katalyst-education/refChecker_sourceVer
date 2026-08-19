@@ -1354,6 +1354,7 @@ class BatchUrlsRequest(BaseModel):
     api_key: Optional[str] = None
     hallucination_api_key: Optional[str] = None
     semantic_scholar_api_key: Optional[str] = None
+    google_books_api_key: Optional[str] = None
     paperclip_api_key: Optional[str] = None
     ai_detection_enabled: bool = False
     ai_detection_backend: str = "local"
@@ -1455,6 +1456,9 @@ async def _run_startup_tasks() -> None:
             if await db.has_setting("semantic_scholar_api_key"):
                 await db.delete_setting("semantic_scholar_api_key")
                 logger.info("Removed server-side Semantic Scholar API key in multi-user mode")
+            if await db.has_setting("google_books_api_key"):
+                await db.delete_setting("google_books_api_key")
+                logger.info("Removed server-side Google Books API key in multi-user mode")
         except Exception as e:
             logger.warning(f"Failed to clear Semantic Scholar key in multi-user mode: {e}")
 
@@ -1524,6 +1528,18 @@ async def lifespan(app: FastAPI):
                 os.environ["REFCHECKER_OPEN_LIBRARY_RATE_LIMIT_DELAY"] = stored_open_library_delay
         except Exception as e:
             logger.debug(f"Could not hydrate Open Library settings: {e}")
+        try:
+            stored_google_books_key = await db.get_setting("google_books_api_key")
+            if stored_google_books_key and not os.environ.get("GOOGLE_BOOKS_API_KEY"):
+                os.environ["GOOGLE_BOOKS_API_KEY"] = stored_google_books_key
+            stored_google_books_delay = await db.get_setting("google_books_rate_limit_delay")
+            if stored_google_books_delay:
+                os.environ["REFCHECKER_GOOGLE_BOOKS_RATE_LIMIT_DELAY"] = stored_google_books_delay
+            stored_google_books_magazines = await db.get_setting("google_books_include_magazines")
+            if stored_google_books_magazines is not None:
+                os.environ["REFCHECKER_GOOGLE_BOOKS_INCLUDE_MAGAZINES"] = stored_google_books_magazines
+        except Exception as e:
+            logger.debug(f"Could not hydrate Google Books settings: {e}")
 
     # In multiuser mode, pre-start GROBID so users without LLM keys can extract refs
     if is_multiuser_mode():
@@ -2376,6 +2392,7 @@ async def start_check(
     api_key: Optional[str] = Form(None),
     hallucination_api_key: Optional[str] = Form(None),
     semantic_scholar_api_key: Optional[str] = Form(None),
+    google_books_api_key: Optional[str] = Form(None),
     paperclip_api_key: Optional[str] = Form(None),
     ai_detection_enabled: bool = Form(False),
     ai_detection_backend: str = Form("local"),
@@ -2434,6 +2451,7 @@ async def start_check(
         semantic_scholar_api_key = await _resolve_semantic_scholar_api_key(
             _form_default_value(semantic_scholar_api_key)
         )
+        google_books_api_key = _form_default_value(google_books_api_key)
 
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -2642,6 +2660,7 @@ async def start_check(
                 llm_provider, llm_model, effective_api_key, endpoint,
                 use_llm, cancel_event, user_id,
                 semantic_scholar_api_key=semantic_scholar_api_key,
+                google_books_api_key=google_books_api_key,
                 hallucination_provider=resolved_hallucination_provider,
                 hallucination_model=resolved_hallucination_model,
                 hallucination_api_key=resolved_hallucination_api_key,
@@ -2695,6 +2714,7 @@ async def run_check(
     cancel_event: asyncio.Event,
     user_id: int = 0,
     semantic_scholar_api_key: Optional[str] = None,
+    google_books_api_key: Optional[str] = None,
     hallucination_provider: Optional[str] = None,
     hallucination_model: Optional[str] = None,
     hallucination_api_key: Optional[str] = None,
@@ -2732,6 +2752,7 @@ async def run_check(
     email_domain = extract_email_domain(user_row.get("email")) if user_row else None
     start_monotonic = time.perf_counter()
     try:
+        google_books_api_key = await _resolve_google_books_api_key(google_books_api_key)
         # Resolve local checker database paths from environment/settings
         db_paths = await _get_configured_database_paths()
         db_path = db_paths.get("s2")
@@ -2835,6 +2856,7 @@ async def run_check(
             title_update_callback=title_update_callback,
             bibliography_source_callback=bibliography_source_callback,
             semantic_scholar_api_key=semantic_scholar_api_key,
+            google_books_api_key=google_books_api_key,
             db_path=db_path,
             db_paths=db_paths,
             cache_dir=cache_dir,
@@ -5163,6 +5185,7 @@ async def start_batch_check(
                     llm_provider, llm_model, effective_api_key, endpoint,
                     request.use_llm, cancel_event, user_id,
                     semantic_scholar_api_key=semantic_scholar_api_key,
+                    google_books_api_key=request.google_books_api_key,
                     hallucination_provider=resolved_hallucination_provider,
                     hallucination_model=resolved_hallucination_model,
                     hallucination_api_key=resolved_hallucination_api_key,
@@ -5226,6 +5249,7 @@ async def start_batch_check_files(
     api_key: Optional[str] = Form(None),
     hallucination_api_key: Optional[str] = Form(None),
     semantic_scholar_api_key: Optional[str] = Form(None),
+    google_books_api_key: Optional[str] = Form(None),
     paperclip_api_key: Optional[str] = Form(None),
     ai_detection_enabled: bool = Form(False),
     ai_detection_backend: str = Form("local"),
@@ -5257,6 +5281,7 @@ async def start_batch_check_files(
         api_key = _form_default_value(api_key)
         hallucination_api_key = _form_default_value(hallucination_api_key)
         semantic_scholar_api_key = _form_default_value(semantic_scholar_api_key)
+        google_books_api_key = _form_default_value(google_books_api_key)
         paperclip_api_key = _form_default_value(paperclip_api_key)
         ai_detection_enabled = _form_default_value(ai_detection_enabled)
         ai_detection_backend = _form_default_value(ai_detection_backend)
@@ -5460,6 +5485,7 @@ async def start_batch_check_files(
                     llm_provider, llm_model, effective_api_key, endpoint,
                     use_llm, cancel_event, user_id,
                     semantic_scholar_api_key=semantic_scholar_api_key,
+                    google_books_api_key=google_books_api_key,
                     hallucination_provider=resolved_hallucination_provider,
                     hallucination_model=resolved_hallucination_model,
                     hallucination_api_key=resolved_hallucination_api_key,
@@ -6225,6 +6251,14 @@ class SemanticScholarKeyValidate(BaseModel):
     api_key: str
 
 
+class GoogleBooksKeyUpdate(BaseModel):
+    api_key: str
+
+
+class GoogleBooksKeyValidate(BaseModel):
+    api_key: str
+
+
 async def _resolve_semantic_scholar_api_key(api_key: Optional[str]) -> Optional[str]:
     """Use per-request browser keys first, then env, then the single-user stored key.
 
@@ -6238,6 +6272,18 @@ async def _resolve_semantic_scholar_api_key(api_key: Optional[str]) -> Optional[
     if is_multiuser_mode():
         return None
     return await db.get_setting("semantic_scholar_api_key")
+
+
+async def _resolve_google_books_api_key(api_key: Optional[str]) -> Optional[str]:
+    """Use a browser key first, then env, then the single-user stored key."""
+    if api_key:
+        return api_key
+    env_api_key = os.getenv("GOOGLE_BOOKS_API_KEY")
+    if env_api_key:
+        return env_api_key
+    if is_multiuser_mode():
+        return None
+    return await db.get_setting("google_books_api_key")
 
 
 async def _resolve_paperclip_api_key(api_key: Optional[str]) -> Optional[str]:
@@ -6393,6 +6439,121 @@ async def delete_semantic_scholar_key(current_user: UserInfo = Depends(require_u
         "has_key": False,
         "storage": "database",
         "message": "Semantic Scholar API key removed from the local RefChecker database",
+    }
+
+
+@app.post("/api/settings/google-books/validate")
+async def validate_google_books_key(
+    data: GoogleBooksKeyValidate,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Validate a Google Books key with a one-result public volume query."""
+    import httpx
+
+    api_key = (data.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                headers={"Accept": "application/json", "x-goog-api-key": api_key},
+                params={"q": "isbn:9780140328721", "printType": "books", "maxResults": 1},
+            )
+        if response.status_code == 200:
+            return {"valid": True, "message": "Google Books API key is valid"}
+        detail = ""
+        try:
+            error = response.json().get("error") or {}
+            detail = str(error.get("message") or "")
+        except (ValueError, AttributeError):
+            pass
+        lowered = detail.lower()
+        if response.status_code == 429 or (
+            response.status_code == 403
+            and any(word in lowered for word in ("quota", "rate limit", "daily limit"))
+        ):
+            return {
+                "valid": True,
+                "message": "Google Books accepted the key, but its quota is currently exhausted",
+                "warning": detail or "Quota or rate limit exceeded",
+            }
+        if response.status_code in (400, 401, 403):
+            raise HTTPException(
+                status_code=400,
+                detail=detail or "Google Books rejected this key. Check its API and application restrictions.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Google Books validation failed with status {response.status_code}",
+        )
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=400, detail="Connection timed out. Please try again.")
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=400, detail=f"Connection error: {exc}")
+
+
+@app.get("/api/settings/google-books")
+async def get_google_books_key_status(current_user: UserInfo = Depends(require_user)):
+    """Return Google Books API key storage status for the current mode."""
+    if is_multiuser_mode():
+        if os.getenv("GOOGLE_BOOKS_API_KEY"):
+            return {
+                "has_key": True,
+                "storage": "environment",
+                "message": "Google Books API key provided by the server environment and used for all sessions",
+            }
+        return {
+            "has_key": False,
+            "storage": "browser-only",
+            "message": "Google Books API keys are encrypted in the browser cache and are not stored on the server",
+        }
+    return {
+        "has_key": await db.has_setting("google_books_api_key"),
+        "storage": "database",
+        "message": "Google Books API keys are encrypted in the local RefChecker database",
+    }
+
+
+@app.put("/api/settings/google-books")
+async def set_google_books_key(
+    data: GoogleBooksKeyUpdate,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Store and activate the Google Books key in single-user mode."""
+    if is_multiuser_mode():
+        raise HTTPException(
+            status_code=410,
+            detail="Google Books API keys are encrypted in the browser cache and are not stored on the server",
+        )
+    api_key = (data.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+    await db.set_setting("google_books_api_key", api_key)
+    os.environ["GOOGLE_BOOKS_API_KEY"] = api_key
+    return {
+        "has_key": True,
+        "storage": "database",
+        "message": "Google Books API key saved and active for the next check",
+    }
+
+
+@app.delete("/api/settings/google-books")
+async def delete_google_books_key(current_user: UserInfo = Depends(require_user)):
+    """Delete the single-user stored Google Books key."""
+    if is_multiuser_mode():
+        raise HTTPException(
+            status_code=410,
+            detail="Google Books API keys are encrypted in the browser cache and are not stored on the server",
+        )
+    await db.delete_setting("google_books_api_key")
+    os.environ.pop("GOOGLE_BOOKS_API_KEY", None)
+    return {
+        "has_key": False,
+        "storage": "database",
+        "message": "Google Books API key removed from the local RefChecker database",
     }
 
 
@@ -6651,6 +6812,25 @@ async def get_all_settings(current_user: UserInfo = Depends(require_user)):
                 "min": 0.34,
                 "max": 10.0,
                 "step": 0.01,
+            },
+            "google_books_rate_limit_delay": {
+                "value": float(await db.get_setting("google_books_rate_limit_delay") or 1.0),
+                "default": 1.0,
+                "type": "number",
+                "label": "Google Books Rate Limit (seconds)",
+                "description": "Minimum delay between final-resort Google Books requests. Google does not publish one fixed Books API rate limit; check the quota attached to your Cloud project.",
+                "section": "API Keys",
+                "min": 0.0,
+                "max": 10.0,
+                "step": 0.1,
+            },
+            "google_books_include_magazines": {
+                "value": str(await db.get_setting("google_books_include_magazines") or "true").lower() == "true",
+                "default": True,
+                "type": "boolean",
+                "label": "Google Books Magazine Fallback",
+                "description": "Allow explicit magazine citations to use Google Books as the final fallback. Ordinary journal articles are excluded.",
+                "section": "API Keys",
             }
         }
 
@@ -6723,7 +6903,9 @@ async def update_setting(
             "cache_dir",
             "extraction_mode",
             "ss_rate_limit_delay",
-            "open_library_rate_limit_delay"
+            "open_library_rate_limit_delay",
+            "google_books_rate_limit_delay",
+            "google_books_include_magazines",
         }
         if setting_key not in valid_keys:
             raise HTTPException(status_code=400, detail=f"Unknown setting: {setting_key}")
@@ -6751,6 +6933,31 @@ async def update_setting(
             await db.set_setting("open_library_rate_limit_delay", str(delay))
             os.environ["REFCHECKER_OPEN_LIBRARY_RATE_LIMIT_DELAY"] = str(delay)
             return {"key": setting_key, "value": delay, "message": "Setting updated"}
+
+        if setting_key == "google_books_rate_limit_delay":
+            try:
+                delay = float(update.value)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="google_books_rate_limit_delay must be a number")
+            if delay < 0.0 or delay > 10.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="google_books_rate_limit_delay must be between 0 and 10 seconds",
+                )
+            await db.set_setting("google_books_rate_limit_delay", str(delay))
+            os.environ["REFCHECKER_GOOGLE_BOOKS_RATE_LIMIT_DELAY"] = str(delay)
+            return {"key": setting_key, "value": delay, "message": "Setting updated"}
+
+        if setting_key == "google_books_include_magazines":
+            value = str(update.value).strip().lower()
+            if value not in {"true", "false"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="google_books_include_magazines must be true or false",
+                )
+            await db.set_setting(setting_key, value)
+            os.environ["REFCHECKER_GOOGLE_BOOKS_INCLUDE_MAGAZINES"] = value
+            return {"key": setting_key, "value": value == "true", "message": "Setting updated"}
         
         # Apply setting-specific validation
         if setting_key == "max_concurrent_checks":
@@ -8018,6 +8225,7 @@ async def verify_single_reference(
                 errors, url, verified_data = shared_checker.verify_reference_standard(
                     None,
                     dict(target),
+                    force_all_databases=force_all_databases,
                 )
                 return verified_data, errors, url
 

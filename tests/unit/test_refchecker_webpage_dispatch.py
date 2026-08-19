@@ -52,6 +52,26 @@ def test_standard_verification_falls_back_to_academic_checker_when_not_webpage()
     checker.non_arxiv_checker.verify_reference.assert_called_once_with(reference)
 
 
+def test_force_all_standard_verification_is_forwarded_to_hybrid_checker():
+    checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+    checker.verify_github_reference = MagicMock(return_value=None)
+    checker.verify_webpage_reference = MagicMock(return_value=None)
+    checker.non_arxiv_checker = MagicMock()
+    checker.non_arxiv_checker.verify_reference.return_value = (None, [], None)
+    reference = {"title": "A reference with an unclassified type"}
+
+    checker.verify_reference_standard(
+        None,
+        reference,
+        force_all_databases=True,
+    )
+
+    checker.non_arxiv_checker.verify_reference.assert_called_once_with(
+        reference,
+        force_all_databases=True,
+    )
+
+
 def test_standard_verification_checks_venue_named_site_before_title_search():
     checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
     checker.verify_github_reference = MagicMock(return_value=None)

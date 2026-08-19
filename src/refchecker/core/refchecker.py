@@ -3615,7 +3615,12 @@ class ArxivReferenceChecker:
             logger.error(f"Error checking raw URL: {e}")
             return None, [{"error_type": "unverified", "error_details": "Reference could not be verified"}], web_url
 
-    def verify_reference_standard(self, source_paper, reference):
+    def verify_reference_standard(
+        self,
+        source_paper,
+        reference,
+        force_all_databases=False,
+    ):
         """Verify a reference via the hybrid checker.
 
         Thin pass-through — all verification logic (including ArXiv ID
@@ -3636,7 +3641,13 @@ class ArxivReferenceChecker:
         if webpage_result:
             return webpage_result
 
-        verified_data, errors, paper_url = self.non_arxiv_checker.verify_reference(reference)
+        if force_all_databases:
+            verified_data, errors, paper_url = self.non_arxiv_checker.verify_reference(
+                reference,
+                force_all_databases=True,
+            )
+        else:
+            verified_data, errors, paper_url = self.non_arxiv_checker.verify_reference(reference)
 
         if not errors:
             return None, paper_url, verified_data

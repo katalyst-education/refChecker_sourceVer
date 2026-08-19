@@ -94,6 +94,12 @@ export const getSemanticScholarKeyStatus = () => api.get('/settings/semantic-sch
 export const setSemanticScholarKey = (apiKey) => api.put('/settings/semantic-scholar', { api_key: apiKey })
 export const deleteSemanticScholarKey = () => api.delete('/settings/semantic-scholar')
 
+// Google Books final-resort book metadata lookup.
+export const validateGoogleBooksKey = (apiKey) => api.post('/settings/google-books/validate', { api_key: apiKey })
+export const getGoogleBooksKeyStatus = () => api.get('/settings/google-books')
+export const setGoogleBooksKey = (apiKey) => api.put('/settings/google-books', { api_key: apiKey })
+export const deleteGoogleBooksKey = () => api.delete('/settings/google-books')
+
 // Public contact detail included in the User-Agent for Open Library and
 // other polite-pool metadata requests. This is not an API key.
 export const getContactEmail = () => api.get('/settings/contact-email')

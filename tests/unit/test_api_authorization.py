@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import os
 import sqlite3
 
 import pytest
@@ -415,7 +416,7 @@ def test_private_artifact_routes_disable_shared_caching(auth_db, tmp_path):
     assert text_response.headers["vary"] == "Cookie"
 
 
-def test_settings_updates_require_admin(auth_db):
+def test_settings_updates_require_admin(auth_db, monkeypatch):
     api_main, db = auth_db
     owner = _run(_create_user(api_main, db, "owner-settings"))
     admin = api_main.UserInfo(
@@ -440,6 +441,16 @@ def test_settings_updates_require_admin(auth_db):
         admin,
     ))
     assert result["value"] == "7"
+
+    monkeypatch.delenv("REFCHECKER_GOOGLE_BOOKS_INCLUDE_MAGAZINES", raising=False)
+    result = _run(api_main.update_setting(
+        "google_books_include_magazines",
+        api_main.SettingUpdate(value="false"),
+        admin,
+    ))
+    assert result["value"] is False
+    assert _run(db.get_setting("google_books_include_magazines")) == "false"
+    assert os.environ["REFCHECKER_GOOGLE_BOOKS_INCLUDE_MAGAZINES"] == "false"
 
 
 def test_user_preferences_are_user_scoped(auth_db):
@@ -546,6 +557,19 @@ def test_multiuser_paperclip_key_resolves_from_environment(auth_db, monkeypatch)
     assert status["storage"] == "environment"
 
 
+def test_multiuser_google_books_key_resolves_from_environment(auth_db, monkeypatch):
+    api_main, db = auth_db
+    monkeypatch.setenv("GOOGLE_BOOKS_API_KEY", "env-books-key")
+
+    assert _run(api_main._resolve_google_books_api_key(None)) == "env-books-key"
+    assert _run(api_main._resolve_google_books_api_key("browser-key")) == "browser-key"
+
+    owner = _run(_create_user(api_main, db, "owner-books-env"))
+    status = _run(api_main.get_google_books_key_status(owner))
+    assert status["has_key"] is True
+    assert status["storage"] == "environment"
+
+
 def test_multiuser_paperclip_key_skips_database_without_environment(auth_db, monkeypatch):
     api_main, db = auth_db
     monkeypatch.delenv("PAPERCLIP_API_KEY", raising=False)
@@ -627,6 +651,31 @@ def test_single_user_paperclip_key_resolves_env_then_database(tmp_path, monkeypa
     monkeypatch.setenv("PAPERCLIP_API_KEY", "env-pc-key")
     assert _run(api_main._resolve_paperclip_api_key(None)) == "env-pc-key"
     assert _run(api_main._resolve_paperclip_api_key("browser-key")) == "browser-key"
+
+
+def test_single_user_google_books_key_is_encrypted_and_resolved(tmp_path, monkeypatch):
+    monkeypatch.delenv("REFCHECKER_MULTIUSER", raising=False)
+    monkeypatch.delenv("GOOGLE_BOOKS_API_KEY", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_api_authorization_single_user_google_books")
+    api_main = importlib.import_module("backend.main")
+    api_main = importlib.reload(api_main)
+    temp_db = Database(str(tmp_path / "local-books.db"))
+    _run(temp_db.init_db())
+    monkeypatch.setattr(api_main, "db", temp_db)
+    local_user = api_main.UserInfo(id=0, name="Local User", provider="local", is_admin=True)
+
+    result = _run(api_main.set_google_books_key(
+        api_main.GoogleBooksKeyUpdate(api_key="books-key"), local_user
+    ))
+    assert result["has_key"] is True
+    assert _run(temp_db.get_setting("google_books_api_key")) == "books-key"
+    encrypted = _run(temp_db.get_setting("google_books_api_key", decrypt=False))
+    assert encrypted.startswith("enc:")
+    assert _run(api_main._resolve_google_books_api_key(None)) == "books-key"
+
+    deleted = _run(api_main.delete_google_books_key(local_user))
+    assert deleted["has_key"] is False
+    assert _run(temp_db.has_setting("google_books_api_key")) is False
 
 
 def _create_local_reference_db(path, *, with_snapshot=False):

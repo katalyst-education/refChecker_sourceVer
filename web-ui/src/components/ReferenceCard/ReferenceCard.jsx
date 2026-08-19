@@ -946,6 +946,11 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
               </span>
               <span style={{ color: 'var(--color-text)' }}>
                 {matchedDatabase}
+                {matchedDatabase === 'Google Books' && (
+                  <span style={{ color: 'var(--color-text-secondary)', marginLeft: 6 }}>
+                    · Powered by Google
+                  </span>
+                )}
               </span>
             </div>
           )}

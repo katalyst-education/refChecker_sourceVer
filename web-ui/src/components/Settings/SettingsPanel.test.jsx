@@ -13,6 +13,13 @@ const mocks = vi.hoisted(() => ({
   validateSemanticScholarKey: vi.fn(),
   setSemanticScholarKey: vi.fn(),
   deleteSemanticScholarKey: vi.fn(),
+  getGoogleBooksKeyStatus: vi.fn(),
+  validateGoogleBooksKey: vi.fn(),
+  setGoogleBooksKey: vi.fn(),
+  deleteGoogleBooksKey: vi.fn(),
+  getContactEmail: vi.fn(),
+  setContactEmail: vi.fn(),
+  deleteContactEmail: vi.fn(),
   getPaperclipKeyStatus: vi.fn(),
   setPaperclipKey: vi.fn(),
   deletePaperclipKey: vi.fn(),
@@ -54,6 +61,13 @@ vi.mock('../../utils/api', () => ({
   validateSemanticScholarKey: mocks.validateSemanticScholarKey,
   setSemanticScholarKey: mocks.setSemanticScholarKey,
   deleteSemanticScholarKey: mocks.deleteSemanticScholarKey,
+  getGoogleBooksKeyStatus: mocks.getGoogleBooksKeyStatus,
+  validateGoogleBooksKey: mocks.validateGoogleBooksKey,
+  setGoogleBooksKey: mocks.setGoogleBooksKey,
+  deleteGoogleBooksKey: mocks.deleteGoogleBooksKey,
+  getContactEmail: mocks.getContactEmail,
+  setContactEmail: mocks.setContactEmail,
+  deleteContactEmail: mocks.deleteContactEmail,
   getPaperclipKeyStatus: mocks.getPaperclipKeyStatus,
   setPaperclipKey: mocks.setPaperclipKey,
   deletePaperclipKey: mocks.deletePaperclipKey,
@@ -74,14 +88,10 @@ import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 async function saveSemanticScholarKey() {
   render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
   fireEvent.click(screen.getByRole('button', { name: 'API Keys' }))
-  // There are now multiple Set/Save buttons on the API Keys tab
-  // (one set per API key block — Semantic Scholar, Paperclip). The
-  // Semantic Scholar block is rendered first, so [0] still targets
-  // it; placeholder text lookups also resolve to that block since
-  // each block only shows its input while it's the one being edited.
-  fireEvent.click(screen.getAllByRole('button', { name: 'Set' })[0])
-  fireEvent.change(screen.getByPlaceholderText('Enter API key…'), { target: { value: 'ss-key' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+  const semanticScholarSection = screen.getByText('Semantic Scholar API Key').closest('.py-3')
+  fireEvent.click(within(semanticScholarSection).getByRole('button', { name: 'Set' }))
+  fireEvent.change(within(semanticScholarSection).getByPlaceholderText('Enter API key…'), { target: { value: 'ss-key' } })
+  fireEvent.click(within(semanticScholarSection).getByRole('button', { name: 'Save' }))
   await waitFor(() => expect(mocks.validateSemanticScholarKey).toHaveBeenCalledWith('ss-key'))
 }
 
@@ -104,6 +114,13 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     mocks.validateSemanticScholarKey.mockResolvedValue({ data: { valid: true } })
     mocks.setSemanticScholarKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
     mocks.deleteSemanticScholarKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
+    mocks.getGoogleBooksKeyStatus.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
+    mocks.validateGoogleBooksKey.mockResolvedValue({ data: { valid: true } })
+    mocks.setGoogleBooksKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
+    mocks.deleteGoogleBooksKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
+    mocks.getContactEmail.mockResolvedValue({ data: { contact_email: '', storage: 'database' } })
+    mocks.setContactEmail.mockResolvedValue({ data: { contact_email: 'maintainer@example.org', storage: 'database' } })
+    mocks.deleteContactEmail.mockResolvedValue({ data: { contact_email: '', storage: 'database' } })
     mocks.getPaperclipKeyStatus.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
     mocks.setPaperclipKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
     mocks.deletePaperclipKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
@@ -126,6 +143,17 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
       modelStatus: null,
       modelError: null,
     })
+  })
+
+  it('updates the Google Books magazine fallback option', async () => {
+    render(<SettingsPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }))
+
+    const toggle = await screen.findByRole('checkbox', { name: 'Enable Google Books magazine fallback' })
+    expect(toggle).toBeChecked()
+    fireEvent.click(toggle)
+
+    expect(mocks.updateSetting).toHaveBeenCalledWith('google_books_include_magazines', false)
   })
 
   it('stores Semantic Scholar keys in the browser cache in multi-user mode', async () => {
@@ -205,7 +233,7 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'API Keys' }))
 
     await waitFor(() => {
-      expect(screen.getAllByRole('button', { name: 'Remove' }).length).toBe(2)
+      expect(screen.getAllByRole('button', { name: 'Remove' }).length).toBe(3)
     })
   })
 })
