@@ -1515,6 +1515,15 @@ async def lifespan(app: FastAPI):
                 logger.info("Paperclip API key restored from settings; secondary tier active")
         except Exception as e:
             logger.debug(f"Could not hydrate Paperclip key: {e}")
+        try:
+            stored_contact_email = await db.get_setting("contact_email")
+            if stored_contact_email and not os.environ.get("REFCHECKER_CONTACT_EMAIL"):
+                os.environ["REFCHECKER_CONTACT_EMAIL"] = stored_contact_email
+            stored_open_library_delay = await db.get_setting("open_library_rate_limit_delay")
+            if stored_open_library_delay:
+                os.environ["REFCHECKER_OPEN_LIBRARY_RATE_LIMIT_DELAY"] = stored_open_library_delay
+        except Exception as e:
+            logger.debug(f"Could not hydrate Open Library settings: {e}")
 
     # In multiuser mode, pre-start GROBID so users without LLM keys can extract refs
     if is_multiuser_mode():
@@ -6391,6 +6400,68 @@ class PaperclipKeyUpdate(BaseModel):
     api_key: str
 
 
+def _validate_contact_email(value: str) -> str:
+    """Validate the address sent to public metadata providers in User-Agent."""
+    from email.utils import parseaddr
+
+    email = (value or "").strip()
+    _display_name, parsed = parseaddr(email)
+    if not email or parsed != email:
+        raise HTTPException(status_code=400, detail="Enter a valid contact email address")
+    local, _, domain = email.rpartition("@")
+    if not local or not domain or "." not in domain:
+        raise HTTPException(status_code=400, detail="Enter a valid contact email address")
+    return email
+
+
+@app.get("/api/settings/contact-email")
+async def get_contact_email(current_user: UserInfo = Depends(require_user)):
+    """Return the public contact address used to identify RefChecker requests."""
+    env_email = os.getenv("REFCHECKER_CONTACT_EMAIL")
+    if is_multiuser_mode():
+        return {
+            "contact_email": env_email or "",
+            "storage": "environment" if env_email else "environment-only",
+            "message": "Contact email is configured by the server in multi-user mode",
+        }
+    return {
+        "contact_email": env_email or await db.get_setting("contact_email") or "",
+        "storage": "environment" if env_email else "database",
+        "message": "Used in RefChecker's User-Agent for Open Library and other public metadata APIs",
+    }
+
+
+@app.put("/api/settings/contact-email")
+async def set_contact_email(
+    data: Dict[str, Any],
+    current_user: UserInfo = Depends(require_user),
+):
+    """Store a single-user contact email and apply it to the next check."""
+    if is_multiuser_mode():
+        raise HTTPException(
+            status_code=410,
+            detail="Contact email is configured by the server in multi-user mode",
+        )
+    email = _validate_contact_email(str(data.get("contact_email") or ""))
+    await db.set_setting("contact_email", email)
+    # The WebUI's shared checker is created per check and reads this value.
+    os.environ["REFCHECKER_CONTACT_EMAIL"] = email
+    return {"contact_email": email, "storage": "database", "message": "Contact email saved and active for the next check"}
+
+
+@app.delete("/api/settings/contact-email")
+async def delete_contact_email(current_user: UserInfo = Depends(require_user)):
+    """Remove a single-user contact email."""
+    if is_multiuser_mode():
+        raise HTTPException(
+            status_code=410,
+            detail="Contact email is configured by the server in multi-user mode",
+        )
+    await db.delete_setting("contact_email")
+    os.environ.pop("REFCHECKER_CONTACT_EMAIL", None)
+    return {"contact_email": "", "storage": "database", "message": "Contact email removed"}
+
+
 @app.get("/api/settings/paperclip")
 async def get_paperclip_key_status(current_user: UserInfo = Depends(require_user)):
     """Return Paperclip API key storage status."""
@@ -6569,6 +6640,17 @@ async def get_all_settings(current_user: UserInfo = Depends(require_user)):
                 "min": 1.0,
                 "max": 10.0,
                 "step": 0.1,
+            },
+            "open_library_rate_limit_delay": {
+                "value": float(await db.get_setting("open_library_rate_limit_delay") or 1.0),
+                "default": 1.0,
+                "type": "number",
+                "label": "Open Library Rate Limit (seconds)",
+                "description": "Minimum delay between Open Library API requests. Set at least 0.34 s when an API contact email is configured; otherwise RefChecker enforces 1.0 s.",
+                "section": "API Keys",
+                "min": 0.34,
+                "max": 10.0,
+                "step": 0.01,
             }
         }
 
@@ -6640,7 +6722,8 @@ async def update_setting(
             "db_path",
             "cache_dir",
             "extraction_mode",
-            "ss_rate_limit_delay"
+            "ss_rate_limit_delay",
+            "open_library_rate_limit_delay"
         }
         if setting_key not in valid_keys:
             raise HTTPException(status_code=400, detail=f"Unknown setting: {setting_key}")
@@ -6656,6 +6739,17 @@ async def update_setting(
             # Update the live singleton immediately — no restart needed
             from refchecker.utils.semantic_scholar_rate_limiter import SemanticScholarRateLimiter
             SemanticScholarRateLimiter.get_instance().set_delay(delay)
+            return {"key": setting_key, "value": delay, "message": "Setting updated"}
+
+        if setting_key == "open_library_rate_limit_delay":
+            try:
+                delay = float(update.value)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="open_library_rate_limit_delay must be a number")
+            if delay < 0.34:
+                raise HTTPException(status_code=400, detail="open_library_rate_limit_delay must be at least 0.34 seconds")
+            await db.set_setting("open_library_rate_limit_delay", str(delay))
+            os.environ["REFCHECKER_OPEN_LIBRARY_RATE_LIMIT_DELAY"] = str(delay)
             return {"key": setting_key, "value": delay, "message": "Setting updated"}
         
         # Apply setting-specific validation
@@ -7905,6 +7999,7 @@ async def verify_single_reference(
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
         from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
+        from refchecker.core.refchecker import ArxivReferenceChecker
 
         ss_api_key = await _resolve_semantic_scholar_api_key(None)
         checker = EnhancedHybridReferenceChecker(
@@ -7918,10 +8013,13 @@ async def verify_single_reference(
         def _run_verify():
             _usage_tracker.set_current_check(str(check_id))
             with _usage_tracker.FlowScope("reverify"):
-                return checker.verify_reference(
+                shared_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+                shared_checker.non_arxiv_checker = checker
+                errors, url, verified_data = shared_checker.verify_reference_standard(
+                    None,
                     dict(target),
-                    force_all_databases=force_all_databases,
                 )
+                return verified_data, errors, url
 
         import asyncio
         verified_data, errors, url = await asyncio.to_thread(_run_verify)

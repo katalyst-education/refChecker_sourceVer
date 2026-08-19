@@ -94,6 +94,12 @@ export const getSemanticScholarKeyStatus = () => api.get('/settings/semantic-sch
 export const setSemanticScholarKey = (apiKey) => api.put('/settings/semantic-scholar', { api_key: apiKey })
 export const deleteSemanticScholarKey = () => api.delete('/settings/semantic-scholar')
 
+// Public contact detail included in the User-Agent for Open Library and
+// other polite-pool metadata requests. This is not an API key.
+export const getContactEmail = () => api.get('/settings/contact-email')
+export const setContactEmail = (contactEmail) => api.put('/settings/contact-email', { contact_email: contactEmail })
+export const deleteContactEmail = () => api.delete('/settings/contact-email')
+
 // Paperclip secondary verification tier — biomedical full-text +
 // arXiv. Single-user mode stores the key in the local database; multi-user
 // mode keeps it in the browser key cache and sends it per request.

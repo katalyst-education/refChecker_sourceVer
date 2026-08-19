@@ -3567,48 +3567,19 @@ class ProgressRefChecker:
             return self._verify_reference_body(reference)
 
     def _verify_reference_body(self, reference: Dict[str, Any]):
-        # Repair parsed field swaps before GitHub detection and before the
-        # shared checker sees the reference. The fixup is idempotent.
-        fixup_reference_fields(reference)
+        """Run shared CLI orchestration with the WebUI's hybrid checker.
 
-        # GitHub references bypass the hybrid checker (same as CLI's
-        # verify_reference_standard → verify_github_reference).
-        github_url = None
-        if reference.get('url') and 'github.com' in reference['url']:
-            github_url = reference['url']
-        elif reference.get('venue') and 'github.com' in (reference.get('venue') or ''):
-            for part in reference['venue'].split():
-                if 'github.com' in part:
-                    github_url = part
-                    break
-
-        if github_url:
-            from refchecker.checkers.github_checker import GitHubChecker
-            github_checker = GitHubChecker()
-            verified_data, errors, paper_url = github_checker.verify_reference(reference)
-            if verified_data:
-                # Re-format to preserve warning_type / info_type keys
-                formatted = []
-                for error in (errors or []):
-                    fe = {}
-                    for key in ('error_type', 'error_details', 'warning_type',
-                                'warning_details', 'info_type', 'info_details',
-                                'ref_year_correct', 'ref_url_correct'):
-                        if key in error:
-                            fe[key] = error[key]
-                    formatted.append(fe)
-                return verified_data, formatted or None, paper_url
-            else:
-                formatted = []
-                for error in errors:
-                    fe = {}
-                    if 'error_type' in error:
-                        fe['error_type'] = error['error_type']
-                        fe['error_details'] = error['error_details']
-                    formatted.append(fe)
-                return None, formatted or [{"error_type": "unverified", "error_details": "GitHub repository could not be verified"}], paper_url
-
-        return self.checker.verify_reference(reference)
+        WebUI used to call the hybrid checker directly, bypassing the common
+        cited-webpage dispatch.  That made a missing webpage appear as a
+        failed scholarly-paper search only in the WebUI.
+        """
+        shared_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+        shared_checker.non_arxiv_checker = self.checker
+        errors, url, verified_data = shared_checker.verify_reference_standard(
+            None,
+            reference,
+        )
+        return verified_data, errors, url
 
     def _standard_refcheck_for_hallucination(self, reference: Dict[str, Any]):
         """Run the normal WebUI verifier for LLM-found metadata.

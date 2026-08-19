@@ -32,6 +32,49 @@ def test_ai_vendor_model_docs_are_web_page_urls():
     )
 
 
+def test_any_cited_web_url_is_an_explicit_web_reference():
+    checker = WebPageChecker()
+
+    assert checker.is_explicit_web_reference({
+        "title": "Periodensystem der Elemente",
+        # Extracted references commonly retain the original link in
+        # ``cited_url`` rather than normalising it to ``url``.
+        "cited_url": "http://www.periodensystem.info/",
+    })
+
+
+def test_academic_source_url_is_checked_before_database_search():
+    checker = WebPageChecker()
+
+    assert checker.is_explicit_web_reference({
+        "title": "Some paper",
+        "venue": "arxiv.org",
+        "url": "https://arxiv.org/abs/2402.07314",
+    })
+
+
+def test_unrecognised_cited_site_is_fetched_before_title_search(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    html = """
+    <html><head><title>A useful reference page</title></head>
+    <body><main><p>A useful reference page.</p></main></body></html>
+    """
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda url: DummyResponse(html, url=url),
+    )
+
+    data, errors, url = checker.verify_reference({
+        "title": "A useful reference page",
+        "url": "https://ordinary-example.invalid/source",
+    })
+
+    assert data is not None
+    assert errors == []
+    assert url == "https://ordinary-example.invalid/source"
+
+
 def test_model_card_and_release_venues_are_web_content():
     checker = WebPageChecker()
 

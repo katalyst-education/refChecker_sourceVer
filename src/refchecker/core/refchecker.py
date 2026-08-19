@@ -420,9 +420,10 @@ class ArxivReferenceChecker:
             semantic_scholar_api_key=semantic_scholar_api_key,
             db_path=self.db_path,
             db_paths=self.db_paths,
-            contact_email=None,
+            contact_email=os.environ.get("REFCHECKER_CONTACT_EMAIL"),
             enable_openalex=True,
             enable_crossref=True,
+            enable_open_library=True,
             debug_mode=debug_mode,
             cache_dir=cache_dir,
         )
@@ -3506,7 +3507,7 @@ class ArxivReferenceChecker:
             None if this is not a web page reference
         """
         # Check if this is a web page reference
-        web_url = reference.get('url', '').strip()
+        web_url = reference.get('url', '').strip() or reference.get('cited_url', '').strip()
         if not web_url:
             return None  # No URL to check
         
@@ -3514,7 +3515,7 @@ class ArxivReferenceChecker:
         from refchecker.checkers.webpage_checker import WebPageChecker
         webpage_checker = WebPageChecker()
         
-        if not webpage_checker.is_web_page_url(web_url):
+        if not webpage_checker.is_explicit_web_reference(reference):
             return None  # Not a web page reference
         
         logger.debug(f"Detected web page URL, using web page verification: {web_url}")
@@ -3541,18 +3542,29 @@ class ArxivReferenceChecker:
                 
                 formatted_errors.append(formatted_error)
             
+            # A fetched page whose title does not identify the cited work is
+            # a source mismatch, not permission to replace the citation with
+            # an unrelated database title match.
             return formatted_errors if formatted_errors else None, page_url, verified_data
         else:
-            logger.debug(f"Web page verification failed for: {reference.get('title', 'Untitled')}")
-            # Return web page verification errors
+            # The cited source was checked but could not be verified.  Keep
+            # that concrete source error rather than replacing it with an
+            # unrelated "paper not found" result from metadata databases.
             formatted_errors = []
             for error in errors:
-                formatted_error = {}
                 if 'error_type' in error:
-                    formatted_error['error_type'] = error['error_type']
-                    formatted_error['error_details'] = error['error_details']
-                formatted_errors.append(formatted_error)
-            return formatted_errors if formatted_errors else [{"error_type": "unverified", "error_details": "Web page could not be verified"}], page_url, None
+                    formatted_errors.append({
+                        'error_type': error['error_type'],
+                        'error_details': error.get('error_details', ''),
+                    })
+            return (
+                formatted_errors or [{
+                    'error_type': 'unverified',
+                    'error_details': 'Web page could not be verified',
+                }],
+                page_url or web_url,
+                None,
+            )
 
     def verify_raw_url_reference(self, reference):
         """

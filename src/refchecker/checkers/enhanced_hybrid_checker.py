@@ -100,6 +100,7 @@ class EnhancedHybridReferenceChecker:
                  paperclip_api_key: Optional[str] = None,
                  enable_openalex: bool = True,
                  enable_crossref: bool = True,
+                 enable_open_library: bool = True,
                  enable_arxiv_citation: bool = True,
                  enable_acl_anthology: bool = True,
                  enable_paperclip: Optional[bool] = None,
@@ -115,6 +116,7 @@ class EnhancedHybridReferenceChecker:
             contact_email: Email for polite pool access to APIs
             enable_openalex: Whether to use OpenAlex API
             enable_crossref: Whether to use CrossRef API
+            enable_open_library: Whether to use Open Library as a book-reference fallback
             enable_arxiv_citation: Whether to use ArXiv Citation checker as authoritative source
             enable_acl_anthology: Whether to use ACL Anthology API
             debug_mode: Whether to enable debug logging
@@ -181,6 +183,13 @@ class EnhancedHybridReferenceChecker:
             self.crossref = self._initialize_checker(
                 'crossref', 'CrossRefReferenceChecker', 'CrossRef API', email=contact_email
             )
+
+        self.open_library = None
+        if enable_open_library:
+            self.open_library = self._initialize_checker(
+                'open_library', 'OpenLibraryReferenceChecker', 'Open Library API', email=contact_email
+            )
+
         
         # Initialize OpenReview checker
         self.openreview = self._initialize_checker(
@@ -233,7 +242,7 @@ class EnhancedHybridReferenceChecker:
         self.cache_dir = cache_dir
         all_local_checkers = [checker for _, _, checker in self.local_db_checkers]
         for checker in (self.arxiv_citation, *all_local_checkers, self.semantic_scholar,
-                        self.openalex, self.crossref, self.openreview, self.dblp,
+                        self.openalex, self.crossref, self.open_library, self.openreview, self.dblp,
                         self.acl_anthology, self.paperclip):
             if checker is not None:
                 checker.cache_dir = cache_dir
@@ -244,6 +253,7 @@ class EnhancedHybridReferenceChecker:
             'semantic_scholar': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'openalex': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'crossref': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'open_library': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'openreview': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'dblp': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'acl_anthology': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
@@ -270,6 +280,7 @@ class EnhancedHybridReferenceChecker:
             'semantic_scholar': threading.Semaphore(3),  # moderate parallelism
             'crossref': threading.Semaphore(3),
             'openalex': threading.Semaphore(3),
+            'open_library': threading.Semaphore(1),
             'dblp': threading.Semaphore(2),
             'openreview': threading.Semaphore(2),
             'acl_anthology': threading.Semaphore(2),
@@ -333,6 +344,7 @@ class EnhancedHybridReferenceChecker:
             'semantic_scholar': 'Semantic Scholar',
             'openalex': 'OpenAlex',
             'crossref': 'CrossRef',
+            'open_library': 'Open Library',
             'dblp': 'DBLP',
             'openreview': 'OpenReview',
             'acl_anthology': 'ACL Anthology',
@@ -1246,6 +1258,8 @@ class EnhancedHybridReferenceChecker:
             fallback_apis.append(('crossref', self.crossref))
         if self.openalex:
             fallback_apis.append(('openalex', self.openalex))
+        if self.open_library:
+            fallback_apis.append(('open_library', self.open_library))
         if self.dblp:
             fallback_apis.append(('dblp', self.dblp))
         if self.acl_anthology:
@@ -1266,7 +1280,7 @@ class EnhancedHybridReferenceChecker:
                     futures[api_name] = pool.submit(
                         self._try_api, api_name, api_instance, reference)
 
-            priority = ['crossref', 'openalex', 'dblp', 'acl_anthology', 'paperclip']
+            priority = ['crossref', 'openalex', 'open_library', 'dblp', 'acl_anthology', 'paperclip']
             for api_name in priority:
                 if api_name not in futures:
                     continue

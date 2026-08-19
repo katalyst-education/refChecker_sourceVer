@@ -15,6 +15,15 @@ const REPO_URL = 'https://github.com/ArioMoniri/refchecker'
 // release downloads stay on this fork (where the desktop builds are published).
 const ISSUES_URL = 'https://github.com/markrussinovich/refchecker'
 
+function formatApiError(detail, fallback) {
+  if (typeof detail === 'string' && detail) return detail
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => item?.msg || item?.message).filter(Boolean)
+    if (messages.length) return messages.join('; ')
+  }
+  return fallback
+}
+
 /**
  * Settings panel component - ChatGPT-style with left navigation
  */
@@ -98,6 +107,12 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [ssError, setSsError] = useState(null)
   const [ssServerHasKey, setSsServerHasKey] = useState(false)
   const [ssKeyStorage, setSsKeyStorage] = useState(null)
+  const [contactEmail, setContactEmail] = useState('')
+  const [contactEmailDraft, setContactEmailDraft] = useState('')
+  const [contactEmailEditing, setContactEmailEditing] = useState(false)
+  const [contactEmailSaving, setContactEmailSaving] = useState(false)
+  const [contactEmailError, setContactEmailError] = useState(null)
+  const [contactEmailStorage, setContactEmailStorage] = useState(null)
   const ssHasKey = hasKey('semantic_scholar') || ssServerHasKey
   const pcHasKey = hasKey('paperclip') || pcServerHasKey
   // Server env keys ("environment" storage) serve all sessions, like env
@@ -458,6 +473,15 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   }
   useEffect(refreshPcKeyStatus, [])
 
+
+  const refreshContactEmail = () => {
+    api.getContactEmail().then(res => {
+      setContactEmail(res.data.contact_email || '')
+      setContactEmailStorage(res.data.storage || null)
+    }).catch(() => {})
+  }
+  useEffect(refreshContactEmail, [])
+
   // Close on escape key
   useEffect(() => {
     const handleEscape = (e) => {
@@ -564,6 +588,36 @@ export default function SettingsPanel({ theme, onThemeChange }) {
     setSsIsEditing(false)
     setSsApiKey('')
     setSsError(null)
+  }
+
+  const handleContactEmailSave = async () => {
+    try {
+      setContactEmailSaving(true)
+      setContactEmailError(null)
+      const response = await api.setContactEmail(contactEmailDraft.trim())
+      setContactEmail(response.data.contact_email || contactEmailDraft.trim())
+      setContactEmailEditing(false)
+      setContactEmailDraft('')
+    } catch (err) {
+      setContactEmailError(formatApiError(err.response?.data?.detail, 'Failed to save contact email'))
+    } finally {
+      setContactEmailSaving(false)
+    }
+  }
+
+  const handleContactEmailDelete = async () => {
+    try {
+      setContactEmailSaving(true)
+      setContactEmailError(null)
+      await api.deleteContactEmail()
+      setContactEmail('')
+      setContactEmailDraft('')
+      setContactEmailEditing(false)
+    } catch (err) {
+      setContactEmailError(formatApiError(err.response?.data?.detail, 'Failed to remove contact email'))
+    } finally {
+      setContactEmailSaving(false)
+    }
   }
 
   // Paperclip key handlers — same shape as SS but no separate
@@ -2071,6 +2125,37 @@ export default function SettingsPanel({ theme, onThemeChange }) {
 
   const renderAPIKeysSection = () => (
     <div className="space-y-1">
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>API Contact Email</div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Identifies RefChecker to Open Library. This enables its 3 requests/second identified-client limit.
+              {multiuser && ' Configured by the server in multi-user mode.'}
+            </div>
+          </div>
+          {!contactEmailEditing && !multiuser && (
+            <div className="flex items-center gap-2">
+              <button onClick={() => { setContactEmailDraft(contactEmail); setContactEmailEditing(true); setContactEmailError(null) }} className="text-xs px-2 py-1 rounded cursor-pointer" style={{ color: 'var(--color-accent)' }}>
+                {contactEmail ? 'Edit' : 'Set'}
+              </button>
+              {contactEmail && <button onClick={handleContactEmailDelete} disabled={contactEmailSaving} className="text-xs px-2 py-1 rounded cursor-pointer" style={{ color: 'var(--color-error)' }}>Remove</button>}
+            </div>
+          )}
+        </div>
+        {multiuser && contactEmail && <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{contactEmail}</div>}
+        {contactEmailEditing && (
+          <div className="mt-2 space-y-2">
+            <div className="flex gap-2">
+              <input type="email" value={contactEmailDraft} onChange={(e) => setContactEmailDraft(e.target.value)} placeholder="maintainer@example.org" className="flex-1 px-2 py-1.5 text-sm rounded border" style={{ backgroundColor: 'var(--color-bg-primary)', borderColor: contactEmailError ? 'var(--color-error)' : 'var(--color-border)', color: 'var(--color-text-primary)' }} disabled={contactEmailSaving} autoFocus onKeyDown={(e) => { if (e.key === 'Enter' && contactEmailDraft.trim()) handleContactEmailSave(); if (e.key === 'Escape') setContactEmailEditing(false) }} />
+              <button onClick={handleContactEmailSave} disabled={contactEmailSaving || !contactEmailDraft.trim()} className="px-3 py-1.5 text-xs rounded cursor-pointer" style={{ backgroundColor: 'var(--color-accent)', color: 'white', opacity: contactEmailSaving || !contactEmailDraft.trim() ? 0.5 : 1 }}>Save</button>
+              <button onClick={() => { setContactEmailEditing(false); setContactEmailError(null) }} disabled={contactEmailSaving} className="px-3 py-1.5 text-xs rounded border cursor-pointer" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}>Cancel</button>
+            </div>
+            {contactEmailError && <div className="text-xs" style={{ color: 'var(--color-error)' }}>{contactEmailError}</div>}
+          </div>
+        )}
+        {!contactEmailEditing && !multiuser && contactEmail && <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{contactEmailStorage === 'environment' ? 'Provided by the environment.' : 'Saved locally and applied to the next check.'}</div>}
+      </div>
       {/* Semantic Scholar API Key */}
       <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
         <div className="flex items-center justify-between mb-1">
@@ -2155,6 +2240,20 @@ export default function SettingsPanel({ theme, onThemeChange }) {
             )}
           </div>
         )}
+      </div>
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>Open Library Rate Limit</div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Minimum delay between Open Library requests. Use 0.34 s or more with a contact email; anonymous requests remain limited to 1.0 s.
+            </div>
+          </div>
+          <div className="flex items-center gap-2 ml-4">
+            <input type="number" min="0.34" max="10" step="0.01" value={settings?.open_library_rate_limit_delay?.value ?? 1.0} onChange={(e) => { const value = parseFloat(e.target.value); if (!isNaN(value) && value >= 0.34) updateSetting('open_library_rate_limit_delay', value) }} className="w-20 px-2 py-1 text-sm rounded border text-right" style={{ backgroundColor: 'var(--color-bg-primary)', borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }} />
+            <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>s</span>
+          </div>
+        </div>
       </div>
       {/* Semantic Scholar Rate Limit */}
       <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>

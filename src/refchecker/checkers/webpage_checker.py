@@ -91,6 +91,34 @@ class WebPageChecker:
         ]
         
         return any(indicator in url.lower() for indicator in doc_indicators) or self._is_likely_webpage(url)
+
+    def is_explicit_web_reference(self, reference: Dict[str, Any]) -> bool:
+        """Whether a citation explicitly identifies its URL as a web source.
+
+        Any URL printed in a reference is evidence supplied by the author.
+        Fetch it before a database title search, regardless of whether its
+        host or venue looks like conventional documentation.  The fetched
+        page must still identify the cited title before it can verify the
+        reference; otherwise the caller may continue to database search and
+        present a possible match as a suggestion.
+        """
+        url = self._reference_url(reference)
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+            return False
+
+        url_lower = url.lower()
+        if 'github.com' in parsed.hostname.lower():
+            return False
+        if 'api.semanticscholar.org/corpusid:' in url_lower:
+            return False
+        non_web_extensions = ('.doc', '.docx', '.zip', '.tar.gz', '.exe', '.dmg')
+        return not any(url_lower.endswith(extension) for extension in non_web_extensions)
     
     def _is_likely_webpage(self, url: str) -> bool:
         """Check if URL pattern suggests it's a webpage"""
@@ -146,7 +174,7 @@ class WebPageChecker:
         
         # Extract web URL from reference
         web_url = self._reference_url(reference)
-        if not web_url or not self.is_web_page_url(web_url):
+        if not web_url or not self.is_explicit_web_reference(reference):
             logger.debug("No verifiable web URL found in reference")
             return None, [], None
         

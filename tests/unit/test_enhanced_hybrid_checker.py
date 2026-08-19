@@ -202,6 +202,7 @@ def _build_checker():
     checker.semantic_scholar = NoMatchChecker()
     checker.crossref = TimeoutChecker()
     checker.openalex = None
+    checker.open_library = None
     checker.dblp = None
     checker.openreview = None
     return checker
