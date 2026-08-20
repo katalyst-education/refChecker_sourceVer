@@ -4942,7 +4942,11 @@ class ArxivReferenceChecker:
             deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
             if deterministic_references:
                 from refchecker.utils.text_utils import validate_parsed_references
-                validation = validate_parsed_references(deterministic_references)
+                validation = validate_parsed_references(
+                    deterministic_references,
+                    require_all=True,
+                    expected_count=expected_numbered_count,
+                )
                 complete = len(deterministic_references) >= expected_numbered_count
                 if validation['is_valid'] and complete:
                     logger.info(
@@ -4954,6 +4958,45 @@ class ArxivReferenceChecker:
                     self.fatal_error = False
                     self.fatal_error_message = None
                     return deterministic_references
+
+                # Repair only the entries that failed structural validation.
+                # This keeps cascade mode cheap and, more importantly, grounds
+                # the LLM in the exact cited strings instead of asking it to
+                # reinterpret an otherwise good bibliography wholesale.
+                invalid_indices = validation.get('invalid_indices') or []
+                if self.llm_extractor and complete and invalid_indices:
+                    invalid_entries = [
+                        numbered_entries[index]
+                        for index in invalid_indices
+                        if index < len(numbered_entries)
+                    ]
+                    repaired_raw = self._extract_numbered_references_with_llm_chunks(
+                        invalid_entries
+                    )
+                    repaired = self._process_llm_extracted_references(repaired_raw)
+                    if len(repaired) == len(invalid_indices):
+                        repaired_candidate = list(deterministic_references)
+                        for index, repaired_ref, raw_entry in zip(
+                            invalid_indices, repaired, invalid_entries
+                        ):
+                            repaired_ref = dict(repaired_ref)
+                            repaired_ref.setdefault('raw_text', raw_entry)
+                            repaired_candidate[index] = repaired_ref
+                        repaired_validation = validate_parsed_references(
+                            repaired_candidate,
+                            require_all=True,
+                            expected_count=expected_numbered_count,
+                        )
+                        if repaired_validation['is_valid']:
+                            logger.info(
+                                "Using deterministic extraction with %d targeted "
+                                "LLM-repaired reference(s)",
+                                len(invalid_indices),
+                            )
+                            self.last_reference_parser_method = 'llm'
+                            self.fatal_error = False
+                            self.fatal_error_message = None
+                            return repaired_candidate
                 logger.info(
                     "Deterministic extraction needs LLM fallback "
                     f"(quality {validation['quality_score']:.2f}, "
@@ -6813,7 +6856,7 @@ class ArxivReferenceChecker:
                 
                 # Validate the parsed references and fallback to LLM if needed
                 from refchecker.utils.text_utils import validate_parsed_references
-                validation = validate_parsed_references(references)
+                validation = validate_parsed_references(references, require_all=True)
                 
                 if not validation['is_valid']:
                     logger.debug(f"LaTeX parsing validation failed (quality: {validation['quality_score']:.2f})")
@@ -6970,6 +7013,23 @@ class ArxivReferenceChecker:
                 "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
             )
             if grobid_references:
+                from refchecker.utils.extraction_quality import (
+                    merge_grounded_reference_candidates,
+                    strict_numbered_text_candidate,
+                )
+
+                comparison_bibliography = self.find_bibliography_section(text)
+                fatal_state = (self.fatal_error, self.fatal_error_message)
+                try:
+                    text_candidate, _ = strict_numbered_text_candidate(
+                        self, comparison_bibliography
+                    )
+                finally:
+                    self.fatal_error, self.fatal_error_message = fatal_state
+                if text_candidate:
+                    grobid_references = merge_grounded_reference_candidates(
+                        grobid_references, text_candidate
+                    )
                 return grobid_references
         
         if not text:

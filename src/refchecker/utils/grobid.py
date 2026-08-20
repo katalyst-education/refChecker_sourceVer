@@ -135,8 +135,15 @@ def extract_refs_via_grobid(pdf_path: str) -> List[Dict[str, Any]]:
     for bib in root.iter(f'{ns}biblStruct'):
         ref: Dict[str, Any] = {
             "authors": [], "title": "", "venue": "", "year": None,
-            "url": "", "doi": None, "type": "other",
+            "url": "", "doi": None, "type": "other", "raw_text": "",
         }
+        # processReferences includes the original citation in a TEI note when
+        # includeRawCitations=1.  Preserve it so later validation/repair remains
+        # grounded in what the PDF actually says.
+        for note in bib.iter(f'{ns}note'):
+            if (note.get('type') or '').lower() in {'raw_reference', 'raw citation', 'raw_citation'}:
+                ref["raw_text"] = " ".join("".join(note.itertext()).split())
+                break
         for pers in bib.iter(f'{ns}persName'):
             forenames = [fn.text for fn in pers.iter(f'{ns}forename') if fn.text]
             surname = ""
@@ -195,12 +202,15 @@ def extract_pdf_references_with_grobid_fallback(
     llm_available: bool,
     extraction_mode: str = 'cascade',
     failure_message: Optional[str] = None,
+    return_weak_candidate: bool = False,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """Try GROBID according to the shared extraction policy.
 
     Cascade mode tries GROBID even when an LLM is configured. If GROBID cannot
     produce references and an LLM is available, ``(None, None)`` tells the
     caller to continue to its LLM fallback. ``llm-only`` always skips GROBID.
+    ``return_weak_candidate`` is for orchestrators that want to retain weak
+    GROBID output as a last-resort fallback after trying other parsers.
     """
     from refchecker.utils.extraction_policy import normalize_extraction_mode
 
@@ -238,7 +248,18 @@ def extract_pdf_references_with_grobid_fallback(
                 pass
 
     if references:
-        return references, 'grobid'
+        from refchecker.utils.text_utils import validate_parsed_references
+
+        validation = validate_parsed_references(references, require_all=True)
+        if validation['is_valid'] or not llm_available or return_weak_candidate:
+            return references, 'grobid'
+        logger.info(
+            "GROBID produced structurally weak references (quality %.2f; %d bad); "
+            "continuing with parser/LLM fallback",
+            validation['quality_score'],
+            len(validation['invalid_indices']),
+        )
+        return None, None
 
     if llm_available:
         logger.info("GROBID produced no references; continuing with LLM fallback")

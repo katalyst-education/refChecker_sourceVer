@@ -190,6 +190,46 @@ S. Umeyama,
         self.assertEqual(validation['quality_score'], 0.75)
         self.assertEqual(len(validation['issues']), 1)  # Only 1 bad reference
 
+    def test_strict_validation_rejects_one_bad_reference(self):
+        references = [
+            {'title': 'Good Paper 1', 'authors': ['Author A'], 'year': 2023},
+            {'title': 'Good Paper 2', 'authors': ['Author B'], 'year': 2023},
+            {'title': 'Good Paper 3', 'authors': ['Author C'], 'year': 2023},
+            {'title': '', 'authors': [], 'year': None},
+        ]
+
+        validation = validate_parsed_references(references, require_all=True)
+
+        self.assertFalse(validation['is_valid'])
+        self.assertEqual(validation['invalid_indices'], [3])
+
+    def test_validation_detects_collapsed_and_split_author_lists(self):
+        collapsed = validate_parsed_references([{
+            'title': 'A Complete Paper Title',
+            'authors': ['Alice Smith and Bob Jones'],
+            'year': 2024,
+        }], require_all=True)
+        fragmented = validate_parsed_references([{
+            'title': 'Another Complete Paper',
+            'authors': ['E', 'Jang', 'S', 'Gu', 'B', 'Poole'],
+            'year': 2024,
+        }], require_all=True)
+
+        self.assertFalse(collapsed['is_valid'])
+        self.assertIn('multiple authors collapsed', collapsed['issues'][0])
+        self.assertFalse(fragmented['is_valid'])
+        self.assertIn('author initials were split', fragmented['issues'][0])
+
+    def test_strict_validation_checks_expected_reference_count(self):
+        validation = validate_parsed_references(
+            [{'title': 'Good Paper', 'authors': ['Author A'], 'year': 2023}],
+            require_all=True,
+            expected_count=2,
+        )
+
+        self.assertFalse(validation['is_valid'])
+        self.assertIn('Reference count mismatch', validation['issues'][-1])
+
 
 if __name__ == '__main__':
     unittest.main()

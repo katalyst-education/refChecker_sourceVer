@@ -1999,18 +1999,6 @@ class ProgressRefChecker:
                     return
                 bibliography_source_kind = 'pdf' if normalized in {'file', 'pdf', 'grobid'} else normalized
 
-            async def maybe_extract_grobid_references(pdf_path: str, failure_message: str):
-                refs, method = await asyncio.to_thread(
-                    extract_pdf_references_with_grobid_fallback,
-                    pdf_path=pdf_path,
-                    llm_available=bool(self.llm),
-                    extraction_mode=self.extraction_mode,
-                    failure_message=failure_message,
-                )
-                if refs:
-                    logger.info(f"Extracted {len(refs)} references via GROBID")
-                return refs, method
-
             bibliography_cache_identity = self._bibliography_cache_identity()
 
             async def maybe_update_title_from_direct_pdf(pdf_url: str) -> None:
@@ -2545,16 +2533,17 @@ class ProgressRefChecker:
                     references = arxiv_source_references
                     logger.info(f"Using {len(references)} references from ArXiv source files (method: {extraction_method})")
                 else:
-                    references = []
-                    if pdf_path_for_fallback and self.extraction_mode == 'cascade':
-                        fallback_refs, fallback_method = await maybe_extract_grobid_references(
+                    if pdf_path_for_fallback:
+                        references, pdf_method = await self._extract_references_from_pdf(
                             pdf_path_for_fallback,
-                            "No LLM or GROBID available for PDF reference extraction. Please configure an API key in Settings, or ensure Docker is installed so GROBID can auto-start.",
+                            paper_text,
+                            failure_message=(
+                                "No parser, LLM, or GROBID service could extract "
+                                "references from this PDF."
+                            ),
                         )
-                        if fallback_refs:
-                            references = fallback_refs
-                            set_extraction_method(fallback_method)
-                    if not references:
+                        set_extraction_method(pdf_method)
+                    else:
                         references = await self._extract_references(paper_text)
                         if self._last_reference_parser_method:
                             set_extraction_method(self._last_reference_parser_method)
@@ -3380,6 +3369,106 @@ class ProgressRefChecker:
             })
             raise
 
+    async def _extract_references_from_pdf(
+        self,
+        pdf_path: str,
+        paper_text: str,
+        *,
+        failure_message: Optional[str] = None,
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        """Run the shared, validated PDF cascade.
+
+        A non-empty GROBID response is only a candidate: it must pass strict
+        per-reference validation and, for numbered bibliographies, match the
+        count visible in the extracted text.  Weak candidates continue through
+        the same deterministic/LLM parser used by CLI and bulk.  If no better
+        parser is available, the GROBID candidate remains a best-effort fallback.
+
+        Both the initial WebUI check and per-reference document re-extraction
+        call this method so they cannot silently choose different PDF parsers.
+        """
+        if self.extraction_mode == 'llm-only':
+            references = await self._extract_references(paper_text)
+            return references, self._last_reference_parser_method or 'llm'
+
+        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
+        bibliography_text = await asyncio.to_thread(
+            cli_checker.find_bibliography_section, paper_text
+        )
+        from refchecker.utils.extraction_quality import (
+            merge_grounded_reference_candidates,
+            strict_numbered_text_candidate,
+        )
+        deterministic_candidate, expected_count = await asyncio.to_thread(
+            strict_numbered_text_candidate,
+            cli_checker,
+            bibliography_text,
+        )
+
+        grobid_candidate = None
+        grobid_error = None
+        try:
+            grobid_candidate, _ = await asyncio.to_thread(
+                extract_pdf_references_with_grobid_fallback,
+                pdf_path=pdf_path,
+                llm_available=bool(self.llm),
+                extraction_mode=self.extraction_mode,
+                failure_message=failure_message,
+                return_weak_candidate=True,
+            )
+        except ValueError as exc:
+            # A deterministic text parse can still succeed when GROBID is not
+            # installed, so defer this error until all cheap options are tried.
+            grobid_error = exc
+
+        if grobid_candidate:
+            from refchecker.utils.text_utils import validate_parsed_references
+
+            validation = await asyncio.to_thread(
+                validate_parsed_references,
+                grobid_candidate,
+                require_all=True,
+                expected_count=expected_count,
+            )
+            if validation['is_valid']:
+                normalized_grobid = [
+                    _normalize_reference_fields(ref) for ref in grobid_candidate
+                ]
+                if deterministic_candidate:
+                    normalized_grobid = merge_grounded_reference_candidates(
+                        normalized_grobid,
+                        [
+                            _normalize_reference_fields(ref)
+                            for ref in deterministic_candidate
+                        ],
+                    )
+                return (
+                    normalized_grobid,
+                    'grobid',
+                )
+            logger.info(
+                "GROBID candidate rejected by PDF cascade (quality %.2f, "
+                "parsed=%d, expected=%s, bad=%d)",
+                validation['quality_score'],
+                len(grobid_candidate),
+                expected_count,
+                len(validation['invalid_indices']),
+            )
+
+        parsed_references = await self._extract_references(paper_text)
+        if parsed_references:
+            return parsed_references, self._last_reference_parser_method or 'pdf'
+
+        if grobid_candidate:
+            logger.warning("Using weak GROBID candidate because no parser produced a replacement")
+            return (
+                [_normalize_reference_fields(ref) for ref in grobid_candidate],
+                'grobid',
+            )
+        if grobid_error is not None:
+            raise grobid_error
+        return [], self._last_reference_parser_method
+
     def _extract_pdf_text_scoped(self, pdf_path: str) -> str:
         """Run the CLI PDF-text extractor with check_id + FlowScope bound.
 
@@ -3451,7 +3540,9 @@ class ProgressRefChecker:
                 if refs:
                     # Validate the parsed references
                     from refchecker.utils.text_utils import validate_parsed_references
-                    validation = await asyncio.to_thread(validate_parsed_references, refs)
+                    validation = await asyncio.to_thread(
+                        validate_parsed_references, refs, require_all=True
+                    )
                     
                     if not validation['is_valid'] and self.llm:
                         logger.debug(f"LaTeX parsing validation failed (quality: {validation['quality_score']:.2f}), trying LLM fallback")

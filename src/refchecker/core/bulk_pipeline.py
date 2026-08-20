@@ -1000,6 +1000,23 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                     extraction_mode=getattr(checker, 'extraction_mode', 'cascade'),
                 )
                 if grobid_references:
+                    from refchecker.utils.extraction_quality import (
+                        merge_grounded_reference_candidates,
+                        strict_numbered_text_candidate,
+                    )
+
+                    comparison_bibliography = checker.find_bibliography_section(text)
+                    fatal_state = (checker.fatal_error, checker.fatal_error_message)
+                    try:
+                        text_candidate, _ = strict_numbered_text_candidate(
+                            checker, comparison_bibliography
+                        )
+                    finally:
+                        checker.fatal_error, checker.fatal_error_message = fatal_state
+                    if text_candidate:
+                        grobid_references = merge_grounded_reference_candidates(
+                            grobid_references, text_candidate
+                        )
                     checker.last_bibliography_extraction_method = 'grobid'
                     checker.fatal_error = False
                     checker.fatal_error_message = None
@@ -1114,7 +1131,10 @@ def parse_references_bulk(checker: Any, bibliography_text: str, extraction_batch
 
         if deterministic_references:
             from refchecker.utils.text_utils import validate_parsed_references
-            validation = validate_parsed_references(deterministic_references)
+            validation = validate_parsed_references(
+                deterministic_references,
+                require_all=True,
+            )
             if validation['is_valid']:
                 checker.fatal_error = False
                 checker.fatal_error_message = None

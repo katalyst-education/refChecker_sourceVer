@@ -4879,7 +4879,48 @@ def _is_arxiv_entry(fields):
     return False
 
 
-def validate_parsed_references(references):
+def _parsed_author_issues(authors):
+    """Return signs that an extracted author list was split incorrectly.
+
+    This is deliberately conservative.  It catches structural parser output
+    (multiple authors left inside one list item, empty items, or initials split
+    into standalone "authors") without trying to decide whether a genuinely
+    short author list is complete.  Completeness is handled by comparing parser
+    candidates in the PDF cascade.
+    """
+    issues = []
+    if not isinstance(authors, (list, tuple)):
+        return ['authors are not a list']
+
+    cleaned = [str(author or '').strip() for author in authors]
+    if any(not author for author in cleaned):
+        issues.append('empty author entry')
+
+    for author in cleaned:
+        if re.search(r'\s+and\s+', author, re.IGNORECASE) or ';' in author:
+            issues.append('multiple authors collapsed into one entry')
+            break
+        if len(author) > 140:
+            issues.append('implausibly long author entry')
+            break
+        if re.search(r'https?://|\bdoi\s*:|\b(?:19|20)\d{2}\b', author, re.IGNORECASE):
+            issues.append('author entry contains citation metadata')
+            break
+
+    # A common LLM/PDF failure turns "E. Jang, S. Gu, B. Poole" into
+    # ["E", "Jang", "S", "Gu", "B", "Poole"].  Do not reject normal
+    # single-word surnames in small lists; require a strong alternating-fragment
+    # signal.
+    if len(cleaned) >= 4:
+        single_token = [author for author in cleaned if len(author.split()) == 1]
+        initials = [author for author in cleaned if re.fullmatch(r'[A-Za-z]\.?', author)]
+        if len(single_token) / len(cleaned) >= 0.75 and len(initials) >= 2:
+            issues.append('author initials were split into separate entries')
+
+    return issues
+
+
+def validate_parsed_references(references, *, require_all=False, expected_count=None):
     """
     Validate that parsed references meet minimum quality standards.
     
@@ -4896,10 +4937,14 @@ def validate_parsed_references(references):
         return {
             'is_valid': False,
             'issues': ['No references parsed'],
-            'quality_score': 0.0
+            'quality_score': 0.0,
+            'invalid_indices': [],
+            'per_reference_issues': [],
         }
     
     issues = []
+    per_reference_issues = []
+    invalid_indices = []
     valid_refs = 0
     total_refs = len(references)
     
@@ -4912,6 +4957,10 @@ def validate_parsed_references(references):
             
         if not ref.get('authors') or len(ref['authors']) == 0:
             ref_issues.append('missing authors')
+        elif ref.get('authors') == ['Unknown Author']:
+            ref_issues.append('missing authors')
+        else:
+            ref_issues.extend(_parsed_author_issues(ref.get('authors')))
             
         # Check for malformed content that suggests parsing failure
         title = ref.get('title', '')
@@ -4953,18 +5002,34 @@ def validate_parsed_references(references):
         if not ref_issues:
             valid_refs += 1
         else:
+            invalid_indices.append(i)
             issues.append(f"Reference {i+1}: {', '.join(ref_issues)}")
+        per_reference_issues.append(ref_issues)
     
     # Calculate quality score
     quality_score = valid_refs / total_refs if total_refs > 0 else 0.0
     
-    # Consider references valid if at least 70% are good quality
+    if expected_count is not None and total_refs != expected_count:
+        issues.append(
+            f"Reference count mismatch: parsed {total_refs}, expected {expected_count}"
+        )
+
+    # The legacy callers use the 70% aggregate threshold.  PDF candidate
+    # selection uses require_all=True: accepting a bibliography with one known
+    # malformed author list is exactly what creates avoidable verification
+    # errors later.
     is_valid = quality_score >= 0.7
+    if require_all:
+        is_valid = not invalid_indices
+    if expected_count is not None:
+        is_valid = is_valid and total_refs == expected_count
     
     return {
         'is_valid': is_valid,
         'issues': issues,
-        'quality_score': quality_score
+        'quality_score': quality_score,
+        'invalid_indices': invalid_indices,
+        'per_reference_issues': per_reference_issues,
     }
 
 

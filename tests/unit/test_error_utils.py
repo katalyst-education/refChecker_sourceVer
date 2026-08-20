@@ -56,6 +56,39 @@ class TestAuthorError:
         assert error['error_type'] == 'author'
         assert error['ref_authors_correct'] == ""
 
+    @pytest.mark.parametrize(
+        "details",
+        [
+            "Author count mismatch: 2 cited vs 3 correct",
+            "Author 2 mismatch:\n       cited:  Jane Roe\n       actual: Jane Doe",
+            (
+                "Author 1 mismatch:\n"
+                "       cited:  Jane Roe (not found in author list - et al case)\n"
+                "       actual: John Smith, Jane Doe"
+            ),
+        ],
+    )
+    def test_minor_author_mismatches_are_warnings(self, details):
+        issue = create_author_error(details, [{"name": "John Smith"}, {"name": "Jane Doe"}])
+
+        assert issue["warning_type"] == "author"
+        assert issue["warning_details"] == details
+        assert "error_type" not in issue
+
+    @pytest.mark.parametrize(
+        "details",
+        [
+            "First author mismatch",
+            "no matching authors",
+        ],
+    )
+    def test_major_author_mismatches_remain_errors(self, details):
+        issue = create_author_error(details, [{"name": "John Smith"}])
+
+        assert issue["error_type"] == "author"
+        assert issue["error_details"] == details
+        assert "warning_type" not in issue
+
 
 @pytest.mark.skipif(not ERROR_UTILS_AVAILABLE, reason="Error utils module not available")
 class TestYearWarning:

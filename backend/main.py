@@ -3288,6 +3288,27 @@ async def _extract_paper_text_for_check(
     return text or ""
 
 
+async def _source_pdf_path_for_check(check: Dict[str, Any]) -> Optional[str]:
+    """Return the original/cached PDF path for a stored check when available."""
+    paper_source = check.get("paper_source", "") or ""
+    if paper_source and os.path.exists(paper_source) and paper_source.lower().endswith(".pdf"):
+        return paper_source
+    if not paper_source:
+        return None
+    try:
+        from refchecker.utils.cache_utils import get_cached_artifact_path
+
+        cache_dir = await _get_configured_cache_dir()
+        if cache_dir:
+            for artifact in ("paper.pdf", "ai_body.pdf"):
+                path = get_cached_artifact_path(str(cache_dir), paper_source, artifact)
+                if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                    return path
+    except Exception as exc:
+        logger.debug("source PDF lookup failed: %s", exc)
+    return None
+
+
 @app.get("/api/check/{check_id}/citation-integrity")
 async def get_citation_integrity(check_id: int, current_user: UserInfo = Depends(require_user)):
     """Inline-citation numbering integrity (gaps / out-of-order / duplicates /
@@ -8187,15 +8208,6 @@ async def verify_single_reference(
         if not check:
             raise HTTPException(status_code=404, detail="Check not found")
 
-        paper_text = await _extract_paper_text_for_check(
-            check_id, check, fresh_from_document=True
-        )
-        if not paper_text.strip():
-            raise HTTPException(
-                status_code=409,
-                detail="The original document is unavailable, so this reference cannot be extracted again.",
-            )
-
         try:
             from backend.refchecker_wrapper import ProgressRefChecker
 
@@ -8234,7 +8246,39 @@ async def verify_single_reference(
                 check_id=check_id,
                 extraction_mode=extraction_mode,
             )
-            extracted_references = await extractor._extract_references(paper_text)
+        except Exception as exc:
+            logger.exception("Single-reference extractor initialization failed")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not initialize document extraction: {exc}",
+            )
+
+        # Prefer the exact PDF path and the same PDF-text + validated cascade
+        # used by the initial check.  Non-PDF sources keep the common text path.
+        pdf_path = await _source_pdf_path_for_check(check)
+        if pdf_path:
+            paper_text = await asyncio.to_thread(
+                extractor._extract_pdf_text_scoped, pdf_path
+            )
+        else:
+            paper_text = await _extract_paper_text_for_check(
+                check_id, check, fresh_from_document=True
+            )
+        if not paper_text.strip():
+            raise HTTPException(
+                status_code=409,
+                detail="The original document is unavailable, so this reference cannot be extracted again.",
+            )
+
+        try:
+            if pdf_path:
+                extracted_references, _ = await extractor._extract_references_from_pdf(
+                    pdf_path,
+                    paper_text,
+                    failure_message="No parser could re-extract references from the original PDF.",
+                )
+            else:
+                extracted_references = await extractor._extract_references(paper_text)
         except Exception as exc:
             logger.exception("Single-reference document re-extraction failed")
             raise HTTPException(
@@ -8350,7 +8394,6 @@ async def verify_single_reference(
                 )
                 return verified_data, errors, url
 
-        import asyncio
         verified_data, errors, url = await asyncio.to_thread(_run_verify)
     except Exception as e:
         logger.exception("Per-ref verify failed")

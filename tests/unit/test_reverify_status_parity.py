@@ -113,3 +113,23 @@ def test_reverify_endpoint_uses_the_shared_classifier():
     source = inspect.getsource(main.verify_single_reference)
     assert 'classify_verification_result' in source
     assert 'warnings come back through error_type' not in source
+
+
+def test_reverify_endpoint_does_not_shadow_asyncio():
+    """A function-local asyncio import breaks earlier asyncio calls in the endpoint."""
+    import ast
+    import inspect
+    import textwrap
+
+    from backend import main
+
+    source = textwrap.dedent(inspect.getsource(main.verify_single_reference))
+    tree = ast.parse(source)
+    local_asyncio_bindings = [
+        alias
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if (alias.asname or alias.name) == "asyncio"
+    ]
+    assert local_asyncio_bindings == []

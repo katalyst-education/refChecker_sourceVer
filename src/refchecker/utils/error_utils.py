@@ -6,6 +6,8 @@ This module provides standardized error and warning creation functions
 for reference checkers.
 """
 
+import re
+
 from typing import Dict, List, Any, Optional
 
 
@@ -138,16 +140,23 @@ def create_author_error(error_details: str, correct_authors: List[Dict[str, str]
         else:
             correct_names.append(str(author))
 
-    if is_potential_author_misspelling_details(error_details):
+    details = str(error_details or '')
+    is_minor_author_issue = (
+        is_potential_author_misspelling_details(details)
+        or details.startswith("Author count mismatch")
+        or re.match(r"^Author \d+ mismatch\b", details) is not None
+    )
+
+    if is_minor_author_issue:
         return {
             'warning_type': 'author',
-            'warning_details': error_details,
+            'warning_details': details,
             'ref_authors_correct': ', '.join(name for name in correct_names if name),
         }
 
     return {
         'error_type': 'author',
-        'error_details': error_details,
+        'error_details': details,
         'ref_authors_correct': ', '.join(name for name in correct_names if name)
     }
 
