@@ -65,10 +65,34 @@ class TestSeverityIsPreserved:
         assert _classify([])[0] == 'verified'
 
     def test_unmatched_reference_is_unverified(self):
-        status, _, _ = _classify(
-            [{'error_type': 'unverified', 'error_details': 'Not found in any database'}],
+        details = (
+            'Paper not found by any checker; no match in Semantic Scholar, '
+            'CrossRef, OpenAlex'
+        )
+        status, errs, warns = _classify(
+            [{'error_type': 'unverified', 'error_details': details}],
             verified_data=None)
         assert status == 'unverified'
+        assert warns == []
+        assert errs == [{
+            'error_type': 'unverified',
+            'error_details': details,
+            'cited_value': None,
+            'actual_value': None,
+            'is_suggestion': False,
+            'is_info': False,
+            'is_warning': False,
+        }]
+
+    def test_timeout_subreason_is_preserved_on_unverified_result(self):
+        status, errs, warns = _classify(
+            [{'error_type': 'timeout', 'error_details': 'took too long'}],
+            verified_data=None,
+        )
+        assert status == 'unverified'
+        assert warns == []
+        assert errs[0]['error_type'] == 'unverified'
+        assert errs[0]['error_details'] == 'Verification timed out'
 
 
 class TestSanitizeErrors:
@@ -113,6 +137,17 @@ def test_reverify_endpoint_uses_the_shared_classifier():
     source = inspect.getsource(main.verify_single_reference)
     assert 'classify_verification_result' in source
     assert 'warnings come back through error_type' not in source
+
+
+def test_reverify_endpoint_never_replaces_by_fresh_array_position():
+    """A reordered extraction must not overwrite the selected stored row."""
+    import inspect
+
+    from backend import main
+
+    source = inspect.getsource(main.verify_single_reference)
+    assert 'find_reextracted_reference_index' in source
+    assert 'fresh_reference = extracted_references[idx]' not in source
 
 
 def test_reverify_endpoint_does_not_shadow_asyncio():

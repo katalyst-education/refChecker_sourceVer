@@ -2,6 +2,7 @@
 
 import requests
 import re
+import json
 import logging
 from urllib.parse import urlparse, urljoin
 from typing import Dict, Optional, Tuple, List, Any
@@ -311,8 +312,8 @@ class WebPageChecker:
                 if not self._check_author_match(author_str, site_info, web_url):
                     from refchecker.utils.error_utils import format_three_line_mismatch
                     left = author_str
-                    right = site_info.get('organization', 'unknown')
-                    details = format_three_line_mismatch("Author/organization mismatch", left, right)
+                    right = ', '.join(site_info.get('authors') or [site_info.get('organization', 'unknown')])
+                    details = format_three_line_mismatch("Author mismatch", left, right)
                     errors.append({
                         "warning_type": "author",
                         "warning_details": details
@@ -363,7 +364,7 @@ class WebPageChecker:
         
         return None
     
-    def _extract_site_info(self, soup: BeautifulSoup, url: str) -> Dict[str, str]:
+    def _extract_site_info(self, soup: BeautifulSoup, url: str) -> Dict[str, Any]:
         """Extract information about the website/organization"""
         parsed_url = urlparse(url)
         domain = parsed_url.netloc.lower()
@@ -371,7 +372,8 @@ class WebPageChecker:
         site_info = {
             'domain': domain,
             'organization': self._determine_organization(domain),
-            'site_type': self._determine_site_type(domain, url)
+            'site_type': self._determine_site_type(domain, url),
+            'authors': self._extract_page_authors(soup),
         }
         
         # Try to extract more specific site info
@@ -380,6 +382,111 @@ class WebPageChecker:
             site_info['generator'] = generator['content']
         
         return site_info
+
+    def _extract_page_authors(self, soup: BeautifulSoup) -> List[str]:
+        """Extract article authors from structured metadata or explicit markup."""
+        def clean_name(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            name = re.sub(r'^\s*by\s+', '', value, flags=re.IGNORECASE)
+            name = re.sub(r'\s+', ' ', name).strip(' ,;|')
+            return name or None
+
+        def entity_names(value: Any) -> List[str]:
+            if isinstance(value, list):
+                names = []
+                for item in value:
+                    names.extend(entity_names(item))
+                return names
+            if isinstance(value, dict):
+                name = value.get('name')
+                if not name:
+                    name = ' '.join(
+                        part for part in [value.get('givenName'), value.get('familyName')]
+                        if isinstance(part, str) and part.strip()
+                    )
+                return [name] if clean_name(name) else []
+            return [value] if clean_name(value) else []
+
+        def unique_clean_names(values: List[Any]) -> List[str]:
+            names = []
+            seen = set()
+            for value in values:
+                cleaned = clean_name(value)
+                if cleaned and cleaned.casefold() not in seen:
+                    seen.add(cleaned.casefold())
+                    names.append(cleaned)
+            return names
+
+        article_types = {
+            'article', 'newsarticle', 'blogposting', 'report', 'techarticle',
+            'scholarlyarticle', 'webpage',
+        }
+        json_ld_names = []
+        for script in soup.find_all('script', {'type': 'application/ld+json'}):
+            try:
+                data = json.loads(script.string or script.get_text() or '')
+            except (TypeError, ValueError):
+                continue
+
+            nodes = data if isinstance(data, list) else [data]
+            expanded_nodes = []
+            for node in nodes:
+                if isinstance(node, dict) and isinstance(node.get('@graph'), list):
+                    expanded_nodes.extend(node['@graph'])
+                else:
+                    expanded_nodes.append(node)
+
+            for node in expanded_nodes:
+                if not isinstance(node, dict):
+                    continue
+                node_types = node.get('@type', [])
+                if isinstance(node_types, str):
+                    node_types = [node_types]
+                normalized_types = {str(node_type).lower() for node_type in node_types}
+                if normalized_types and not normalized_types.intersection(article_types):
+                    continue
+                json_ld_names.extend(entity_names(node.get('author')))
+                if not node.get('author'):
+                    json_ld_names.extend(entity_names(node.get('creator')))
+
+        authors = unique_clean_names(json_ld_names)
+        if authors:
+            return authors
+
+        meta_names = []
+        meta_selectors = [
+            ('name', 'author'),
+            ('property', 'article:author'),
+            ('name', 'parsely-author'),
+            ('name', 'sailthru.author'),
+            ('name', 'byl'),
+            ('itemprop', 'author'),
+        ]
+        for attribute, value in meta_selectors:
+            for tag in soup.find_all('meta', {attribute: re.compile(
+                    rf'^{re.escape(value)}$', re.IGNORECASE)}):
+                if tag.get('content'):
+                    meta_names.append(tag['content'])
+
+        authors = unique_clean_names(meta_names)
+        if authors:
+            return authors
+
+        markup_names = []
+        selectors = [
+            'a[rel="author"]',
+            '[itemprop="author"] [itemprop="name"]',
+            '[itemprop="author"]',
+            'article [class*="byline"]',
+        ]
+        for selector in selectors:
+            for element in soup.select(selector):
+                markup_names.append(element.get('content') or element.get_text(' ', strip=True))
+            if markup_names:
+                break
+
+        return unique_clean_names(markup_names)
     
     def _determine_organization(self, domain: str) -> str:
         """Determine the organization from domain"""
@@ -408,10 +515,11 @@ class WebPageChecker:
             'x.ai': 'xAI',
             'gitcode.com': 'GitCode',
             'atomgit.com': 'AtomGit',
+            'dmgmori.com': 'DMG Mori',
         }
         
         for domain_key, org in org_map.items():
-            if domain_key in domain:
+            if domain == domain_key or domain.endswith(f'.{domain_key}'):
                 return org
         
         # Extract organization from domain
@@ -421,8 +529,19 @@ class WebPageChecker:
             if len(parts) >= 3 and parts[-2] == 'readthedocs':
                 return parts[0].title()
         
-        # Generic extraction
-        domain_parts = domain.replace('www.', '').split('.')
+        # Generic extraction: use the registrable-domain label instead of a
+        # country, language, or service prefix such as ``de`` or ``news``.
+        hostname = domain.split(':', 1)[0].strip('.').lower()
+        domain_parts = [part for part in hostname.split('.') if part]
+        compound_suffixes = {
+            'ac.uk', 'co.uk', 'gov.uk', 'org.uk',
+            'com.au', 'net.au', 'org.au',
+            'co.jp', 'co.nz', 'com.br', 'com.cn', 'com.sg',
+        }
+        if len(domain_parts) >= 3 and '.'.join(domain_parts[-2:]) in compound_suffixes:
+            return domain_parts[-3].title()
+        if len(domain_parts) >= 2:
+            return domain_parts[-2].title()
         if domain_parts:
             return domain_parts[0].title()
         
@@ -500,19 +619,19 @@ class WebPageChecker:
         matches = sum(1 for term in cited_terms if term in content_text)
         return matches >= len(cited_terms) // 2  # At least half the terms should match
     
-    def _determine_authors(self, cited_authors: List[str], site_info: Dict[str, str], url: str) -> List[str]:
-        """Determine appropriate authors based on site info"""
-        if not cited_authors:
-            return [site_info.get('organization', 'Unknown')]
-        
-        # For web pages, often the organization is the "author"
-        return cited_authors
+    def _determine_authors(self, cited_authors: List[str], site_info: Dict[str, Any], url: str) -> List[str]:
+        """Use page authors when available, otherwise the website organization."""
+        page_authors = site_info.get('authors') or []
+        if page_authors:
+            return page_authors
+        return [site_info.get('organization', 'Unknown')]
     
-    def _check_author_match(self, cited_authors: str, site_info: Dict[str, str], url: str) -> bool:
-        """Check if cited authors match the website organization"""
+    def _check_author_match(self, cited_authors: str, site_info: Dict[str, Any], url: str) -> bool:
+        """Check cited authors against page authors, or the website fallback."""
         cited_lower = cited_authors.lower().strip()
         organization = site_info.get('organization', '').lower()
         domain = site_info.get('domain', '').lower()
+        page_authors = [author.lower() for author in site_info.get('authors', [])]
         
         # Accept generic web resource terms - these are valid for any web URL
         generic_web_terms = [
@@ -522,7 +641,13 @@ class WebPageChecker:
         if cited_lower in generic_web_terms:
             return True
         
-        # Direct matches
+        if page_authors:
+            return any(
+                cited_lower in author or author in cited_lower
+                for author in page_authors
+            )
+
+        # Direct organization matches when the page has no named author
         if cited_lower in organization or organization in cited_lower:
             return True
         
@@ -571,18 +696,9 @@ class WebPageChecker:
             }
         }
         
-        # For PDFs, we can't do much content verification, so just check if it's accessible
-        errors = []
-        
-        # Check if the URL is from a reputable source
-        domain = urlparse(web_url).netloc.lower()
-        if not any(trusted in domain for trusted in ['intel.com', 'nvidia.com', 'microsoft.com', 'google.com', 'openai.com']):
-            errors.append({
-                "warning_type": "source",
-                "warning_details": f"PDF from unverified domain: {domain}"
-            })
-        
-        return verified_data, errors, web_url
+        # Accessibility is sufficient here; domain reputation is not evidence
+        # that the PDF itself is invalid.
+        return verified_data, [], web_url
     
     def _handle_blocked_resource(self, reference, web_url):
         """Handle resources that return 403 (blocked by bot detection)"""
@@ -846,7 +962,7 @@ class WebPageChecker:
                     
                     verified_data = {
                         'title': reference.get('title', ''),
-                        'authors': reference.get('authors', []),
+                        'authors': self._determine_authors(reference.get('authors', []), site_info, web_url),
                         'year': reference.get('year'),
                         'venue': venue,
                         'url': web_url,
@@ -863,9 +979,10 @@ class WebPageChecker:
                     return verified_data, [], web_url
                 elif self._is_web_content_venue(venue_field, web_url) or self._is_trusted_web_content_url(web_url):
                     # Has venue but it's a web content venue (news, blog, etc.) - verify it
+                    site_info = self._extract_site_info(soup, web_url)
                     verified_data = {
                         'title': reference.get('title', ''),
-                        'authors': reference.get('authors', []),
+                        'authors': self._determine_authors(reference.get('authors', []), site_info, web_url),
                         'year': reference.get('year'),
                         'venue': venue_field,  # Keep the original venue
                         'url': web_url,
@@ -873,7 +990,7 @@ class WebPageChecker:
                         'web_metadata': {
                             'page_title': page_title,
                             'description': page_description,
-                            'site_info': self._extract_site_info(soup, web_url),
+                            'site_info': site_info,
                             'final_url': response.url,
                             'status_code': response.status_code
                         }

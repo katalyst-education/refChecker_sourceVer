@@ -31,11 +31,12 @@ vi.mock('../../utils/tauriBridge', async () => {
 
 describe('ReferenceCard', () => {
   it('does not show a spinner for final unverified refs after completion', () => {
+    const subreason = 'Paper not found by any checker; no match in Semantic Scholar, CrossRef, OpenAlex'
     const reference = {
       status: 'unverified',
       title: 'Unknown Paper',
       authors: ['A. Author'],
-      errors: [{ error_type: 'unverified', error_details: 'Paper not found by any checker' }],
+      errors: [{ error_type: 'unverified', error_details: subreason }],
       warnings: [],
       suggestions: [],
     }
@@ -44,6 +45,8 @@ describe('ReferenceCard', () => {
 
     expect(container.querySelector('svg.animate-spin')).toBeNull()
     expect(screen.getByText(/Could not verify: Unknown Paper/)).toBeTruthy()
+    expect(screen.getByText('Subreason:')).toBeTruthy()
+    expect(screen.getByText(subreason)).toBeTruthy()
   })
 
   it('renders LLM-found matching metadata without crashing', () => {

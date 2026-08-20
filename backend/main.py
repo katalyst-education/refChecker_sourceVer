@@ -47,6 +47,7 @@ from .database import db, get_data_dir, get_logs_dir
 from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
 from .reference_status import classify_verification_result, split_errors_and_warnings
+from .reference_matching import find_reextracted_reference_index
 from .models import CheckRequest, CheckHistoryItem
 from .concurrency import init_limiter, get_limiter, set_default_max_concurrent, DEFAULT_MAX_CONCURRENT
 from .cites_refs import fetch_cites_and_refs, normalize_mode as _normalize_overlap_mode
@@ -8286,15 +8287,30 @@ async def verify_single_reference(
                 detail=f"Could not extract references from the original document: {exc}",
             )
 
-        # Reference order is the document's citation order across all supported
-        # extraction paths. Keep the saved row identity, but replace only the
-        # cited fields with the newly parsed entry at the same position.
-        if idx >= len(extracted_references):
+        # LLM extraction may omit or reorder citations. Match the selected row
+        # by stable citation identity; never replace it merely because another
+        # freshly extracted reference occupies the same array position.
+        fresh_idx = find_reextracted_reference_index(
+            extracted_references,
+            target,
+            preferred_index=idx,
+        )
+        if fresh_idx is None:
             raise HTTPException(
                 status_code=409,
-                detail="This reference was not found when the document was extracted again.",
+                detail=(
+                    "This reference could not be matched safely after the document was "
+                    "extracted again. The stored reference was left unchanged."
+                ),
             )
-        fresh_reference = extracted_references[idx]
+        if fresh_idx != idx:
+            logger.info(
+                "Re-extracted reference remapped by identity: stored_idx=%s -> fresh_idx=%s title=%r",
+                idx,
+                fresh_idx,
+                target.get("title"),
+            )
+        fresh_reference = extracted_references[fresh_idx]
         for field in (
             "title", "authors", "year", "venue", "journal", "doi",
             "arxiv_id", "url", "cited_url", "raw", "raw_text", "type",

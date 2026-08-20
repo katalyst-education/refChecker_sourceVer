@@ -172,12 +172,12 @@ def split_errors_and_warnings(
     Keeping warnings out of `errors` matters for display as well as counts: the
     status-icon precedence is hallucination > error > warning, so a warning left
     sitting in `errors` renders an error icon that contradicts the row's own
-    status.
+    status. Unverified findings remain in `errors`: the UI excludes them from
+    error severity/counts but needs their details for the "Subreason" line.
     """
     errors = [
         e for e in sanitized
         if e.get('error_type')
-        and e.get('error_type') != 'unverified'
         and not e.get('is_warning')
         and not e.get('is_suggestion')
         and not e.get('is_info')

@@ -95,11 +95,80 @@ class TestRawUrlVerification(unittest.TestCase):
         self.assertIsNotNone(verified_data)
         self.assertEqual(len(errors), 0)
         self.assertEqual(verified_data['title'], 'Machine Learning Research')
-        self.assertEqual(verified_data['authors'], ['John Doe'])
+        self.assertEqual(verified_data['authors'], ['Example'])
         self.assertEqual(verified_data['year'], 2023)
         self.assertIn(verified_data['venue'], ['Web Page', 'Example'])  # Can be either depending on organization extraction
         self.assertEqual(verified_data['url'], 'https://example.com/page')
         self.assertEqual(url, 'https://example.com/page')
+
+    @patch('refchecker.checkers.webpage_checker.WebPageChecker._respectful_request')
+    def test_webpage_uses_structured_page_author(self, mock_request):
+        """Schema.org article authors take precedence over the website name."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {'content-type': 'text/html'}
+        mock_response.url = (
+            'https://www.technologyreview.com/2014/06/09/111731/'
+            'why-apple-wants-to-help-you-track-your-health/'
+        )
+        mock_response.content = b'''
+            <html>
+              <head>
+                <title>Why Apple Wants to Help You Track Your Health</title>
+                <script type="application/ld+json">
+                  {"@context":"http://schema.org","@type":"NewsArticle",
+                   "author":{"@type":"Person","name":"Alexandra Morris"}}
+                </script>
+              </head>
+              <body><p>Apple wants to help you track your health.</p></body>
+            </html>
+        '''
+        mock_request.return_value = mock_response
+
+        reference = {
+            'title': 'Why Apple Wants to Help You Track Your Health',
+            'authors': ['MIT Technology Review'],
+            'year': 2014,
+            'url': mock_response.url,
+        }
+
+        verified_data, errors, _ = self.webpage_checker.verify_reference(reference)
+
+        self.assertEqual(verified_data['authors'], ['Alexandra Morris'])
+        self.assertEqual(verified_data['web_metadata']['site_info']['authors'], ['Alexandra Morris'])
+        self.assertTrue(any(error.get('warning_type') == 'author' for error in errors))
+
+        raw_verified_data, raw_errors, _ = (
+            self.webpage_checker.verify_raw_url_for_unverified_reference(reference)
+        )
+        self.assertEqual(raw_verified_data['authors'], ['Alexandra Morris'])
+        self.assertEqual(raw_errors, [])
+
+    def test_extract_page_author_from_meta_tag(self):
+        """Common author meta tags are used when JSON-LD is unavailable."""
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(
+            '<html><head><meta name="author" content="By Ada Lovelace"></head></html>',
+            'html.parser',
+        )
+
+        self.assertEqual(self.webpage_checker._extract_page_authors(soup), ['Ada Lovelace'])
+
+    def test_organization_ignores_country_or_service_subdomain(self):
+        """Domain prefixes must not be reported as the website organization."""
+        self.assertEqual(
+            self.webpage_checker._determine_organization('de.dmgmori.com'),
+            'DMG Mori',
+        )
+        self.assertEqual(
+            self.webpage_checker._determine_organization('news.example.com'),
+            'Example',
+        )
+        self.assertEqual(
+            self.webpage_checker._determine_organization('www.example.co.uk'),
+            'Example',
+        )
     
     @patch('refchecker.checkers.webpage_checker.WebPageChecker._respectful_request')
     def test_existing_page_title_match_with_venue_unverified(self, mock_request):
@@ -153,6 +222,28 @@ class TestRawUrlVerification(unittest.TestCase):
         self.assertEqual(verified_data['title'], 'Research Paper')
         self.assertEqual(verified_data['venue'], 'PDF Document')
         self.assertEqual(verified_data['url'], 'https://example.com/paper.pdf')
+
+    @patch('refchecker.checkers.webpage_checker.WebPageChecker._respectful_request')
+    def test_pdf_from_arbitrary_domain_has_no_source_warning(self, mock_request):
+        """An accessible PDF should not be warned on based on its domain."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {'content-type': 'application/pdf'}
+        mock_response.url = 'https://www.produktionsarbeit.de/report.pdf'
+        mock_request.return_value = mock_response
+
+        reference = {
+            'title': 'Research Report',
+            'authors': ['Jane Smith'],
+            'year': 2023,
+            'url': 'https://www.produktionsarbeit.de/report.pdf',
+        }
+
+        verified_data, errors, url = self.webpage_checker.verify_reference(reference)
+
+        self.assertIsNotNone(verified_data)
+        self.assertEqual(errors, [])
+        self.assertEqual(url, reference['url'])
     
     @patch('refchecker.checkers.webpage_checker.WebPageChecker._respectful_request')
     def test_403_blocked_no_venue_verified(self, mock_request):
