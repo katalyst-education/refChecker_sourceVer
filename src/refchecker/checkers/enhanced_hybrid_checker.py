@@ -685,7 +685,7 @@ class EnhancedHybridReferenceChecker:
 
         print_type = GoogleBooksReferenceChecker.infer_print_type(reference)
         if print_type == 'magazines':
-            return self.google_books_include_magazines
+            return bool(getattr(self, 'google_books_include_magazines', False))
         if print_type == 'books':
             return True
         if best_result and isinstance(best_result[0], dict):
@@ -1308,18 +1308,21 @@ class EnhancedHybridReferenceChecker:
             fallback_apis.append(('crossref', self.crossref))
         if self.openalex:
             fallback_apis.append(('openalex', self.openalex))
-        if self.open_library:
-            fallback_apis.append(('open_library', self.open_library))
+        open_library = getattr(self, 'open_library', None)
+        if open_library:
+            fallback_apis.append(('open_library', open_library))
         if self.dblp:
             fallback_apis.append(('dblp', self.dblp))
-        if self.acl_anthology:
-            fallback_apis.append(('acl_anthology', self.acl_anthology))
+        acl_anthology = getattr(self, 'acl_anthology', None)
+        if acl_anthology:
+            fallback_apis.append(('acl_anthology', acl_anthology))
         # Paperclip runs at the END of the priority list — it's a
         # secondary/biomedical-fallback signal, not a primary metadata
         # source. Only opted-in users (PAPERCLIP_API_KEY set + SDK
         # installed) ever hit this.
-        if self.paperclip:
-            fallback_apis.append(('paperclip', self.paperclip))
+        paperclip = getattr(self, 'paperclip', None)
+        if paperclip:
+            fallback_apis.append(('paperclip', paperclip))
 
         if fallback_apis:
             logger.debug(f"Enhanced Hybrid: SS failed, launching {len(fallback_apis)} fallback APIs in parallel")
@@ -1409,17 +1412,18 @@ class EnhancedHybridReferenceChecker:
         google_books_eligible = force_all_databases or self._is_google_books_reference(
             reference, best_result
         )
-        if not self.google_books and google_books_eligible:
+        google_books = getattr(self, 'google_books', None)
+        if not google_books and google_books_eligible:
             logger.info(
                 "GOOGLE_BOOKS_API_TRACE event=skipped reason=not_configured title=%r",
                 reference.get('title', ''),
             )
-        elif self.google_books and not google_books_eligible:
+        elif google_books and not google_books_eligible:
             logger.info(
                 "GOOGLE_BOOKS_API_TRACE event=skipped reason=not_eligible title=%r",
                 reference.get('title', ''),
             )
-        elif self.google_books:
+        elif google_books:
             logger.info(
                 "GOOGLE_BOOKS_API_TRACE event=fallback_reached forced=%s title=%r",
                 force_all_databases,
@@ -1433,7 +1437,7 @@ class EnhancedHybridReferenceChecker:
                     '_google_books_force_all': True,
                 }
             verified_data, errors, url, success, failure_type, failure_detail = self._try_api(
-                'google_books', self.google_books, google_books_reference,
+                'google_books', google_books, google_books_reference,
             )
             if success:
                 logger.info(
@@ -1452,7 +1456,7 @@ class EnhancedHybridReferenceChecker:
                 )
                 failed_apis.append({
                     'name': 'google_books',
-                    'instance': self.google_books,
+                    'instance': google_books,
                     'failure_type': failure_type,
                     'failure_detail': failure_detail,
                     'active': True,
