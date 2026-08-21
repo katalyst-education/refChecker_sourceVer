@@ -874,9 +874,6 @@ export const useHistoryStore = create((set, get) => ({
     }
     
     set(state => {
-      const nextCache = { ...state.detailCache }
-      delete nextCache[checkId]
-
       // Update in history array
       const newHistory = state.history.map(h => {
         if (h.id !== checkId) return h
@@ -889,13 +886,7 @@ export const useHistoryStore = create((set, get) => ({
         newSelectedCheck = upsertReference(state.selectedCheck)
       }
       
-      return {
-        history: newHistory,
-        selectedCheck: newSelectedCheck,
-        // A later navigation must not resurrect the pre-verification row from
-        // the short-lived detail cache.
-        detailCache: nextCache,
-      }
+      return { history: newHistory, selectedCheck: newSelectedCheck }
     })
   },
 

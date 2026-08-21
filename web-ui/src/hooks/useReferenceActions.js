@@ -37,10 +37,7 @@ export default function useReferenceActions() {
   // (and Remove) on the same row don't clobber each other's busy
   // indicators when the user fires them concurrently (#18). Each Set
   // holds the row idents currently running that action.
-  // Map each row to the re-verification action currently running. Keeping the
-  // action type lets the card explain whether it is re-extracting the document
-  // or searching all configured databases.
-  const [reverifyBusy, setReverifyBusy] = useState(() => new Map())
+  const [reverifyBusy, setReverifyBusy] = useState(() => new Set())
   const [suggestBusy, setSuggestBusy] = useState(() => new Set())
   const [removeBusy, setRemoveBusy] = useState(() => new Set())
   // Global busy slot: '__add__' while Add-reference is in flight,
@@ -264,45 +261,19 @@ export default function useReferenceActions() {
     if (!selectedCheckId) return
     const ident = String(ref.id ?? ref.index ?? i)
     const apiRefId = toApiRefId(ref, i)
-    const action = opts.force_all_databases ? 'all-databases' : 'reextract'
-    setReverifyBusy(prev => {
-      const next = new Map(prev)
-      next.set(ident, action)
-      return next
-    })
+    enterBusy(setReverifyBusy, ident)
     try {
-      const response = await verifyReferenceInCheck(selectedCheckId, apiRefId, {
+      await verifyReferenceInCheck(selectedCheckId, apiRefId, {
         ...opts,
         expected_id: ref?.id ?? null,
         expected_index: ref?.index ?? null,
         expected_title: ref?.title ?? null,
       })
-      const updated = response?.data?.reference
-      if (!updated) {
-        throw new Error('The verification finished without returning the updated reference.')
-      }
-
-      // The endpoint returns the complete persisted row, so update that row
-      // directly instead of force-reloading the whole check. This preserves
-      // the list's scroll position and keeps the user's card in view.
-      const rowIndex = Number.isInteger(ref?.index) ? ref.index : i
-      useHistoryStore.getState().updateHistoryReference?.(
-        selectedCheckId,
-        rowIndex,
-        updated,
-      )
-      const checkStore = useCheckStore.getState()
-      if (checkStore.currentCheckId === selectedCheckId) {
-        checkStore.updateReference?.(rowIndex, updated)
-      }
+      await reloadCheck()
     } catch (e) {
       alert(e?.response?.data?.detail || e?.message || 'Re-verify failed')
     } finally {
-      setReverifyBusy(prev => {
-        const next = new Map(prev)
-        next.delete(ident)
-        return next
-      })
+      leaveBusy(setReverifyBusy, ident)
     }
   }
 
@@ -314,8 +285,7 @@ export default function useReferenceActions() {
   // sentinels keep working without touching those components.
   const busyKey = globalBusy
 
-  const getReverifyAction = (ident) => reverifyBusy.get(String(ident)) || null
-  const isReverifying = (ident) => !!getReverifyAction(ident)
+  const isReverifying = (ident) => reverifyBusy.has(String(ident))
   const isSuggesting = (ident) => suggestBusy.has(String(ident))
   const isRemoving = (ident) => removeBusy.has(String(ident))
 
@@ -337,7 +307,6 @@ export default function useReferenceActions() {
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,
-    getReverifyAction,
     isReverifying,
     isSuggesting,
     isRemoving,
