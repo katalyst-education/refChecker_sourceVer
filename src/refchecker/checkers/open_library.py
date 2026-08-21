@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -184,25 +183,7 @@ class OpenLibraryReferenceChecker:
                 }
                 for result in results
             ]
-            # Catalogues use inconsistent subtitle separators (":", ".", or
-            # an em dash). A punctuation-insensitive exact match of the full
-            # title and subtitle is authoritative and should not be lost to a
-            # fuzzy scorer's formatting heuristics.
-            title_key = re.sub(r"[^\w]+", "", title.casefold())
-            work_data = next(
-                (
-                    result for result in matching_results
-                    if title_key and title_key == re.sub(
-                        r"[^\w]+", "", str(result.get("title") or "").casefold()
-                    )
-                ),
-                None,
-            )
-            score = 1.0 if work_data is not None else 0.0
-            if work_data is None:
-                work_data, score = find_best_match(
-                    matching_results, clean_title_for_search(title), year, authors
-                )
+            work_data, score = find_best_match(matching_results, clean_title_for_search(title), year, authors)
             if not work_data or score < SIMILARITY_THRESHOLD:
                 logger.info(
                     "[OPEN_LIBRARY_TRACE] stage=match_result status=not_found "

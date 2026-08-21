@@ -663,46 +663,6 @@ class ArXivCitationChecker:
                 authors.append(name)
         return authors
 
-    @staticmethod
-    def _explicit_cited_authors_match_authoritative(
-            cited_authors: List[str], authoritative_authors: List[Dict]) -> bool:
-        """Require every named author before ``et al.`` to be represented.
-
-        ``compare_authors`` intentionally accepts abbreviated author lists.
-        For ArXiv version matching, however, a named author that does not
-        occur in either version is still a citation error and must not be
-        hidden merely because the title changed between versions.
-        """
-        from refchecker.utils.text_utils import clean_author_name, normalize_diacritics
-
-        def identity(name: Any) -> tuple[str, str]:
-            text = normalize_diacritics(clean_author_name(str(name or ""))).casefold()
-            parts = [part for part in re.findall(r"[a-z0-9]+", text) if part]
-            return (parts[0] if parts else "", parts[-1] if parts else "")
-
-        cited_named = []
-        for author in cited_authors or []:
-            text = str(author or "").strip()
-            if re.fullmatch(r"(?:et\s*\.?\s*al\.?|and\s+others?|etc\.?)", text, re.I):
-                continue
-            cited_named.append(identity(text))
-        authoritative_named = [
-            identity(author.get('name') if isinstance(author, dict) else author)
-            for author in authoritative_authors or []
-        ]
-        for cited_first, cited_last in cited_named:
-            if not cited_last:
-                continue
-            if not any(
-                cited_last == actual_last
-                and cited_first
-                and actual_first
-                and cited_first[0] == actual_first[0]
-                for actual_first, actual_last in authoritative_named
-            ):
-                return False
-        return True
-
     def _version_metadata_changed_for_issue(
             self, issue_type: str, historical_data: Dict[str, Any], latest_data: Dict[str, Any]) -> bool:
         """Return True when an issue type reflects metadata changed across arXiv versions."""
@@ -718,20 +678,8 @@ class ArXivCitationChecker:
             latest_authors = self._authors_from_metadata(latest_data)
             if not historical_authors or not latest_authors:
                 return False
-            # This asks whether ArXiv's metadata changed, rather than whether
-            # two *citations* are acceptably similar. The latter is deliberately
-            # lenient for abbreviated lists and can report a mismatch for
-            # equivalent source lists, incorrectly downgrading a real cited-
-            # author error to a version warning.
-            from refchecker.utils.text_utils import clean_author_name, normalize_diacritics
-
-            def author_id(name: str) -> str:
-                text = normalize_diacritics(clean_author_name(name)).casefold()
-                return ' '.join(re.findall(r'[a-z0-9]+', text))
-
-            return [author_id(author) for author in historical_authors] != [
-                author_id(author) for author in latest_authors
-            ]
+            authors_match, _ = compare_authors(historical_authors, latest_authors)
+            return not authors_match
         if issue_type == 'year':
             historical_year = historical_data.get('year')
             latest_year = latest_data.get('year')
@@ -805,16 +753,10 @@ class ArXivCitationChecker:
         if cited_authors:
             authoritative_authors = latest_data.get('authors', [])
             authors_match, author_error = compare_authors(cited_authors, authoritative_authors)
-            explicit_authors_match = self._explicit_cited_authors_match_authoritative(
-                cited_authors, authoritative_authors,
-            )
-
-            if not authors_match or not explicit_authors_match:
+            
+            if not authors_match:
                 from refchecker.utils.error_utils import create_author_error
-                detail = author_error if not authors_match else (
-                    "A named cited author was not found in the authoritative ArXiv author list"
-                )
-                errors.append(create_author_error(detail, authoritative_authors))
+                errors.append(create_author_error(author_error, authoritative_authors))
         
         # Compare year
         authoritative_year = latest_data.get('year')
