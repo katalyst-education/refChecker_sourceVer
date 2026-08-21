@@ -8,4 +8,4 @@ This provides a clean entry point without import collision issues.
 from .core.refchecker import main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

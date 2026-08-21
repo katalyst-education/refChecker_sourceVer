@@ -54,20 +54,11 @@ def _cli_command_ok() -> bool:
     """Test that the CLI command is accessible."""
     print("Testing 'academic-refchecker --help'...", end=" ")
     try:
-        env = os.environ.copy()
-        repo_src = Path(__file__).resolve().parent / "src"
-        if repo_src.exists():
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = (
-                f"{repo_src}{os.pathsep}{existing}" if existing else str(repo_src)
-            )
-
         result = subprocess.run(
             [sys.executable, "-m", "refchecker", "--help"],
             capture_output=True,
             text=True,
-            timeout=30,
-            env=env,
+            timeout=30
         )
         if result.returncode == 0:
             print("✓ OK")

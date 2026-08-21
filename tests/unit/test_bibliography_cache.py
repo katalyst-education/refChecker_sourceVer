@@ -1,7 +1,6 @@
 import json
 
 from refchecker.utils.cache_utils import (
-    BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION,
     bibliography_cache_filename,
     cache_bibliography,
     cache_key_for_spec,
@@ -46,12 +45,8 @@ def test_bibliography_cache_filename_is_llm_specific():
 
 
 def test_llm_cache_identity_from_extractor_includes_provider_model_and_endpoint():
-    assert llm_cache_identity_from_extractor(_Extractor()) == (
-        f"_Provider:gpt-4.1:https://api.example.test/v1:{BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION}"
-    )
-    assert llm_cache_identity_from_extractor(None) == (
-        f"no_llm:{BIBLIOGRAPHY_EXTRACTION_CACHE_VERSION}"
-    )
+    assert llm_cache_identity_from_extractor(_Extractor()) == "_Provider:gpt-4.1:https://api.example.test/v1:refparse-v4"
+    assert llm_cache_identity_from_extractor(None) == "no_llm:refparse-v4"
 
 
 def test_bibliography_cache_ignores_previous_extraction_version(tmp_path):
