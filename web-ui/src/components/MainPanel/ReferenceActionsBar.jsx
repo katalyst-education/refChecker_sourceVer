@@ -361,6 +361,7 @@ export function ReferenceRowActions({
   // while Add or Restore is in flight so we don't race those state
   // resets.
   reverifyBusy = false,
+  reverifyAction = null,
   suggestBusy = false,
   removeBusy = false,
   globalBusy = false,
@@ -374,8 +375,11 @@ export function ReferenceRowActions({
   }
   const styleFor = (busy) => ({ ...baseStyle, opacity: (busy || !selectedCheckId || globalBusy) ? 0.55 : 1 })
   const disableFor = (busy) => busy || !selectedCheckId || globalBusy
+  const reextracting = reverifyBusy && reverifyAction === 'reextract'
+  const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
   return (
-    <div className="px-4 pb-3 pt-1 flex flex-wrap gap-1.5 text-xs">
+    <div className="px-4 pb-3 pt-1 text-xs" aria-busy={reverifyBusy || undefined}>
+      <div className="flex flex-wrap gap-1.5">
       <button
         type="button"
         onClick={() => onReverify(reference, displayIndex)}
@@ -384,7 +388,7 @@ export function ReferenceRowActions({
         style={styleFor(reverifyBusy)}
         title="Extract this reference again from the document, then verify it"
       >
-        {reverifyBusy ? '…' : 'Re-extract & verify'}
+        {reextracting ? 'Re-extracting…' : 'Re-extract & verify'}
       </button>
       <button
         type="button"
@@ -394,7 +398,7 @@ export function ReferenceRowActions({
         style={styleFor(reverifyBusy)}
         title="Keep the saved citation fields and search every configured database"
       >
-        {reverifyBusy ? '…' : 'Search all DBs'}
+        {searchingAll ? 'Searching all DBs…' : 'Search all DBs'}
       </button>
       <button
         type="button"
@@ -420,6 +424,31 @@ export function ReferenceRowActions({
       >
         {removeBusy ? '…' : 'Remove'}
       </button>
+      </div>
+      {reverifyBusy && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-2 flex items-center gap-2"
+          style={{ color: 'var(--color-text-muted)' }}
+        >
+          <svg
+            aria-hidden="true"
+            className="animate-spin h-3.5 w-3.5 shrink-0"
+            fill="none"
+            viewBox="0 0 24 24"
+            style={{ color: 'var(--color-accent)' }}
+          >
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <span>
+            {searchingAll
+              ? 'Searching every configured database for this reference…'
+              : 'Re-extracting this reference from the document, then verifying it…'}
+          </span>
+        </div>
+      )}
     </div>
   )
 }
