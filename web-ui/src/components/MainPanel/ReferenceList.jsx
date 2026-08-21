@@ -43,6 +43,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,
+    getReverifyAction,
     isReverifying,
     isSuggesting,
     isRemoving,
@@ -89,7 +90,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
       if (filters.length === 0) {
         return true
       }
-      
+
       // Inclusive filtering: show refs that HAVE the selected issue type
       // (even if they also have other issues)
       return filters.some(filter => {
@@ -122,11 +123,11 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             // error precedence would otherwise hide them, but skip cases where the
             // LLM-found metadata actually matches the citation.
             return ref.hallucination_assessment?.verdict === 'LIKELY' &&
-              !llmFoundMetadataMatchesCitation(ref)
+                !llmFoundMetadataMatchesCitation(ref)
           case 'hallucination':
             if (status === 'hallucination') return true
             return ref.hallucination_assessment?.verdict === 'LIKELY' &&
-              !llmFoundMetadataMatchesCitation(ref)
+                !llmFoundMetadataMatchesCitation(ref)
           default:
             // For other statuses (pending, checking, unchecked), match exactly
             return status === filter
@@ -139,26 +140,26 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
 
   if (isLoading) {
     return (
-      <div 
-        className="rounded-lg border p-8 text-center"
-        style={{
-          backgroundColor: 'var(--color-bg-secondary)',
-          borderColor: 'var(--color-border)',
-        }}
-      >
-        <svg 
-          className="animate-spin h-8 w-8 mx-auto mb-3" 
-          fill="none" 
-          viewBox="0 0 24 24"
-          style={{ color: 'var(--color-accent)' }}
+        <div
+            className="rounded-lg border p-8 text-center"
+            style={{
+              backgroundColor: 'var(--color-bg-secondary)',
+              borderColor: 'var(--color-border)',
+            }}
         >
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-        </svg>
-        <p style={{ color: 'var(--color-text-muted)' }}>
-          Loading references...
-        </p>
-      </div>
+          <svg
+              className="animate-spin h-8 w-8 mx-auto mb-3"
+              fill="none"
+              viewBox="0 0 24 24"
+              style={{ color: 'var(--color-accent)' }}
+          >
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <p style={{ color: 'var(--color-text-muted)' }}>
+            Loading references...
+          </p>
+        </div>
     )
   }
 
@@ -168,145 +169,146 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     // mid-extraction, which confused users into thinking the tool had hung.
     const finished = !!isCheckComplete
     return (
-      <div
-        className="rounded-lg border p-8 text-center"
-        style={{
-          backgroundColor: 'var(--color-bg-secondary)',
-          borderColor: finished ? 'var(--color-warning, #f59e0b)' : 'var(--color-border)',
-        }}
-      >
-        <svg
-          className="w-12 h-12 mx-auto mb-3 opacity-60"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          style={{ color: finished ? 'var(--color-warning, #f59e0b)' : 'var(--color-text-muted)' }}
+        <div
+            className="rounded-lg border p-8 text-center"
+            style={{
+              backgroundColor: 'var(--color-bg-secondary)',
+              borderColor: finished ? 'var(--color-warning, #f59e0b)' : 'var(--color-border)',
+            }}
         >
-          {finished ? (
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-          ) : (
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          )}
-        </svg>
-        <p style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>
-          {finished ? 'No references found in this document' : 'No references extracted yet'}
-        </p>
-        <p
-          className="text-sm mt-1"
-          style={{ color: 'var(--color-text-muted)' }}
-        >
-          {finished
-            ? 'The extractor finished but produced zero references. The file may have no bibliography, the wrong format, or the extraction mode may need to be changed (Settings → Reference Extraction).'
-            : 'References will appear here as they are found.'}
-        </p>
-      </div>
+          <svg
+              className="w-12 h-12 mx-auto mb-3 opacity-60"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              style={{ color: finished ? 'var(--color-warning, #f59e0b)' : 'var(--color-text-muted)' }}
+          >
+            {finished ? (
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            ) : (
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            )}
+          </svg>
+          <p style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>
+            {finished ? 'No references found in this document' : 'No references extracted yet'}
+          </p>
+          <p
+              className="text-sm mt-1"
+              style={{ color: 'var(--color-text-muted)' }}
+          >
+            {finished
+                ? 'The extractor finished but produced zero references. The file may have no bibliography, the wrong format, or the extraction mode may need to be changed (Settings → Reference Extraction).'
+                : 'References will appear here as they are found.'}
+          </p>
+        </div>
     )
   }
 
   return (
-    <div 
-      className="rounded-lg border overflow-hidden relative"
-      style={{
-        backgroundColor: 'var(--color-bg-secondary)',
-        borderColor: 'var(--color-border)',
-      }}
-    >
-      <div 
-        className="px-4 py-3 border-b flex items-center justify-between relative"
-        style={{ borderColor: 'var(--color-border)', minHeight: '48px' }}
+      <div
+          className="rounded-lg border overflow-hidden relative"
+          style={{
+            backgroundColor: 'var(--color-bg-secondary)',
+            borderColor: 'var(--color-border)',
+          }}
       >
-        <h3
-          className="font-semibold"
-          style={{ color: 'var(--color-text-primary)' }}
+        <div
+            className="px-4 py-3 border-b flex items-center justify-between relative"
+            style={{ borderColor: 'var(--color-border)', minHeight: '48px' }}
         >
-          References ({sortedReferences.length})
-        </h3>
-        <div className="flex items-center gap-3 absolute right-4">
-          {statusFilter.length > 0 && (
-            <span
-              className="text-sm px-2 py-1 rounded"
-              style={{
-                backgroundColor: 'var(--color-bg-tertiary)',
-                color: 'var(--color-text-secondary)'
-              }}
-            >
+          <h3
+              className="font-semibold"
+              style={{ color: 'var(--color-text-primary)' }}
+          >
+            References ({sortedReferences.length})
+          </h3>
+          <div className="flex items-center gap-3 absolute right-4">
+            {statusFilter.length > 0 && (
+                <span
+                    className="text-sm px-2 py-1 rounded"
+                    style={{
+                      backgroundColor: 'var(--color-bg-tertiary)',
+                      color: 'var(--color-text-secondary)'
+                    }}
+                >
               Showing {filteredReferences.length} ({statusFilter.join(', ')})
             </span>
-          )}
-          {selectedCheckId && (
-            <SuggestionStylePicker />
-          )}
-          {selectedCheckId && (
-            <button
-              onClick={() => setShowAdd(v => !v)}
-              className="text-xs px-2 py-1 rounded"
-              style={{
-                border: '1px solid var(--color-border)',
-                background: 'var(--color-bg-tertiary)',
-                color: 'var(--color-text-secondary)',
-              }}
-              title="Add a missing reference and verify it"
-            >
-              {showAdd ? 'Cancel' : '+ Add reference'}
-            </button>
-          )}
+            )}
+            {selectedCheckId && (
+                <SuggestionStylePicker />
+            )}
+            {selectedCheckId && (
+                <button
+                    onClick={() => setShowAdd(v => !v)}
+                    className="text-xs px-2 py-1 rounded"
+                    style={{
+                      border: '1px solid var(--color-border)',
+                      background: 'var(--color-bg-tertiary)',
+                      color: 'var(--color-text-secondary)',
+                    }}
+                    title="Add a missing reference and verify it"
+                >
+                  {showAdd ? 'Cancel' : '+ Add reference'}
+                </button>
+            )}
+          </div>
+        </div>
+
+        {showAdd && (
+            <AddReferencePanel
+                newRef={newRef}
+                setNewRef={setNewRef}
+                busyKey={busyKey}
+                onSave={handleAddRef}
+                onCancel={() => setShowAdd(false)}
+            />
+        )}
+
+        <SuggestAltPanel suggestFor={suggestFor} onClose={() => setSuggestFor(null)} />
+
+        <RemovedRefsStrip
+            removedRefs={removedRefs}
+            busyKey={busyKey}
+            onRestore={handleRestoreRef}
+            onClear={clearRemovedRefs}
+        />
+
+        <div
+            className="divide-y"
+            style={{ borderColor: 'var(--color-border)' }}
+        >
+          {filteredReferences.map((ref, displayIndex) => (
+              <div key={`ref-${ref.index ?? displayIndex}-${displayIndex}`}>
+                <ReferenceCard
+                    reference={ref}
+                    index={ref.index ?? displayIndex}
+                    displayIndex={displayIndex}
+                    totalRefs={sortedReferences.length}
+                    isCheckComplete={isCheckComplete}
+                />
+                {selectedCheckId && (() => {
+                  const ident = String(ref.id ?? ref.index ?? displayIndex)
+                  return (
+                      <ReferenceRowActions
+                          reference={ref}
+                          displayIndex={displayIndex}
+                          selectedCheckId={selectedCheckId}
+                          onSuggest={handleSuggestAlt}
+                          onRemove={handleRemoveRef}
+                          onReverify={handleReverify}
+                          onReverifyAllDatabases={handleReverifyAllDatabases}
+                          reverifyBusy={isReverifying(ident)}
+                          reverifyAction={getReverifyAction(ident)}
+                          suggestBusy={isSuggesting(ident)}
+                          removeBusy={isRemoving(ident)}
+                          globalBusy={!!globalBusy}
+                      />
+                  )
+                })()}
+              </div>
+          ))}
         </div>
       </div>
-
-      {showAdd && (
-        <AddReferencePanel
-          newRef={newRef}
-          setNewRef={setNewRef}
-          busyKey={busyKey}
-          onSave={handleAddRef}
-          onCancel={() => setShowAdd(false)}
-        />
-      )}
-
-      <SuggestAltPanel suggestFor={suggestFor} onClose={() => setSuggestFor(null)} />
-
-      <RemovedRefsStrip
-        removedRefs={removedRefs}
-        busyKey={busyKey}
-        onRestore={handleRestoreRef}
-        onClear={clearRemovedRefs}
-      />
-
-      <div
-        className="divide-y"
-        style={{ borderColor: 'var(--color-border)' }}
-      >
-        {filteredReferences.map((ref, displayIndex) => (
-            <div key={`ref-${ref.index ?? displayIndex}-${displayIndex}`}>
-              <ReferenceCard
-                reference={ref}
-                index={ref.index ?? displayIndex}
-                displayIndex={displayIndex}
-                totalRefs={sortedReferences.length}
-                isCheckComplete={isCheckComplete}
-              />
-              {selectedCheckId && (() => {
-                const ident = String(ref.id ?? ref.index ?? displayIndex)
-                return (
-                  <ReferenceRowActions
-                    reference={ref}
-                    displayIndex={displayIndex}
-                    selectedCheckId={selectedCheckId}
-                    onSuggest={handleSuggestAlt}
-                    onRemove={handleRemoveRef}
-                    onReverify={handleReverify}
-                    onReverifyAllDatabases={handleReverifyAllDatabases}
-                    reverifyBusy={isReverifying(ident)}
-                    suggestBusy={isSuggesting(ident)}
-                    removeBusy={isRemoving(ident)}
-                    globalBusy={!!globalBusy}
-                  />
-                )
-              })()}
-            </div>
-        ))}
-      </div>
-    </div>
   )
 }
 
@@ -326,61 +328,61 @@ function RemovedRefsStrip({ removedRefs, busyKey, onRestore, onClear }) {
   // purely local.
   const restoring = !!busyKey
   return (
-    <div
-      className="px-4 py-2 border-t text-xs flex items-center gap-2 flex-wrap"
-      style={{
-        borderColor: 'var(--color-border)',
-        background: 'var(--color-bg-tertiary)',
-        color: 'var(--color-text-secondary)',
-      }}
-    >
+      <div
+          className="px-4 py-2 border-t text-xs flex items-center gap-2 flex-wrap"
+          style={{
+            borderColor: 'var(--color-border)',
+            background: 'var(--color-bg-tertiary)',
+            color: 'var(--color-text-secondary)',
+          }}
+      >
       <span style={{ fontWeight: 600 }}>
         Removed ({removedRefs.length})
       </span>
-      <span style={{ color: 'var(--color-text-muted)' }}>
+        <span style={{ color: 'var(--color-text-muted)' }}>
         — click Undo to put a reference back and re-verify it.
       </span>
-      <div className="flex flex-wrap gap-1.5 ml-auto">
-        {removedRefs.slice(0, 6).map(snap => {
-          const label = (snap.title || snap.doi || snap.arxiv_id || '(untitled)').toString()
-          const short = label.length > 48 ? `${label.slice(0, 48)}…` : label
-          return (
-            <button
-              key={snap._stashKey}
-              onClick={() => onRestore(snap)}
-              disabled={restoring}
-              className="px-2 py-0.5 rounded-md"
-              style={{
-                border: '1px solid var(--color-border)',
-                background: 'var(--color-bg-primary)',
-                color: 'var(--color-text-secondary)',
-                opacity: restoring ? 0.6 : 1,
-              }}
-              title={`Undo remove: ${label}`}
-            >
-              ↺ {short}
-            </button>
-          )
-        })}
-        {removedRefs.length > 6 && (
-          <span style={{ color: 'var(--color-text-muted)' }}>
+        <div className="flex flex-wrap gap-1.5 ml-auto">
+          {removedRefs.slice(0, 6).map(snap => {
+            const label = (snap.title || snap.doi || snap.arxiv_id || '(untitled)').toString()
+            const short = label.length > 48 ? `${label.slice(0, 48)}…` : label
+            return (
+                <button
+                    key={snap._stashKey}
+                    onClick={() => onRestore(snap)}
+                    disabled={restoring}
+                    className="px-2 py-0.5 rounded-md"
+                    style={{
+                      border: '1px solid var(--color-border)',
+                      background: 'var(--color-bg-primary)',
+                      color: 'var(--color-text-secondary)',
+                      opacity: restoring ? 0.6 : 1,
+                    }}
+                    title={`Undo remove: ${label}`}
+                >
+                  ↺ {short}
+                </button>
+            )
+          })}
+          {removedRefs.length > 6 && (
+              <span style={{ color: 'var(--color-text-muted)' }}>
             +{removedRefs.length - 6} more
           </span>
-        )}
-        <button
-          onClick={onClear}
-          className="px-2 py-0.5 rounded-md"
-          style={{
-            border: '1px solid transparent',
-            background: 'transparent',
-            color: 'var(--color-text-muted)',
-          }}
-          title="Discard the undo list"
-        >
-          Clear
-        </button>
+          )}
+          <button
+              onClick={onClear}
+              className="px-2 py-0.5 rounded-md"
+              style={{
+                border: '1px solid transparent',
+                background: 'transparent',
+                color: 'var(--color-text-muted)',
+              }}
+              title="Discard the undo list"
+          >
+            Clear
+          </button>
+        </div>
       </div>
-    </div>
   )
 }
 
@@ -395,23 +397,23 @@ function SuggestionStylePicker() {
   const setFormat = useStyleStore(s => s.setFormat)
   const customs = listCustomCitationStyles()
   return (
-    <select
-      value={format}
-      onChange={(e) => setFormat(e.target.value, { userSelected: true })}
-      className="text-xs px-2 py-1 rounded border"
-      style={{
-        background: 'var(--color-bg-tertiary)',
-        borderColor: 'var(--color-border)',
-        color: 'var(--color-text-secondary)',
-      }}
-      title="Citation style used to render Suggest-alternative results"
-    >
-      {CITATION_STYLES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-      {customs.length > 0 && (
-        <optgroup label="Custom">
-          {customs.map(s => <option key={s.id} value={`custom:${s.id}`}>{s.label || s.id}</option>)}
-        </optgroup>
-      )}
-    </select>
+      <select
+          value={format}
+          onChange={(e) => setFormat(e.target.value, { userSelected: true })}
+          className="text-xs px-2 py-1 rounded border"
+          style={{
+            background: 'var(--color-bg-tertiary)',
+            borderColor: 'var(--color-border)',
+            color: 'var(--color-text-secondary)',
+          }}
+          title="Citation style used to render Suggest-alternative results"
+      >
+        {CITATION_STYLES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+        {customs.length > 0 && (
+            <optgroup label="Custom">
+              {customs.map(s => <option key={s.id} value={`custom:${s.id}`}>{s.label || s.id}</option>)}
+            </optgroup>
+        )}
+      </select>
   )
 }

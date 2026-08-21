@@ -58,7 +58,7 @@ export const useHistoryStore = create((set, get) => ({
             paperTitle: detail.paper_title,
             paperSource: detail.paper_source,
             references: Array.isArray(detail.results)
-              ? detail.results.map((ref, index) => ({
+                ? detail.results.map((ref, index) => ({
                   ...ref,
                   index,
                   status: ref.status || 'checked',
@@ -66,7 +66,7 @@ export const useHistoryStore = create((set, get) => ({
                   warnings: ref.warnings || [],
                   authoritative_urls: ref.authoritative_urls || [],
                 }))
-              : [],
+                : [],
             stats: {
               total_refs: detail.total_refs || 0,
               processed_refs: detail.total_refs || 0,
@@ -90,21 +90,21 @@ export const useHistoryStore = create((set, get) => ({
 
       // For in_progress items, fetch detail to get current progress and results
       const inProgressItems = historyWorking
-        .filter(item => item.status === 'in_progress')
-        .slice(0, 5) // cap to avoid excessive calls
+          .filter(item => item.status === 'in_progress')
+          .slice(0, 5) // cap to avoid excessive calls
 
       for (const item of inProgressItems) {
         try {
           const detail = (await api.getCheckDetail(item.id)).data
-          
+
           // Prefer backend progress; processed count is pipeline progress, not a
           // status bucket. The fallback is only for older API responses.
           const results = Array.isArray(detail.results) ? detail.results : []
           const processedRefs = detail.processed_refs ?? results.filter(r => r && r.status && r.status !== 'pending' && r.status !== 'checking').length
-          
+
           // Update the item with full progress info
           historyWorking = historyWorking.map(h => h.id === item.id
-            ? {
+              ? {
                 ...h,
                 status: detail.status || 'in_progress',
                 total_refs: detail.total_refs || 0,
@@ -113,22 +113,22 @@ export const useHistoryStore = create((set, get) => ({
                 warnings_count: detail.warnings_count || 0,
                 suggestions_count: detail.suggestions_count || 0,
                 unverified_count: detail.unverified_count || 0,
-              hallucination_count: detail.hallucination_count || 0,
+                hallucination_count: detail.hallucination_count || 0,
                 refs_with_errors: detail.refs_with_errors || 0,
                 refs_with_warnings_only: detail.refs_with_warnings_only || 0,
                 results: results, // Store results for display
                 session_id: item.session_id, // Preserve session_id from history API
               }
-            : h)
-          
+              : h)
+
           // Register this session for WebSocket reconnection
           if (item.session_id && detail.status === 'in_progress') {
             useCheckStore.getState().registerSession(item.session_id, item.id)
           }
-          
-          logger.info('HistoryStore', 'Loaded progress for in_progress item', { 
-            id: item.id, 
-            status: detail.status, 
+
+          logger.info('HistoryStore', 'Loaded progress for in_progress item', {
+            id: item.id,
+            status: detail.status,
             total_refs: detail.total_refs,
             processed_refs: processedRefs,
             session_id: item.session_id
@@ -141,7 +141,7 @@ export const useHistoryStore = create((set, get) => ({
 
       // If backend didn't return the active check yet, inject a client-side placeholder
       const historyWithActive = (!activeInList && hasActiveCheck)
-        ? [{
+          ? [{
             id: checkState.currentCheckId,
             paper_title: checkState.paperTitle || checkState.paperSource || 'In-progress check',
             paper_source: checkState.paperSource || '',
@@ -159,31 +159,31 @@ export const useHistoryStore = create((set, get) => ({
             source_type: 'url',
             placeholder: false,
           }, ...historyWorking]
-        : historyWorking
+          : historyWorking
       if (!activeInList && hasActiveCheck) {
         logger.info('HistoryStore', 'Injected active check into history', { id: checkState.currentCheckId })
       }
-      
+
       logger.info('HistoryStore', `Fetched ${historyWithActive.length} items (including injected) from API`)
-      
+
       // Merge fetched history with in-memory state, preserving WebSocket-provided updates
       // that are "more complete" (e.g., completed > in_progress)
       const statusPriority = { 'completed': 3, 'error': 2, 'cancelled': 2, 'in_progress': 1, 'idle': 0 }
       const currentHistory = get().history
-      
+
       // First, merge fetched items with existing in-memory state
       const mergedHistory = historyWithActive.map(fetched => {
         const existing = currentHistory.find(h => h.id === fetched.id)
         if (!existing) return fetched
-        
+
         // If in-memory status is "more complete" than fetched, preserve in-memory data
         const existingPriority = statusPriority[existing.status] ?? 0
         const fetchedPriority = statusPriority[fetched.status] ?? 0
-        
+
         if (existingPriority > fetchedPriority) {
-          logger.info('HistoryStore', `Preserving in-memory status for ${fetched.id}`, { 
-            inMemory: existing.status, 
-            fetched: fetched.status 
+          logger.info('HistoryStore', `Preserving in-memory status for ${fetched.id}`, {
+            inMemory: existing.status,
+            fetched: fetched.status
           })
           return { ...fetched, ...existing }
         }
@@ -196,21 +196,21 @@ export const useHistoryStore = create((set, get) => ({
         }
         return fetched
       })
-      
+
       // Also preserve any locally-added items (e.g., just-started checks) that aren't in the fetch results yet
       // Only preserve items that are in_progress (active checks) - completed/error items not in API were deleted
       const fetchedIds = new Set(historyWithActive.map(h => h.id))
-      const localOnlyItems = currentHistory.filter(h => 
-        h.id !== -1 && 
-        !fetchedIds.has(h.id) && 
-        h.status === 'in_progress'  // Only preserve in-progress items (newly started checks)
+      const localOnlyItems = currentHistory.filter(h =>
+          h.id !== -1 &&
+          !fetchedIds.has(h.id) &&
+          h.status === 'in_progress'  // Only preserve in-progress items (newly started checks)
       )
       if (localOnlyItems.length > 0) {
         logger.info('HistoryStore', `Preserving ${localOnlyItems.length} locally-added items not yet in API`)
         // Add them at the beginning (most recent first)
         mergedHistory.unshift(...localOnlyItems)
       }
-      
+
       set({ history: mergedHistory, isLoading: false })
       logger.info('HistoryStore', `Set ${mergedHistory.length} history items (merged)`)
 
@@ -245,7 +245,7 @@ export const useHistoryStore = create((set, get) => ({
       set({ error: error.message, isLoading: false })
     }
   },
-  
+
   // Called once on app startup to ensure placeholder exists
   initializeWithPlaceholder: async (limit = 50) => {
     const state = get()
@@ -253,52 +253,52 @@ export const useHistoryStore = create((set, get) => ({
       logger.info('HistoryStore', 'Placeholder already added, skipping initialization')
       return
     }
-    
+
     // Mark as added immediately to prevent duplicate calls
     set({ placeholderAdded: true, isLoading: true, error: null })
-    
+
     logger.info('HistoryStore', 'Starting initializeWithPlaceholder API call')
-    
+
     // Retry logic with exponential backoff for server startup race condition
     const maxRetries = 5
     const baseDelay = 1000 // 1 second
     let lastError = null
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         logger.info('HistoryStore', `Attempting to fetch history (attempt ${attempt}/${maxRetries})`)
-        
+
         // Create a timeout promise for this attempt
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection timeout')), 10000)
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Connection timeout')), 10000)
         )
-        
+
         const response = await Promise.race([
           api.getHistory(limit),
           timeoutPromise
         ])
-        
+
         // Success! Process the response
         const fetched = response.data
         let historyWorking = Array.isArray(fetched) ? [...fetched] : []
 
         // For in_progress items, fetch detail to get current progress and results
         const inProgressItems = historyWorking
-          .filter(item => item.status === 'in_progress')
-          .slice(0, 5)
+            .filter(item => item.status === 'in_progress')
+            .slice(0, 5)
 
         for (const item of inProgressItems) {
           try {
             const detail = (await api.getCheckDetail(item.id)).data
-            
+
             // Prefer backend progress; processed count is pipeline progress, not
             // a status bucket. The fallback is only for older API responses.
             const results = Array.isArray(detail.results) ? detail.results : []
             const processedRefs = detail.processed_refs ?? results.filter(r => r && r.status && r.status !== 'pending' && r.status !== 'checking').length
-            
+
             // Update the item with full progress info
             historyWorking = historyWorking.map(h => h.id === item.id
-              ? {
+                ? {
                   ...h,
                   status: detail.status || 'in_progress',
                   total_refs: detail.total_refs || 0,
@@ -307,22 +307,22 @@ export const useHistoryStore = create((set, get) => ({
                   warnings_count: detail.warnings_count || 0,
                   suggestions_count: detail.suggestions_count || 0,
                   unverified_count: detail.unverified_count || 0,
-              hallucination_count: detail.hallucination_count || 0,
+                  hallucination_count: detail.hallucination_count || 0,
                   refs_with_errors: detail.refs_with_errors || 0,
                   refs_with_warnings_only: detail.refs_with_warnings_only || 0,
                   results: results,
                   session_id: item.session_id,
                 }
-              : h)
-            
+                : h)
+
             // Register this session for WebSocket reconnection
             if (item.session_id && detail.status === 'in_progress') {
               useCheckStore.getState().registerSession(item.session_id, item.id)
             }
-            
-            logger.info('HistoryStore', 'Startup: loaded progress for in_progress item', { 
-              id: item.id, 
-              status: detail.status, 
+
+            logger.info('HistoryStore', 'Startup: loaded progress for in_progress item', {
+              id: item.id,
+              status: detail.status,
               total_refs: detail.total_refs,
               processed_refs: processedRefs,
               session_id: item.session_id
@@ -333,7 +333,7 @@ export const useHistoryStore = create((set, get) => ({
         }
 
         logger.info('HistoryStore', `Fetched ${historyWorking.length} items, adding placeholder`)
-        
+
         const placeholder = {
           id: -1,
           paper_title: 'New refcheck',
@@ -352,7 +352,7 @@ export const useHistoryStore = create((set, get) => ({
           source_type: 'url',
           placeholder: true,
         }
-        
+
         set({
           history: [placeholder, ...historyWorking],
           isLoading: false,
@@ -362,11 +362,11 @@ export const useHistoryStore = create((set, get) => ({
         })
         logger.info('HistoryStore', `Initialized with placeholder and ${historyWorking.length} history items`)
         return // Success - exit the function
-        
+
       } catch (error) {
         lastError = error
         logger.warn('HistoryStore', `Attempt ${attempt}/${maxRetries} failed: ${error.message}`)
-        
+
         if (attempt < maxRetries) {
           // Exponential backoff: 1s, 2s, 4s, 8s, 16s
           const delay = baseDelay * Math.pow(2, attempt - 1)
@@ -375,10 +375,10 @@ export const useHistoryStore = create((set, get) => ({
         }
       }
     }
-    
+
     // All retries exhausted - initialize with placeholder only
     logger.error('HistoryStore', `Failed to fetch history after ${maxRetries} attempts`, lastError)
-    
+
     const placeholder = {
       id: -1,
       paper_title: 'New refcheck',
@@ -390,22 +390,22 @@ export const useHistoryStore = create((set, get) => ({
       warnings_count: 0,
       suggestions_count: 0,
       unverified_count: 0,
-          hallucination_count: 0,
+      hallucination_count: 0,
       llm_provider: null,
       llm_model: null,
       status: 'idle',
       source_type: 'url',
       placeholder: true,
     }
-    
-    set({ 
+
+    set({
       history: [placeholder],
-      error: `Failed to connect to server after ${maxRetries} attempts. History will load when server is available.`, 
+      error: `Failed to connect to server after ${maxRetries} attempts. History will load when server is available.`,
       isLoading: false,
       selectedCheckId: -1,
       selectedCheck: null,
     })
-    
+
     // Schedule a background retry to fetch history once server is up
     setTimeout(() => {
       logger.info('HistoryStore', 'Background retry: attempting to fetch history')
@@ -461,11 +461,11 @@ export const useHistoryStore = create((set, get) => ({
 
     // If we have an in-progress check with results in memory, use that directly without API call
     if (existingHistoryItem?.status === 'in_progress' && existingHistoryItem?.results?.length > 0) {
-      set({ 
-        selectedCheckId: id, 
-        selectedCheck: existingHistoryItem, 
-        isLoadingDetail: false, 
-        error: null 
+      set({
+        selectedCheckId: id,
+        selectedCheck: existingHistoryItem,
+        isLoadingDetail: false,
+        error: null
       })
       return
     }
@@ -497,7 +497,7 @@ export const useHistoryStore = create((set, get) => ({
       logger.info('HistoryStore', `Loading check details for ${id}`)
       const response = await api.getCheckDetail(id)
       const check = response.data
-      
+
       // Only adopt session if this is a reconnection (not the session we just started)
       // Don't adopt if we're already checking (means we just started a new check)
       const checkStoreState = useCheckStore.getState()
@@ -510,32 +510,32 @@ export const useHistoryStore = create((set, get) => ({
       // Sync history list item, but DON'T overwrite WebSocket updates with stale backend data
       // Use priority-based merge: completed > in_progress, and higher counts win
       const statusPriority = { 'completed': 3, 'error': 2, 'cancelled': 2, 'in_progress': 1, 'idle': 0 }
-      
+
       set(state => {
         const existingItem = state.history.find(h => h.id === id)
         const existingPriority = statusPriority[existingItem?.status] ?? 0
         const fetchedPriority = statusPriority[check.status] ?? 0
-        
+
         // If in-memory has higher priority status, or same status with more progress data, keep in-memory
         const existingProcessed = existingItem?.processed_refs || 0
         const fetchedProcessed = check.processed_refs || 0
         const keepExisting = existingItem && (
-          existingPriority > fetchedPriority ||
-          (existingPriority === fetchedPriority && existingItem.status === 'in_progress' && existingProcessed > fetchedProcessed)
+            existingPriority > fetchedPriority ||
+            (existingPriority === fetchedPriority && existingItem.status === 'in_progress' && existingProcessed > fetchedProcessed)
         )
-        
+
         // For selectedCheck, merge in-memory data into fetched results
         // Only prefer in-memory results for in-progress checks where WS updates are fresher.
         // For completed/error/cancelled, the API has the authoritative final results.
         const existingResults = existingItem?.results || []
         const fetchedResults = check.results || []
         const isInProgress = existingItem?.status === 'in_progress' || check.status === 'in_progress'
-        const useExistingResults = isInProgress && existingResults.length > 0 && 
-          (fetchedResults.length === 0 || existingResults.length >= fetchedResults.length)
-        
+        const useExistingResults = isInProgress && existingResults.length > 0 &&
+            (fetchedResults.length === 0 || existingResults.length >= fetchedResults.length)
+
         const mergedSelectedCheck = keepExisting && existingItem.status === 'in_progress'
-          ? { 
-              ...check, 
+            ? {
+              ...check,
               status: existingItem.status,
               total_refs: existingItem.total_refs || check.total_refs,
               processed_refs: existingItem.processed_refs || check.processed_refs,
@@ -546,12 +546,12 @@ export const useHistoryStore = create((set, get) => ({
               hallucination_count: existingItem.hallucination_count ?? check.hallucination_count ?? 0,
               results: useExistingResults ? existingResults : fetchedResults,
             }
-          : {
+            : {
               ...check,
               // Even if not keeping existing status, preserve results if in-memory has more
               results: useExistingResults ? existingResults : fetchedResults,
             }
-        
+
         return {
           selectedCheck: mergedSelectedCheck,
           isLoadingDetail: false,
@@ -561,35 +561,35 @@ export const useHistoryStore = create((set, get) => ({
             [id]: { check: mergedSelectedCheck, fetchedAt: Date.now() },
           },
           history: state.history.map(h =>
-            h.id === id
-              ? keepExisting
-                ? {
-                    ...h,
-                    // Keep fresher in-memory status/progress, but ensure results are present
-                    // so sidebar counts can be derived with the same logic as Summary.
-                    results: h.results?.length ? h.results : (useExistingResults ? existingResults : fetchedResults),
-                    paper_title: check.paper_title || h.paper_title,
-                  }
-                : {
-                    ...h,
-                    status: check.status,
-                    total_refs: check.total_refs,
-                    processed_refs: check.processed_refs,
-                    errors_count: check.errors_count,
-                    warnings_count: check.warnings_count,
-                    suggestions_count: check.suggestions_count,
-                    unverified_count: check.unverified_count,
-                    hallucination_count: check.hallucination_count || 0,
-                    refs_with_errors: check.refs_with_errors,
-                    refs_with_warnings_only: check.refs_with_warnings_only,
-                    results: useExistingResults ? existingResults : fetchedResults,
-                    paper_title: check.paper_title || h.paper_title,
-                  }
-              : h
+              h.id === id
+                  ? keepExisting
+                      ? {
+                        ...h,
+                        // Keep fresher in-memory status/progress, but ensure results are present
+                        // so sidebar counts can be derived with the same logic as Summary.
+                        results: h.results?.length ? h.results : (useExistingResults ? existingResults : fetchedResults),
+                        paper_title: check.paper_title || h.paper_title,
+                      }
+                      : {
+                        ...h,
+                        status: check.status,
+                        total_refs: check.total_refs,
+                        processed_refs: check.processed_refs,
+                        errors_count: check.errors_count,
+                        warnings_count: check.warnings_count,
+                        suggestions_count: check.suggestions_count,
+                        unverified_count: check.unverified_count,
+                        hallucination_count: check.hallucination_count || 0,
+                        refs_with_errors: check.refs_with_errors,
+                        refs_with_warnings_only: check.refs_with_warnings_only,
+                        results: useExistingResults ? existingResults : fetchedResults,
+                        paper_title: check.paper_title || h.paper_title,
+                      }
+                  : h
           ),
         }
       })
-      logger.info('HistoryStore', 'Check details loaded and history synced', { 
+      logger.info('HistoryStore', 'Check details loaded and history synced', {
         title: check.paper_title,
         refs: check.total_refs,
         status: check.status,
@@ -618,7 +618,7 @@ export const useHistoryStore = create((set, get) => ({
       // instead. 45s is comfortably above a healthy response yet well
       // under the axios default, so the user gets feedback either way.
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Batch load timed out — the server may be busy.')), 45000)
+          setTimeout(() => reject(new Error('Batch load timed out — the server may be busy.')), 45000)
       )
       const resp = await Promise.race([api.getBatch(batchId), timeoutPromise])
       // v0.7.55 (per full-stack review round 2): only commit the
@@ -711,9 +711,9 @@ export const useHistoryStore = create((set, get) => ({
     if (!selectedCheck || !Array.isArray(selectedCheck.results)) return
     const idStr = String(refId)
     const findHit = (r, i) => (
-      String(r.id ?? '') === idStr ||
-      String(r.index ?? '') === idStr ||
-      String(i) === idStr
+        String(r.id ?? '') === idStr ||
+        String(r.index ?? '') === idStr ||
+        String(i) === idStr
     )
     const nextResults = selectedCheck.results.map((r, i) => {
       if (!findHit(r, i)) return r
@@ -800,9 +800,9 @@ export const useHistoryStore = create((set, get) => ({
     if (!selectedCheck || !Array.isArray(selectedCheck.results)) return
     const idStr = String(refId)
     const next = selectedCheck.results.filter((r, i) => !(
-      String(r?.id ?? '') === idStr ||
-      String(r?.index ?? '') === idStr ||
-      String(i) === idStr
+        String(r?.id ?? '') === idStr ||
+        String(r?.index ?? '') === idStr ||
+        String(i) === idStr
     ))
     if (next.length !== selectedCheck.results.length) {
       set({ selectedCheck: { ...selectedCheck, results: next } })
@@ -814,16 +814,16 @@ export const useHistoryStore = create((set, get) => ({
     try {
       logger.info('HistoryStore', `Updating label for ${id}`, { label })
       await api.updateCheckLabel(id, label)
-      
+
       set(state => ({
-        history: state.history.map(h => 
-          h.id === id ? { ...h, custom_label: label } : h
+        history: state.history.map(h =>
+            h.id === id ? { ...h, custom_label: label } : h
         ),
-        selectedCheck: state.selectedCheck?.id === id 
-          ? { ...state.selectedCheck, custom_label: label }
-          : state.selectedCheck
+        selectedCheck: state.selectedCheck?.id === id
+            ? { ...state.selectedCheck, custom_label: label }
+            : state.selectedCheck
       }))
-      
+
       logger.info('HistoryStore', 'Label updated')
     } catch (error) {
       logger.error('HistoryStore', 'Failed to update label', error)
@@ -837,15 +837,15 @@ export const useHistoryStore = create((set, get) => ({
       return
     }
     const cleanPayload = Object.fromEntries(
-      Object.entries(payload).filter(([, value]) => value !== undefined)
+        Object.entries(payload).filter(([, value]) => value !== undefined)
     )
     set(state => {
       const nextCache = { ...state.detailCache }
       // Invalidate cached detail when progress/status changes for this check.
       if (nextCache[id] && (
-        cleanPayload.status !== undefined ||
-        cleanPayload.processed_refs !== undefined ||
-        cleanPayload.results !== undefined
+          cleanPayload.status !== undefined ||
+          cleanPayload.processed_refs !== undefined ||
+          cleanPayload.results !== undefined
       )) {
         delete nextCache[id]
       }
@@ -872,21 +872,30 @@ export const useHistoryStore = create((set, get) => ({
       newResults[refIndex] = { ...newResults[refIndex], ...refData, index: refIndex }
       return { ...item, results: newResults }
     }
-    
+
     set(state => {
+      const nextCache = { ...state.detailCache }
+      delete nextCache[checkId]
+
       // Update in history array
       const newHistory = state.history.map(h => {
         if (h.id !== checkId) return h
         return upsertReference(h)
       })
-      
+
       // Update in selectedCheck if it matches
       let newSelectedCheck = state.selectedCheck
       if (state.selectedCheck?.id === checkId) {
         newSelectedCheck = upsertReference(state.selectedCheck)
       }
-      
-      return { history: newHistory, selectedCheck: newSelectedCheck }
+
+      return {
+        history: newHistory,
+        selectedCheck: newSelectedCheck,
+        // A later navigation must not resurrect the pre-verification row from
+        // the short-lived detail cache.
+        detailCache: nextCache,
+      }
     })
   },
 
@@ -903,17 +912,17 @@ export const useHistoryStore = create((set, get) => ({
     try {
       logger.info('HistoryStore', `Deleting check ${id}`)
       await api.deleteCheck(id)
-      
+
       set(state => {
         const deletedIndex = state.history.findIndex(h => h.id === id)
         const newHistory = state.history.filter(h => h.id !== id)
         const wasSelected = state.selectedCheckId === id
-        
+
         // If the deleted item was selected, select the next item in the list
         // (the one that was below it, i.e. the next oldest)
         let newSelectedCheckId = wasSelected ? null : state.selectedCheckId
         let newSelectedCheck = wasSelected ? null : state.selectedCheck
-        
+
         if (wasSelected && newHistory.length > 0) {
           const hasPlaceholder = newHistory.some(h => h.id === -1)
           if (!hasPlaceholder) {
@@ -924,14 +933,14 @@ export const useHistoryStore = create((set, get) => ({
             newSelectedCheck = nextItem
           }
         }
-        
+
         return {
           history: newHistory,
           selectedCheckId: newSelectedCheckId,
           selectedCheck: newSelectedCheck
         }
       })
-      
+
       // If a new check was auto-selected, fetch its full details
       const state = get()
       if (state.selectedCheckId && state.selectedCheckId !== id && state.selectedCheckId !== -1) {
@@ -943,7 +952,7 @@ export const useHistoryStore = create((set, get) => ({
           logger.error('HistoryStore', 'Failed to fetch auto-selected check details', error)
         }
       }
-      
+
       logger.info('HistoryStore', 'Check deleted')
     } catch (error) {
       logger.error('HistoryStore', 'Failed to delete check', error)
@@ -975,7 +984,7 @@ export const useHistoryStore = create((set, get) => ({
         warnings_count: 0,
         suggestions_count: 0,
         unverified_count: 0,
-          hallucination_count: 0,
+        hallucination_count: 0,
         llm_provider: null,
         llm_model: null,
         status: 'idle',
@@ -989,12 +998,12 @@ export const useHistoryStore = create((set, get) => ({
   updateHistoryItemTitle: (id, paper_title) => {
     logger.info('HistoryStore', `Updating title for ${id}`, { paper_title })
     set(state => ({
-      history: state.history.map(h => 
-        h.id === id ? { ...h, paper_title } : h
+      history: state.history.map(h =>
+          h.id === id ? { ...h, paper_title } : h
       ),
-      selectedCheck: state.selectedCheck?.id === id 
-        ? { ...state.selectedCheck, paper_title }
-        : state.selectedCheck
+      selectedCheck: state.selectedCheck?.id === id
+          ? { ...state.selectedCheck, paper_title }
+          : state.selectedCheck
     }))
   },
 }))

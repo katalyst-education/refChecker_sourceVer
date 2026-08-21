@@ -157,8 +157,8 @@ def test_venue_match_no_warning(_make_checker):
     assert len(venue_issues) == 0, f"Unexpected venue issue: {venue_issues}"
 
 
-@patch("refchecker.utils.venue_utils.lookup_venue_via_doi")
-def test_doi_venue_match_suppresses_primary_venue_warning(mock_lookup_doi_venue, _make_checker):
+@patch("refchecker.utils.venue_utils.lookup_crossref_work_via_doi")
+def test_doi_venue_match_suppresses_primary_venue_warning(mock_lookup_work, _make_checker):
     """A DOI-backed venue match should suppress a mismatch from the primary source."""
     checker = _make_checker([{
         "paperId": "101",
@@ -177,7 +177,12 @@ def test_doi_venue_match_suppresses_primary_venue_warning(mock_lookup_doi_venue,
         "url": "https://doi.org/10.1109/CSEET62301.2024.10663056",
     }
 
-    mock_lookup_doi_venue.return_value = "36th International Conference on Software Engineering Education and Training (CSEE&T)"
+    mock_lookup_work.return_value = {
+        "type": "proceedings-article",
+        "container-title": [
+            "36th International Conference on Software Engineering Education and Training (CSEE&T)"
+        ],
+    }
 
     verified_data, errors, _url = checker.verify_reference(reference)
 

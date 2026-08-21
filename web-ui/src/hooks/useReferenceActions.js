@@ -13,17 +13,17 @@ const EMPTY_NEW = { title: '', authors: '', year: '', doi: '', arxiv_id: '' }
 // Add/remove an ident from a Set state without mutating the previous value
 // (zustand-style immutable update so React re-renders pick it up).
 const enterBusy = (setter, ident) =>
-  setter(prev => {
-    const next = new Set(prev)
-    next.add(ident)
-    return next
-  })
+    setter(prev => {
+      const next = new Set(prev)
+      next.add(ident)
+      return next
+    })
 const leaveBusy = (setter, ident) =>
-  setter(prev => {
-    const next = new Set(prev)
-    next.delete(ident)
-    return next
-  })
+    setter(prev => {
+      const next = new Set(prev)
+      next.delete(ident)
+      return next
+    })
 
 const toApiRefId = (ref, i) => {
   if (ref?.id != null && String(ref.id) !== '') return `id:${String(ref.id)}`
@@ -37,7 +37,10 @@ export default function useReferenceActions() {
   // (and Remove) on the same row don't clobber each other's busy
   // indicators when the user fires them concurrently (#18). Each Set
   // holds the row idents currently running that action.
-  const [reverifyBusy, setReverifyBusy] = useState(() => new Set())
+  // Map each row to the re-verification action currently running. Keeping the
+  // action type lets the card explain whether it is re-extracting the document
+  // or searching all configured databases.
+  const [reverifyBusy, setReverifyBusy] = useState(() => new Map())
   const [suggestBusy, setSuggestBusy] = useState(() => new Set())
   const [removeBusy, setRemoveBusy] = useState(() => new Set())
   // Global busy slot: '__add__' while Add-reference is in flight,
@@ -80,8 +83,8 @@ export default function useReferenceActions() {
       const res = await addReferenceToCheck(selectedCheckId, {
         title: (eff.title || '').trim() || null,
         authors: (eff.authors || '').trim()
-          ? eff.authors.split(',').map(s => s.trim()).filter(Boolean)
-          : null,
+            ? eff.authors.split(',').map(s => s.trim()).filter(Boolean)
+            : null,
         year: eff.year ? parseInt(eff.year, 10) : null,
         doi: (eff.doi || '').trim() || null,
         arxiv_id: (eff.arxiv_id || '').trim() || null,
@@ -128,8 +131,8 @@ export default function useReferenceActions() {
     // back exactly where it was, not at the bottom of the list.
     const storeRefs = useCheckStore.getState().references || []
     let originalPosition = storeRefs.findIndex(r => (
-      String(r?.id ?? '') === ident ||
-      String(r?.index ?? '') === ident
+        String(r?.id ?? '') === ident ||
+        String(r?.index ?? '') === ident
     ))
     if (originalPosition === -1) originalPosition = typeof i === 'number' ? i : 0
     const snapshot = {
@@ -148,11 +151,11 @@ export default function useReferenceActions() {
     // visible and the health badge doesn't move until they navigate
     // away and back.
     const removedFromStore = (useCheckStore.getState().references || []).find(
-      (r, idx) => (
-        String(r?.id ?? '') === ident ||
-        String(r?.index ?? '') === ident ||
-        String(idx) === ident
-      )
+        (r, idx) => (
+            String(r?.id ?? '') === ident ||
+            String(r?.index ?? '') === ident ||
+            String(idx) === ident
+        )
     )
     useCheckStore.getState().removeReference(ident)
     // Also drop it from the historical-view source so the badge/list move
@@ -181,8 +184,8 @@ export default function useReferenceActions() {
     // network roundtrip + re-verify takes.
     const optimisticId = `restoring-${snapshot._stashKey}`
     const authorsArr = (snapshot.authors || '').trim()
-      ? snapshot.authors.split(',').map(s => s.trim()).filter(Boolean)
-      : []
+        ? snapshot.authors.split(',').map(s => s.trim()).filter(Boolean)
+        : []
     const placeholder = {
       id: optimisticId,
       title: snapshot.title || '',
@@ -261,31 +264,58 @@ export default function useReferenceActions() {
     if (!selectedCheckId) return
     const ident = String(ref.id ?? ref.index ?? i)
     const apiRefId = toApiRefId(ref, i)
-    enterBusy(setReverifyBusy, ident)
+    const action = opts.force_all_databases ? 'all-databases' : 'reextract'
+    setReverifyBusy(prev => {
+      const next = new Map(prev)
+      next.set(ident, action)
+      return next
+    })
     try {
-      await verifyReferenceInCheck(selectedCheckId, apiRefId, {
+      const response = await verifyReferenceInCheck(selectedCheckId, apiRefId, {
         ...opts,
         expected_id: ref?.id ?? null,
         expected_index: ref?.index ?? null,
         expected_title: ref?.title ?? null,
       })
-      await reloadCheck()
+      const updated = response?.data?.reference
+      if (!updated) {
+        throw new Error('The verification finished without returning the updated reference.')
+      }
+
+      // The endpoint returns the complete persisted row, so update that row
+      // directly instead of force-reloading the whole check. This preserves
+      // the list's scroll position and keeps the user's card in view.
+      const rowIndex = Number.isInteger(ref?.index) ? ref.index : i
+      useHistoryStore.getState().updateHistoryReference?.(
+          selectedCheckId,
+          rowIndex,
+          updated,
+      )
+      const checkStore = useCheckStore.getState()
+      if (checkStore.currentCheckId === selectedCheckId) {
+        checkStore.updateReference?.(rowIndex, updated)
+      }
     } catch (e) {
       alert(e?.response?.data?.detail || e?.message || 'Re-verify failed')
     } finally {
-      leaveBusy(setReverifyBusy, ident)
+      setReverifyBusy(prev => {
+        const next = new Map(prev)
+        next.delete(ident)
+        return next
+      })
     }
   }
 
   const handleReverifyAllDatabases = async (ref, i) =>
-    handleReverify(ref, i, { force_all_databases: true })
+      handleReverify(ref, i, { force_all_databases: true })
 
   // Back-compat: a few callers (AddReferencePanel) still expect a single
   // `busyKey` string. Map the global slot onto it so '__add__'/'__restore__'
   // sentinels keep working without touching those components.
   const busyKey = globalBusy
 
-  const isReverifying = (ident) => reverifyBusy.has(String(ident))
+  const getReverifyAction = (ident) => reverifyBusy.get(String(ident)) || null
+  const isReverifying = (ident) => !!getReverifyAction(ident)
   const isSuggesting = (ident) => suggestBusy.has(String(ident))
   const isRemoving = (ident) => removeBusy.has(String(ident))
 
@@ -307,6 +337,7 @@ export default function useReferenceActions() {
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,
+    getReverifyAction,
     isReverifying,
     isSuggesting,
     isRemoving,
