@@ -233,6 +233,33 @@ class GoogleBooksReferenceChecker:
             normalised["_matching_title"] = main_title
         return normalised
 
+    @staticmethod
+    def _build_similarity_rejection_candidates(
+        matching_results: List[Dict[str, Any]],
+        cleaned_title: str,
+        cited_year: Any,
+        authors: List[Any],
+    ) -> List[Dict[str, Any]]:
+        ranked_candidates: List[Dict[str, Any]] = []
+        for candidate in matching_results:
+            _, candidate_score = find_best_match([candidate], cleaned_title, cited_year, authors)
+            candidate_authors = [
+                GoogleBooksReferenceChecker._author_name(author)
+                for author in (candidate.get("authors") or [])
+            ]
+            ranked_candidates.append({
+                "google_books_id": candidate.get("google_books_id"),
+                "title": candidate.get("_returned_title") or candidate.get("title"),
+                "matching_title": candidate.get("title"),
+                "year": candidate.get("publication_year") or candidate.get("year"),
+                "authors": [name for name in candidate_authors if name][:3],
+                "score": round(float(candidate_score or 0.0), 3),
+            })
+        ranked_candidates.sort(
+            key=lambda item: (-float(item.get("score", 0.0)), str(item.get("title") or ""))
+        )
+        return ranked_candidates
+
     def verify_reference(
         self, reference: Dict[str, Any]
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
@@ -294,10 +321,21 @@ class GoogleBooksReferenceChecker:
                 {**item, "_returned_title": item.get("title", ""), "title": item.get("_matching_title", "")}
                 for item in results
             ]
+            cleaned_title = clean_title_for_search(title)
             work_data, score = find_best_match(
-                matching_results, clean_title_for_search(title), cited_year, authors
+                matching_results, cleaned_title, cited_year, authors
             )
             if not work_data or score < SIMILARITY_THRESHOLD:
+                ranked_candidates = self._build_similarity_rejection_candidates(
+                    matching_results, cleaned_title, cited_year, authors
+                )
+                logger.info(
+                    "GOOGLE_BOOKS_API_TRACE event=no_match_candidates print_type=%s title=%r threshold=%.3f ranked_candidates=%s",
+                    print_type,
+                    title,
+                    float(SIMILARITY_THRESHOLD),
+                    ranked_candidates[:5],
+                )
                 logger.info(
                     "GOOGLE_BOOKS_API_TRACE event=no_match reason=similarity print_type=%s title=%r candidates=%d score=%.3f",
                     print_type,

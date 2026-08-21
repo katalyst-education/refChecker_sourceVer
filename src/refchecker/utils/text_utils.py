@@ -6117,16 +6117,37 @@ def calculate_title_similarity(title1: str, title2: str) -> float:
     if not title1 or not title2:
         return 0.0
 
-    title1 = normalize_extracted_title_artifacts(strip_latex_commands(strip_html_markup(title1)))
-    title2 = normalize_extracted_title_artifacts(strip_latex_commands(strip_html_markup(title2)))
-    
-    # Normalize titles for comparison
-    t1 = title1.lower().strip()
-    t2 = title2.lower().strip()
+    raw_title1 = strip_latex_commands(strip_html_markup(title1))
+    raw_title2 = strip_latex_commands(strip_html_markup(title2))
 
     # Remove trailing year suffixes like ", 2024" or " 2024" for robust matching
     def strip_trailing_year(s: str) -> str:
         return re.sub(r"[,\s]*\b(19|20)\d{2}\b\s*$", "", s).strip()
+
+    def compact_alnum(s: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '', s)
+
+    # clean_title_for_search() transliterates diacritics (e.g. "Geschäft" ->
+    # "Geschaeft"), while database records can keep the original Unicode title.
+    # Compare both transliterated and simple-folded surfaces before artifact
+    # normalization so equivalent titles are not downgraded to fuzzy matches.
+    for normalizer in (normalize_diacritics, normalize_diacritics_simple):
+        norm_t1 = strip_trailing_year(normalizer(raw_title1).lower().strip())
+        norm_t2 = strip_trailing_year(normalizer(raw_title2).lower().strip())
+        if norm_t1 == norm_t2:
+            return 1.0
+        compact_norm_t1 = compact_alnum(norm_t1)
+        compact_norm_t2 = compact_alnum(norm_t2)
+        if compact_norm_t1 and compact_norm_t1 == compact_norm_t2:
+            return 1.0
+
+    title1 = normalize_extracted_title_artifacts(raw_title1)
+    title2 = normalize_extracted_title_artifacts(raw_title2)
+
+    # Normalize titles for comparison
+    t1 = title1.lower().strip()
+    t2 = title2.lower().strip()
+
     t1 = strip_trailing_year(t1)
     t2 = strip_trailing_year(t2)
     
@@ -6134,8 +6155,8 @@ def calculate_title_similarity(title1: str, title2: str) -> float:
     if t1 == t2:
         return 1.0
 
-    compact_t1 = re.sub(r'[^a-z0-9]+', '', t1)
-    compact_t2 = re.sub(r'[^a-z0-9]+', '', t2)
+    compact_t1 = compact_alnum(t1)
+    compact_t2 = compact_alnum(t2)
     if compact_t1 and compact_t1 == compact_t2:
         return 1.0
     

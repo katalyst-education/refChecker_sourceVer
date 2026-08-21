@@ -105,6 +105,39 @@ def test_google_books_magazine_option_can_disable_requests():
     get.assert_not_called()
 
 
+def test_google_books_matches_umlaut_title_against_transliterated_citation(monkeypatch):
+    monkeypatch.setenv("REFCHECKER_GOOGLE_BOOKS_RATE_LIMIT_DELAY", "0")
+    response = Mock(status_code=200)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "items": [
+            {
+                "id": "FcpuBAAAQBAJ",
+                "volumeInfo": {
+                    "title": "Integriertes Gesch\u00e4ftsmodell",
+                    "subtitle": "Anwendung des St. Galler Management-Konzepts im Gesch\u00e4ftsmodellkontext",
+                    "authors": ["Oliver D. Doleski"],
+                    "publishedDate": "2014",
+                    "canonicalVolumeLink": "https://books.google.com/books?id=FcpuBAAAQBAJ",
+                },
+            }
+        ]
+    }
+
+    with patch("refchecker.checkers.google_books.requests.get", return_value=response):
+        checker = GoogleBooksReferenceChecker(api_key="books-key")
+        data, errors, url = checker.verify_reference({
+            "title": "Integriertes Geschaeftsmodell. Anwendung des St. Galler Management-Konzepts im Geschaeftsmodellkontext",
+            "authors": ["Oliver D. Doleski"],
+            "year": 2014,
+            "type": "book",
+        })
+
+    assert data["google_books_id"] == "FcpuBAAAQBAJ"
+    assert errors == []
+    assert url == "https://books.google.com/books?id=FcpuBAAAQBAJ"
+
+
 def test_forced_google_books_search_uses_all_print_types_for_an_article(monkeypatch):
     monkeypatch.setenv("REFCHECKER_GOOGLE_BOOKS_RATE_LIMIT_DELAY", "0")
     response = Mock(status_code=200)
@@ -120,6 +153,68 @@ def test_forced_google_books_search_uses_all_print_types_for_an_article(monkeypa
         })
 
     assert get.call_args.kwargs["params"]["printType"] == "all"
+
+
+def test_google_books_logs_ranked_candidates_before_similarity_rejection(monkeypatch, caplog):
+    monkeypatch.setenv("REFCHECKER_GOOGLE_BOOKS_RATE_LIMIT_DELAY", "0")
+    response = Mock(status_code=200)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "items": [
+            {
+                "id": "near-miss",
+                "volumeInfo": {
+                    "title": "Not the cited title",
+                    "authors": ["Wrong Author"],
+                    "publishedDate": "2019",
+                },
+            },
+            {
+                "id": "far-miss",
+                "volumeInfo": {
+                    "title": "Completely different work",
+                    "authors": ["Another Author"],
+                    "publishedDate": "2001",
+                },
+            },
+        ]
+    }
+    score_by_title = {
+        "Not the cited title": 0.767,
+        "Completely different work": 0.421,
+    }
+
+    def fake_find_best_match(search_results, *_args, **_kwargs):
+        if not search_results:
+            return None, 0.0
+        ranked = sorted(
+            search_results,
+            key=lambda item: score_by_title.get(item.get("title", ""), 0.0),
+            reverse=True,
+        )
+        best = ranked[0]
+        return best, score_by_title.get(best.get("title", ""), 0.0)
+
+    with caplog.at_level(logging.INFO), patch(
+        "refchecker.checkers.google_books.requests.get", return_value=response
+    ), patch(
+        "refchecker.checkers.google_books.find_best_match",
+        side_effect=fake_find_best_match,
+    ):
+        checker = GoogleBooksReferenceChecker(api_key="books-key")
+        data, errors, url = checker.verify_reference({
+            "title": "Expected citation title",
+            "authors": ["Cited Author"],
+            "year": 2024,
+            "type": "book",
+        })
+
+    assert (data, errors, url) == (None, [], None)
+    trace = "\n".join(record.getMessage() for record in caplog.records)
+    assert "GOOGLE_BOOKS_API_TRACE event=no_match_candidates" in trace
+    assert "Not the cited title" in trace
+    assert "score': 0.767" in trace
+    assert "GOOGLE_BOOKS_API_TRACE event=no_match reason=similarity" in trace
 
 
 class _NoMatch:

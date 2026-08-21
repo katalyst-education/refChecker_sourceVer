@@ -45,6 +45,18 @@ def test_title_similarity_handles_missing_word_spacing_artifact():
     assert compare_titles_with_latex_cleaning(cited, found) == 1.0
 
 
+def test_title_similarity_handles_umlaut_transliteration_from_search_cleaning():
+    cited = clean_title_for_search(
+        "Integriertes Gesch\u00e4ftsmodell. Anwendung des St. Galler Management-Konzepts im Gesch\u00e4ftsmodellkontext"
+    )
+    found = (
+        "Integriertes Gesch\u00e4ftsmodell: Anwendung des St. Galler "
+        "Management-Konzepts im Gesch\u00e4ftsmodellkontext"
+    )
+
+    assert calculate_title_similarity(cited, found) == 1.0
+
+
 class TestNameMatching:
     """Test name matching functionality."""
     
