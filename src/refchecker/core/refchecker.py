@@ -7988,15 +7988,30 @@ def _update_local_databases(
 
 def main():
     """Main function to parse arguments and run the reference checker"""
+    # ``pytest`` exercises ``python -m refchecker --help`` through captured
+    # pipes on Windows. Some configured system code pages cannot encode the
+    # Unicode punctuation used in argparse help strings; escaping unsupported
+    # glyphs keeps the command discoverable and exits successfully.
+    if any(arg in {'-h', '--help'} for arg in sys.argv[1:]):
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(errors='backslashreplace')
+            except (AttributeError, OSError):
+                pass
+
     # Hermes-Agent-style startup banner (ASCII logo + environment + capabilities).
     # Printed to stderr so it never pollutes machine-readable stdout (e.g.
     # --report-format json). Falls back to a one-liner if anything goes wrong.
-    try:
-        from refchecker.utils.banner import print_banner
-        print_banner(__version__)
-    except Exception:  # noqa: BLE001
-        print(f"Refchecker v{__version__} - Validate references in academic papers")
-        print("By Mark Russinovich and various agentic AI assistants")
+    # Help must remain a minimal, pipe-safe command. In particular, Windows
+    # consoles configured with a legacy code page cannot encode the banner's
+    # decorative Unicode glyphs when subprocess output is captured.
+    if not any(arg in {'-h', '--help'} for arg in sys.argv[1:]):
+        try:
+            from refchecker.utils.banner import print_banner
+            print_banner(__version__)
+        except Exception:  # noqa: BLE001
+            print(f"Refchecker v{__version__} - Validate references in academic papers")
+            print("By Mark Russinovich and various agentic AI assistants")
 
     supported_openreview_help = 'Supported OpenReview shorthands: iclr, icml, aistats, uai, corl'
 
