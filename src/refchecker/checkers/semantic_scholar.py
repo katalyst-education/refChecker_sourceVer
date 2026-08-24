@@ -1053,8 +1053,10 @@ class NonArxivReferenceChecker:
                 cleaned_title = stripped_title
 
             # Try exact title match endpoint first — faster than relevance search.
-            # If it finds a match (even partial), use it and skip the search.
-            # Only fall through to the slower search if match returns nothing.
+            # The endpoint itself only considers the title, so score its result
+            # with the same year/author-aware function as the relevance path.
+            # Otherwise a generic exact title can win despite a wildly different
+            # year and author list and prevent the better fallbacks from running.
             match_result = self.match_paper_by_title(cleaned_title)
             self._log_search_candidates(
                 "title_match_endpoint",
@@ -1065,9 +1067,11 @@ class NonArxivReferenceChecker:
             )
             if match_result:
                 match_title = match_result.get('title', '')
-                match_score = calculate_title_similarity(
-                    normalize_text(cleaned_title),
-                    normalize_text(match_title),
+                _best_match, match_score = find_best_match(
+                    [match_result],
+                    cleaned_title,
+                    year,
+                    authors,
                 )
                 logger.info(
                     "[S2_TRACE] stage=title_match_score score=%.3f threshold=%.3f accepted=%s matched_title=%r",

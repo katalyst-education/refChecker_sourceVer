@@ -30,7 +30,10 @@ class TestSemanticScholarTitleFallback(unittest.TestCase):
             "url": "https://www.semanticscholar.org/paper/kitchenham-2007",
         }
         mock_search_paper.return_value = [expected]
-        mock_find_best_match.return_value = (expected, 0.99)
+        mock_find_best_match.side_effect = [
+            (mock_match_paper_by_title.return_value, 0.2),
+            (expected, 0.99),
+        ]
 
         verified_data, _errors, _url = self.checker.verify_reference({
             "title": "Guidelines for performing Systematic Literature Reviews in software engineering",
@@ -42,6 +45,32 @@ class TestSemanticScholarTitleFallback(unittest.TestCase):
         self.assertEqual(verified_data.get("paperId"), "kitchenham-2007")
         mock_match_paper_by_title.assert_called_once()
         mock_search_paper.assert_called_once()
+
+    @patch.object(NonArxivReferenceChecker, "search_paper")
+    @patch.object(NonArxivReferenceChecker, "match_paper_by_title")
+    def test_exact_title_match_with_large_year_gap_uses_broader_search(
+        self,
+        mock_match_paper_by_title,
+        mock_search_paper,
+    ):
+        mock_match_paper_by_title.return_value = {
+            "paperId": "wrong-2022",
+            "title": "Theoretische Grundlagen",
+            "authors": [{"name": "Unrelated Author"}],
+            "year": 2022,
+            "externalIds": {},
+        }
+        mock_search_paper.return_value = []
+
+        verified_data, errors, _url = self.checker.verify_reference({
+            "title": "Theoretische Grundlagen",
+            "authors": ["Daniel R. A. Schallmo"],
+            "year": 2013,
+        })
+
+        self.assertIsNone(verified_data)
+        self.assertEqual(errors, [])
+        mock_search_paper.assert_called()
 
     @patch.object(NonArxivReferenceChecker, "search_paper")
     @patch.object(NonArxivReferenceChecker, "match_paper_by_title")

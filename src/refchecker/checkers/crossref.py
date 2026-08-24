@@ -352,6 +352,44 @@ class CrossRefReferenceChecker:
                 author_dicts.append({'name': name})
         
         return compare_authors(cited_authors, author_dicts)
+
+    @staticmethod
+    def _crossref_author_names(crossref_authors: List[Dict[str, Any]]) -> List[str]:
+        """Convert Crossref's ``author`` payload to names used by match scoring."""
+        names = []
+        for author in crossref_authors or []:
+            if not isinstance(author, dict):
+                name = str(author or '').strip()
+            elif author.get('name'):
+                name = str(author['name']).strip()
+            elif author.get('given') and author.get('family'):
+                name = f"{author['given']} {author['family']}".strip()
+            else:
+                name = str(author.get('family') or '').strip()
+            if name:
+                names.append(name)
+        return names
+
+    @staticmethod
+    def _author_name(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(
+                value.get('name')
+                or value.get('author')
+                or value.get('full_name')
+                or ''
+            ).strip()
+        return str(value or '').strip()
+
+    def _has_any_author_match(self, cited_authors: List[Any], candidate_authors: List[str]) -> bool:
+        """Return whether any cited author matches any candidate author."""
+        cited_names = [self._author_name(author) for author in cited_authors or []]
+        cited_names = [name for name in cited_names if name]
+        return any(
+            is_name_match(cited, candidate)
+            for cited in cited_names
+            for candidate in candidate_authors or []
+        )
     
     def is_name_match(self, name1: str, name2: str) -> bool:
         """
@@ -503,6 +541,7 @@ class CrossRefReferenceChecker:
             )
         
         work_data = None
+        deferred_title_match = None
         
         if doi:
             # Try to get the work by DOI
@@ -542,6 +581,11 @@ class CrossRefReferenceChecker:
                     processed_result = dict(result)
                     processed_result['title'] = result_title
                     processed_result['publication_year'] = self.extract_best_publication_year(result)
+                    # ``find_best_match`` consumes the normalized ``authors``
+                    # key, while Crossref returns singular ``author``.
+                    processed_result['authors'] = self._crossref_author_names(
+                        result.get('author', [])
+                    )
                     processed_results.append(processed_result)
             
             if processed_results:
@@ -549,15 +593,34 @@ class CrossRefReferenceChecker:
 
                 # Use match if score is good enough
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
-                    work_data = best_match
-                    logger.info(
-                        "[DOI_TRACE] stage=crossref_title_fallback cited_doi=%r "
-                        "matched_doi=%r score=%.4f",
-                        doi,
-                        best_match.get('DOI'),
-                        best_score,
-                    )
-                    logger.debug(f"Found work by title in CrossRef with score {best_score:.2f}: {cleaned_title}")
+                    candidate_authors = best_match.get('authors', [])
+                    if (
+                        authors
+                        and candidate_authors
+                        and not self._has_any_author_match(authors, candidate_authors)
+                    ):
+                        # Do not let an exact but generic title (and matching
+                        # year) suppress query.bibliographic. Keep it as a last
+                        # resort so a genuine bad-author citation can still be
+                        # reported if the richer search finds nothing.
+                        deferred_title_match = best_match
+                        logger.info(
+                            "[DOI_TRACE] stage=crossref_title_fallback_deferred "
+                            "cited_doi=%r matched_doi=%r score=%.4f reason=zero_author_overlap",
+                            doi,
+                            best_match.get('DOI'),
+                            best_score,
+                        )
+                    else:
+                        work_data = best_match
+                        logger.info(
+                            "[DOI_TRACE] stage=crossref_title_fallback cited_doi=%r "
+                            "matched_doi=%r score=%.4f",
+                            doi,
+                            best_match.get('DOI'),
+                            best_score,
+                        )
+                        logger.debug(f"Found work by title in CrossRef with score {best_score:.2f}: {cleaned_title}")
                 else:
                     logger.debug(f"No good title match found in CrossRef (best score: {best_score:.2f})")
             else:
@@ -583,6 +646,9 @@ class CrossRefReferenceChecker:
                     processed_result = dict(result)
                     processed_result['title'] = result_title
                     processed_result['publication_year'] = self.extract_best_publication_year(result)
+                    processed_result['authors'] = self._crossref_author_names(
+                        result.get('author', [])
+                    )
                     processed_bib.append(processed_result)
                 if processed_bib:
                     # When the title field is present we score against the
@@ -600,8 +666,27 @@ class CrossRefReferenceChecker:
                         threshold = 0.5
                     best_match, best_score = find_best_match(processed_bib, cmp_title, year, authors)
                     if best_match and best_score >= threshold:
-                        work_data = best_match
-                        logger.debug(f"Found work via CrossRef bibliographic fallback (score {best_score:.2f})")
+                        candidate_authors = best_match.get('authors', [])
+                        if not (
+                            authors
+                            and candidate_authors
+                            and not self._has_any_author_match(authors, candidate_authors)
+                        ):
+                            work_data = best_match
+                            logger.info(
+                                "[DOI_TRACE] stage=crossref_bibliographic_fallback "
+                                "matched_doi=%r score=%.4f",
+                                best_match.get('DOI'),
+                                best_score,
+                            )
+                            logger.debug(f"Found work via CrossRef bibliographic fallback (score {best_score:.2f})")
+
+        if not work_data and deferred_title_match:
+            work_data = deferred_title_match
+            logger.info(
+                "[DOI_TRACE] stage=crossref_deferred_title_restored matched_doi=%r",
+                deferred_title_match.get('DOI'),
+            )
 
         # If we still couldn't find the work, return no verification
         if not work_data:
