@@ -19,7 +19,24 @@ import os
 import argparse
 
 # Add the src directory to Python path so refchecker package can be found
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SOURCE_ROOT = os.path.join(_PROJECT_ROOT, 'src')
+if _SOURCE_ROOT in sys.path:
+    sys.path.remove(_SOURCE_ROOT)
+sys.path.insert(0, _SOURCE_ROOT)
+
+# Load the shared core before Uvicorn imports backend.main.  This guarantees a
+# source checkout cannot silently reuse a stale site-packages copy that was
+# imported by launcher instrumentation or another startup hook.
+from refchecker.utils import text_utils as _shared_text_utils
+
+_SHARED_CORE_PATH = os.path.realpath(_shared_text_utils.__file__)
+_EXPECTED_CORE_ROOT = os.path.realpath(os.path.join(_SOURCE_ROOT, 'refchecker'))
+if os.path.commonpath((_SHARED_CORE_PATH, _EXPECTED_CORE_ROOT)) != _EXPECTED_CORE_ROOT:
+    raise RuntimeError(
+        "WebUI loaded refchecker from an unexpected location: "
+        f"{_SHARED_CORE_PATH} (expected {_EXPECTED_CORE_ROOT})"
+    )
 
 
 def main():
@@ -53,6 +70,7 @@ def main():
         sys.exit(1)
     
     print(f"Starting RefChecker Web UI backend on http://{args.host}:{args.port}")
+    print(f"Shared RefChecker core: {_SHARED_CORE_PATH}")
     print("Make sure to start the frontend separately (cd web-ui && npm run dev)")
     print()
     

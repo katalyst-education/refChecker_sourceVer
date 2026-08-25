@@ -1,3 +1,6 @@
+import logging
+import threading
+
 import requests
 from unittest.mock import patch
 
@@ -258,6 +261,42 @@ def test_unverified_reason_includes_negative_and_failed_checkers(_mock_sleep):
     assert errors[0]['sources_negative'] == 1
 
 
+@patch('refchecker.checkers.enhanced_hybrid_checker.time.sleep', return_value=None)
+def test_google_books_retry_retains_force_all_context_and_reports_failure(_mock_sleep):
+    """A forced Google Books retry must not degrade into an ineligible skip."""
+    checker = _build_checker()
+
+    class FailingGoogleBooksChecker:
+        database_label = 'Google Books'
+
+        def __init__(self):
+            self.force_all_values = []
+
+        def verify_reference(self, reference):
+            self.force_all_values.append(reference.get('_google_books_force_all'))
+            return None, [{
+                'error_type': 'api_failure',
+                'error_details': '503 Service Unavailable',
+            }], None
+
+    google_books = FailingGoogleBooksChecker()
+    checker.semantic_scholar = None
+    checker.crossref = None
+    checker.google_books = google_books
+
+    verified_data, errors, url = checker._verify_reference_core(
+        {'title': 'A book that must query every database', 'authors': []},
+        force_all_databases=True,
+    )
+
+    assert verified_data is None
+    assert url is None
+    assert google_books.force_all_values == [True, True]
+    assert errors[0]['error_details'] == (
+        'All available checkers failed: Google Books: 503 Service Unavailable'
+    )
+
+
 def test_verify_reference_records_matched_database_from_local_checker():
     checker = _build_checker()
     checker.local_db = LocalMatchChecker()
@@ -270,6 +309,105 @@ def test_verify_reference_records_matched_database_from_local_checker():
     assert url == "https://www.semanticscholar.org/paper/s2-match-id"
     assert verified_data["_matched_database"] == "Semantic Scholar"
     assert verified_data["_matched_checker"] == "local_s2"
+
+
+def test_dnb_and_zdb_are_part_of_parallel_remote_fallbacks():
+    checker = _build_checker()
+    checker.crossref = None
+    checker.openalex = None
+    checker.open_library = None
+    checker.dblp = None
+    checker.acl_anthology = None
+    checker.paperclip = None
+    barrier = threading.Barrier(3)
+
+    class ParallelNoMatchChecker:
+        def verify_reference(self, reference):
+            barrier.wait(timeout=1)
+            return None, [], None
+
+    class DnbMatchChecker(LocalMatchChecker):
+        database_label = "DNB Catalogue"
+
+        def verify_reference(self, reference):
+            barrier.wait(timeout=1)
+            return super().verify_reference(reference)
+
+    checker.semantic_scholar = ParallelNoMatchChecker()
+    checker.dnb = DnbMatchChecker()
+    checker.zdb = ParallelNoMatchChecker()
+
+    verified_data, errors, url = checker.verify_reference({
+        "title": "Test title",
+        "authors": [],
+    })
+
+    assert errors == []
+    assert url == "https://www.semanticscholar.org/paper/s2-match-id"
+    assert verified_data["_matched_checker"] == "dnb"
+    assert verified_data["_matched_database"] == "DNB Catalogue"
+
+
+def test_tib_is_selected_after_dnb_in_remote_priority():
+    checker = _build_checker()
+    checker.crossref = None
+    checker.openalex = None
+    checker.open_library = None
+    checker.zdb = None
+    checker.dblp = None
+    checker.acl_anthology = None
+    checker.paperclip = None
+    checker.semantic_scholar = NoMatchChecker()
+    calls = []
+
+    class CatalogueMatchChecker:
+        def __init__(self, key, label):
+            self.key = key
+            self.database_label = label
+
+        def verify_reference(self, reference):
+            calls.append(self.key)
+            return ({"title": reference["title"], "ppn": self.key}, [], f"https://example/{self.key}")
+
+    checker.dnb = CatalogueMatchChecker("dnb", "DNB Catalogue")
+    checker.tib = CatalogueMatchChecker("tib", "TIB Catalogue")
+
+    verified_data, errors, url = checker.verify_reference({"title": "Test title", "authors": []})
+
+    assert set(calls) == {"dnb", "tib"}
+    assert errors == []
+    assert url == "https://example/dnb"
+    assert verified_data["_matched_checker"] == "dnb"
+    assert verified_data["_matched_database"] == "DNB Catalogue"
+
+
+def test_database_trace_reports_every_launched_database_and_final_selection(caplog):
+    checker = _build_checker()
+    checker.crossref = None
+    checker.openalex = None
+    checker.open_library = None
+    checker.zdb = None
+    checker.dblp = None
+    checker.acl_anthology = None
+    checker.paperclip = None
+    checker.semantic_scholar = NoMatchChecker()
+    checker.dnb = NoMatchChecker()
+    checker.tib = LocalMatchChecker()
+
+    with caplog.at_level(logging.INFO, logger="refchecker.checkers.enhanced_hybrid_checker"):
+        verified_data, errors, _ = checker.verify_reference({"title": "Trace me", "authors": []})
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("stage=verification_start" in message and "'dnb', 'tib'" in message for message in messages)
+    for database in ("semantic_scholar", "dnb", "tib"):
+        assert any(f"stage=request database={database}" in message for message in messages)
+        assert any(f"stage=result database={database}" in message for message in messages)
+    assert any(
+        "stage=verification_final" in message and "matched_database='Semantic Scholar'" in message
+        for message in messages
+    )
+    assert errors == []
+    assert verified_data["_matched_checker"] == "tib"
 
 
 def test_semantic_scholar_result_survives_dict_shaped_citation_fields():

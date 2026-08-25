@@ -11,7 +11,7 @@ New API Integration Priority:
 2. Semantic Scholar API (reliable, good coverage)  
 3. OpenAlex API (excellent reliability, replaces Google Scholar)
 4. CrossRef API (best for DOI-based verification)
-5. Open Library and specialist indexes
+5. DNB, TIB, ZDB, Open Library, and specialist indexes
 6. Google Books (keyed, book-only final fallback)
 
 Usage:
@@ -103,13 +103,16 @@ class EnhancedHybridReferenceChecker:
                  enable_openalex: bool = True,
                  enable_crossref: bool = True,
                  enable_open_library: bool = True,
+                 enable_dnb: bool = True,
+                 enable_zdb: bool = True,
                  enable_google_books: Optional[bool] = None,
                  google_books_include_magazines: Optional[bool] = None,
                  enable_arxiv_citation: bool = True,
                  enable_acl_anthology: bool = True,
                  enable_paperclip: Optional[bool] = None,
                  debug_mode: bool = False,
-                 cache_dir: Optional[str] = None):
+                 cache_dir: Optional[str] = None,
+                 enable_tib: bool = True):
         """
         Initialize the enhanced hybrid reference checker
         
@@ -122,6 +125,9 @@ class EnhancedHybridReferenceChecker:
             enable_openalex: Whether to use OpenAlex API
             enable_crossref: Whether to use CrossRef API
             enable_open_library: Whether to use Open Library as a book-reference fallback
+            enable_dnb: Whether to use the DNB catalogue SRU API
+            enable_tib: Whether to use the TIB catalogue SRU API
+            enable_zdb: Whether to use the ZDB catalogue SRU API
             enable_google_books: Whether to use Google Books as the final book/magazine fallback
             google_books_include_magazines: Whether explicit magazine citations may use that fallback
             enable_arxiv_citation: Whether to use ArXiv Citation checker as authoritative source
@@ -197,6 +203,24 @@ class EnhancedHybridReferenceChecker:
                 'open_library', 'OpenLibraryReferenceChecker', 'Open Library API', email=contact_email
             )
 
+        self.dnb = None
+        if enable_dnb:
+            self.dnb = self._initialize_checker(
+                'dnb_sru', 'DnbSruReferenceChecker', 'DNB catalogue SRU API', email=contact_email
+            )
+
+        self.tib = None
+        if enable_tib:
+            self.tib = self._initialize_checker(
+                'dnb_sru', 'TibSruReferenceChecker', 'TIB catalogue SRU API', email=contact_email
+            )
+
+        self.zdb = None
+        if enable_zdb:
+            self.zdb = self._initialize_checker(
+                'dnb_sru', 'ZdbSruReferenceChecker', 'ZDB catalogue SRU API', email=contact_email
+            )
+
         if enable_google_books is None:
             enable_google_books = bool(
                 google_books_api_key or os.environ.get('GOOGLE_BOOKS_API_KEY')
@@ -266,7 +290,8 @@ class EnhancedHybridReferenceChecker:
         self.cache_dir = cache_dir
         all_local_checkers = [checker for _, _, checker in self.local_db_checkers]
         for checker in (self.arxiv_citation, *all_local_checkers, self.semantic_scholar,
-                        self.openalex, self.crossref, self.open_library, self.google_books,
+                        self.openalex, self.crossref, self.open_library, self.dnb, self.tib, self.zdb,
+                        self.google_books,
                         self.openreview, self.dblp,
                         self.acl_anthology, self.paperclip):
             if checker is not None:
@@ -279,6 +304,9 @@ class EnhancedHybridReferenceChecker:
             'openalex': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'crossref': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'open_library': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'dnb': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'tib': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'zdb': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'google_books': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'openreview': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'dblp': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
@@ -307,6 +335,9 @@ class EnhancedHybridReferenceChecker:
             'crossref': threading.Semaphore(3),
             'openalex': threading.Semaphore(3),
             'open_library': threading.Semaphore(1),
+            'dnb': threading.Semaphore(1),
+            'tib': threading.Semaphore(1),
+            'zdb': threading.Semaphore(1),
             'google_books': threading.Semaphore(1),
             'dblp': threading.Semaphore(2),
             'openreview': threading.Semaphore(2),
@@ -372,6 +403,9 @@ class EnhancedHybridReferenceChecker:
             'openalex': 'OpenAlex',
             'crossref': 'CrossRef',
             'open_library': 'Open Library',
+            'dnb': 'DNB Catalogue',
+            'tib': 'TIB Catalogue',
+            'zdb': 'ZDB Catalogue',
             'google_books': 'Google Books',
             'dblp': 'DBLP',
             'openreview': 'OpenReview',
@@ -394,6 +428,36 @@ class EnhancedHybridReferenceChecker:
         verified_data.setdefault('_matched_checker', api_name)
         verified_data.setdefault('_matched_database', matched_label)
         return verified_data
+
+    @staticmethod
+    def _database_trace_summary(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Return a compact, stable candidate summary for INFO traces."""
+        if not isinstance(data, dict):
+            return {}
+        external_ids = data.get('externalIds') or data.get('ids') or {}
+        if not isinstance(external_ids, dict):
+            external_ids = {}
+        return {
+            'title': data.get('title') or data.get('display_name'),
+            'year': data.get('publication_year') or data.get('year'),
+            'doi': data.get('doi') or data.get('DOI') or external_ids.get('DOI') or external_ids.get('doi'),
+            'id': (
+                data.get('paperId') or data.get('id') or data.get('ppn')
+                or data.get('idn') or data.get('zdb_id') or data.get('key')
+            ),
+        }
+
+    def _configured_database_names(self) -> List[str]:
+        """List every configured primary database in execution-order terms."""
+        names = [key for key, _, _ in self._iter_local_db_checkers()]
+        for name in (
+            'semantic_scholar', 'crossref', 'openalex', 'open_library',
+            'dnb', 'tib', 'zdb', 'dblp', 'acl_anthology', 'openreview',
+            'paperclip', 'google_books',
+        ):
+            if getattr(self, name, None) is not None:
+                names.append(name)
+        return names
 
     def _iter_local_db_checkers(self) -> List[Tuple[str, str, Any]]:
         """Return configured local DB checkers, honoring legacy test setup."""
@@ -550,6 +614,18 @@ class EnhancedHybridReferenceChecker:
         
         start_time = time.time()
         failure_type = 'none'
+        logger.info(
+            "[DATABASE_TRACE] stage=request database=%s label=%r retry=%s "
+            "semaphore_wait_ms=%d title=%r authors=%r year=%r doi=%r",
+            api_name,
+            getattr(api_instance, 'database_label', None) or self._format_api_name(api_name),
+            is_retry,
+            round(sem_wait * 1000),
+            reference.get('title'),
+            reference.get('authors'),
+            reference.get('year'),
+            reference.get('doi') or reference.get('DOI'),
+        )
         
         try:
             verified_data, errors, url = api_instance.verify_reference(reference)
@@ -561,6 +637,11 @@ class EnhancedHybridReferenceChecker:
                 # This is a retryable API failure, not a verification result
                 self._update_api_stats(api_name, False, duration)
                 api_failure_detail = api_failure_errors[0].get('error_details', 'temporary API failure')
+                logger.info(
+                    "[DATABASE_TRACE] stage=result database=%s status=api_failure "
+                    "duration_ms=%d detail=%r",
+                    api_name, round(duration * 1000), api_failure_detail,
+                )
                 logger.debug(f"Enhanced Hybrid: {api_name} API failed in {duration:.2f}s: {api_failure_detail}")
                 return None, [], None, False, 'throttled', self._format_failure_detail(
                     api_name,
@@ -584,16 +665,37 @@ class EnhancedHybridReferenceChecker:
                 # authoritative and any year/author mismatch is a real
                 # error we want to surface, not a wrong-paper drift.
                 if self._is_wrong_paper_match(reference, verified_data, errors, api_name):
+                    logger.info(
+                        "[DATABASE_TRACE] stage=result database=%s status=rejected_wrong_paper "
+                        "duration_ms=%d candidate=%r errors=%r",
+                        api_name,
+                        round(duration * 1000),
+                        self._database_trace_summary(verified_data),
+                        errors,
+                    )
                     logger.debug(
                         f"Enhanced Hybrid: {api_name} returned wrong-paper match "
                         f"(year+author both off) — rejecting and falling through to next API"
                     )
                     return None, [], None, False, 'not_found', ''
                 verified_data = self._annotate_match_source(verified_data, api_name, api_instance)
+                logger.info(
+                    "[DATABASE_TRACE] stage=result database=%s status=matched duration_ms=%d "
+                    "candidate=%r error_count=%d url=%r",
+                    api_name,
+                    round(duration * 1000),
+                    self._database_trace_summary(verified_data),
+                    len(errors or []),
+                    url,
+                )
                 retry_info = " (retry)" if is_retry else ""
                 logger.debug(f"Enhanced Hybrid: {api_name} successful in {duration:.2f}s{retry_info}, URL: {url}")
                 return verified_data, errors, url, True, 'none', ''
             else:
+                logger.info(
+                    "[DATABASE_TRACE] stage=result database=%s status=not_found duration_ms=%d",
+                    api_name, round(duration * 1000),
+                )
                 logger.debug(f"Enhanced Hybrid: {api_name} found no results in {duration:.2f}s")
                 return None, [], None, False, 'not_found', ''
                 
@@ -601,6 +703,10 @@ class EnhancedHybridReferenceChecker:
             duration = time.time() - start_time
             self._update_api_stats(api_name, False, duration)
             failure_type = 'timeout'
+            logger.info(
+                "[DATABASE_TRACE] stage=result database=%s status=timeout duration_ms=%d detail=%r",
+                api_name, round(duration * 1000), str(e),
+            )
             logger.debug(f"Enhanced Hybrid: {api_name} timed out in {duration:.2f}s: {e}")
             return None, [], None, False, failure_type, self._format_failure_detail(
                 api_name,
@@ -627,6 +733,12 @@ class EnhancedHybridReferenceChecker:
                 failure_type = 'other'
                 logger.debug(f"Enhanced Hybrid: {api_name} failed in {duration:.2f}s: {e}")
 
+            logger.info(
+                "[DATABASE_TRACE] stage=result database=%s status=%s duration_ms=%d "
+                "http_status=%r detail=%r",
+                api_name, failure_type, round(duration * 1000), status_code, str(e),
+            )
+
             failure_detail = str(e).strip()
             if status_code and str(status_code) not in failure_detail:
                 failure_detail = f'HTTP {status_code}: {failure_detail}' if failure_detail else f'HTTP {status_code}'
@@ -640,6 +752,11 @@ class EnhancedHybridReferenceChecker:
             duration = time.time() - start_time
             self._update_api_stats(api_name, False, duration)
             failure_type = 'other'
+            logger.info(
+                "[DATABASE_TRACE] stage=result database=%s status=exception duration_ms=%d "
+                "exception=%s detail=%r",
+                api_name, round(duration * 1000), type(e).__name__, str(e),
+            )
             logger.debug(f"Enhanced Hybrid: {api_name} failed in {duration:.2f}s: {e}")
             if api_name == 'semantic_scholar':
                 logger.exception("Enhanced Hybrid: Semantic Scholar raised an unexpected error")
@@ -1218,7 +1335,7 @@ class EnhancedHybridReferenceChecker:
         skip_ss: bool = False,
         force_all_databases: bool = False,
     ):
-        """Try Semantic Scholar first (highest hit rate), then fallback APIs in parallel.
+        """Query the general-purpose remote metadata sources in parallel.
         
         Returns (result, incomplete_results) where result is a complete
         (verified_data, errors, url) tuple or None, and incomplete_results
@@ -1261,49 +1378,18 @@ class EnhancedHybridReferenceChecker:
                     'active': True,
                 })
         
-        # Try Semantic Scholar first — it succeeds ~92% of the time.
-        # Skip SS when the local DB (233M papers) already returned not_found:
-        # if it's not in the DB, it's almost certainly not on the SS API either,
-        # and the API call just wastes time and rate-limit budget.
-        if self.semantic_scholar and not skip_ss:
-            if force_all_databases:
-                logger.info(
-                    "Force-all re-verify: attempting Semantic Scholar lookup for title=%r doi=%r",
-                    reference.get('title', ''),
-                    reference.get('doi', ''),
-                )
-            self._append_attempted_api(attempted_apis, 'semantic_scholar')
-            verified_data, errors, url, success, failure_type, failure_detail = self._try_api('semantic_scholar', self.semantic_scholar, reference)
-            if success:
-                result = (verified_data, errors, url)
-                best_result = self._pick_preferred_result(best_result, result, reference)
-                if (
-                    not force_all_databases
-                    and self._is_data_complete(verified_data, reference)
-                    and not (
-                    doi_first and self._has_doi_mismatch(errors)
-                    )
-                ):
-                    return (verified_data, errors, url), {}
-                if doi_first and self._has_doi_mismatch(errors):
-                    last_doi_mismatch_result = last_doi_mismatch_result or result
-            elif failure_type not in ('none', 'not_found'):
-                failed_apis.append({
-                    'name': 'semantic_scholar',
-                    'instance': self.semantic_scholar,
-                    'failure_type': failure_type,
-                    'failure_detail': failure_detail,
-                    'active': True,
-                })
-        elif self.semantic_scholar and skip_ss:
+        if self.semantic_scholar and skip_ss:
             logger.info(
                 "Skipping Semantic Scholar lookup due to local-S2 authoritative miss for title=%r doi=%r",
                 reference.get('title', ''),
                 reference.get('doi', ''),
             )
-        
-        # SS failed or incomplete — fire remaining APIs in parallel
+
+        # Launch the general remote catalogues together so DNB/TIB/ZDB cannot be
+        # hidden behind an early successful result from another source.
         fallback_apis = []
+        if self.semantic_scholar and not skip_ss:
+            fallback_apis.append(('semantic_scholar', self.semantic_scholar))
         if self.crossref and not doi_first:
             fallback_apis.append(('crossref', self.crossref))
         if self.openalex:
@@ -1311,6 +1397,15 @@ class EnhancedHybridReferenceChecker:
         open_library = getattr(self, 'open_library', None)
         if open_library:
             fallback_apis.append(('open_library', open_library))
+        dnb = getattr(self, 'dnb', None)
+        if dnb:
+            fallback_apis.append(('dnb', dnb))
+        tib = getattr(self, 'tib', None)
+        if tib:
+            fallback_apis.append(('tib', tib))
+        zdb = getattr(self, 'zdb', None)
+        if zdb:
+            fallback_apis.append(('zdb', zdb))
         if self.dblp:
             fallback_apis.append(('dblp', self.dblp))
         acl_anthology = getattr(self, 'acl_anthology', None)
@@ -1324,8 +1419,21 @@ class EnhancedHybridReferenceChecker:
         if paperclip:
             fallback_apis.append(('paperclip', paperclip))
 
+        logger.info(
+            "[DATABASE_TRACE] stage=parallel_plan title=%r force_all=%s doi_first=%s "
+            "skip_semantic_scholar=%s launched=%s",
+            reference.get('title'),
+            force_all_databases,
+            bool(doi_first),
+            skip_ss,
+            [name for name, _ in fallback_apis],
+        )
+
         if fallback_apis:
-            logger.debug(f"Enhanced Hybrid: SS failed, launching {len(fallback_apis)} fallback APIs in parallel")
+            logger.debug(
+                "Enhanced Hybrid: launching %d remote metadata APIs in parallel",
+                len(fallback_apis),
+            )
             futures = {}
             with ThreadPoolExecutor(max_workers=len(fallback_apis), thread_name_prefix="HybridAPI") as pool:
                 for api_name, api_instance in fallback_apis:
@@ -1333,7 +1441,10 @@ class EnhancedHybridReferenceChecker:
                     futures[api_name] = pool.submit(
                         self._try_api, api_name, api_instance, reference)
 
-            priority = ['crossref', 'openalex', 'open_library', 'dblp', 'acl_anthology', 'paperclip']
+            priority = [
+                'semantic_scholar', 'crossref', 'openalex', 'dnb', 'tib', 'zdb', 'open_library',
+                'dblp', 'acl_anthology', 'paperclip',
+            ]
             for api_name in priority:
                 if api_name not in futures:
                     continue
@@ -1356,6 +1467,8 @@ class EnhancedHybridReferenceChecker:
                         last_crossref_result = result
                     elif api_name == 'openalex':
                         last_openalex_result = result
+                    if doi_first and self._has_doi_mismatch(errors):
+                        last_doi_mismatch_result = last_doi_mismatch_result or result
 
         arxiv_title_result = self._try_arxiv_title_search(reference, attempted_apis)
         if arxiv_title_result is not None:
@@ -1457,6 +1570,11 @@ class EnhancedHybridReferenceChecker:
                 failed_apis.append({
                     'name': 'google_books',
                     'instance': google_books,
+                    # Retain the force-all override for retries.  Retrying the
+                    # original reference can make Google Books classify it as
+                    # unsupported media and skip the request, which incorrectly
+                    # turns an API failure into a reported "no match".
+                    'reference': google_books_reference,
                     'failure_type': failure_type,
                     'failure_detail': failure_detail,
                     'active': True,
@@ -1877,6 +1995,18 @@ class EnhancedHybridReferenceChecker:
         # used by CLI, WebUI, and bulk paths, and the fixup is idempotent.
         fixup_reference_fields(reference)
 
+        configured_databases = self._configured_database_names()
+        logger.info(
+            "[DATABASE_TRACE] stage=verification_start title=%r authors=%r year=%r "
+            "doi=%r force_all=%s configured=%s",
+            reference.get('title'),
+            reference.get('authors'),
+            reference.get('year'),
+            reference.get('doi') or reference.get('DOI'),
+            force_all_databases,
+            configured_databases,
+        )
+
         if force_all_databases:
             verified_data, errors, url = self._verify_reference_core(
                 reference,
@@ -1904,6 +2034,18 @@ class EnhancedHybridReferenceChecker:
                 self._cross_verify_secondary(verified_data, reference)
             except Exception as e:
                 logger.debug("Cross-attribution skipped: %s", e)
+
+        logger.info(
+            "[DATABASE_TRACE] stage=verification_final title=%r status=%s "
+            "matched_database=%r matched_checker=%r candidate=%r error_count=%d url=%r",
+            reference.get('title'),
+            'matched' if isinstance(verified_data, dict) else ('errors_only' if errors else 'not_found'),
+            verified_data.get('_matched_database') if isinstance(verified_data, dict) else None,
+            verified_data.get('_matched_checker') if isinstance(verified_data, dict) else None,
+            self._database_trace_summary(verified_data),
+            len(errors or []),
+            url,
+        )
 
         return verified_data, errors, url
 
@@ -2182,7 +2324,10 @@ class EnhancedHybridReferenceChecker:
                 
                 logger.debug(f"Enhanced Hybrid: Retrying {api_name}")
                 self._append_attempted_api(attempted_apis, api_name)
-                verified_data, errors, url, success, retry_failure_type, retry_failure_detail = self._try_api(api_name, api_instance, reference, is_retry=True)
+                retry_reference = failed_api.get('reference', reference)
+                verified_data, errors, url, success, retry_failure_type, retry_failure_detail = self._try_api(
+                    api_name, api_instance, retry_reference, is_retry=True,
+                )
                 if success:
                     logger.debug(f"Enhanced Hybrid: {api_name} succeeded on retry after {failure_type} (delay: {final_delay:.1f}s)")
                     return verified_data, errors, url

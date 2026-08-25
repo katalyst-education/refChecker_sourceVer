@@ -80,7 +80,7 @@ You are an reference-integrity assistant that determines whether a cited \
 reference is likely **hallucinated** (fabricated by an AI).
 
 IMPORTANT CONTEXT: The automated checkers have already searched \
-Semantic Scholar, OpenAlex, CrossRef, Open Library, DBLP, and arXiv for this reference. \
+Semantic Scholar, OpenAlex, CrossRef, DNB, TIB, ZDB, Open Library, DBLP, and arXiv for this reference. \
 If they report it as unverified, the paper was NOT found in any of these \
 databases. Do not contradict this unless your web search finds a page that \
 shows the paper with the EXACT title listed above. However, if the \
@@ -332,7 +332,7 @@ def _build_validation_summary_static(error_entry: dict) -> str:
         if url and 'arxiv.org' in url:
             lines.append(
                 '- Reference could NOT be found in any academic database '
-                '(Semantic Scholar, OpenAlex, CrossRef, Open Library, DBLP, arXiv).\n'
+                '(Semantic Scholar, OpenAlex, CrossRef, DNB, TIB, ZDB, Open Library, DBLP, arXiv).\n'
                 '  NOTE: The cited ArXiv URL points to a COMPLETELY DIFFERENT '
                 'paper — the URL is likely fabricated along with the rest of '
                 'the reference. Search for the cited TITLE to determine if '
@@ -340,7 +340,7 @@ def _build_validation_summary_static(error_entry: dict) -> str:
             )
         else:
             lines.append('- Reference could NOT be found in any academic database '
-                         '(Semantic Scholar, OpenAlex, CrossRef, Open Library, DBLP, arXiv)')
+                         '(Semantic Scholar, OpenAlex, CrossRef, DNB, TIB, ZDB, Open Library, DBLP, arXiv)')
     elif error_type == 'multiple':
         lines.append('- Multiple issues detected:')
         for detail in error_details.split('\n'):

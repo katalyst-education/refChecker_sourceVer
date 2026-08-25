@@ -1043,6 +1043,12 @@ def normalize_diacritics(text: str) -> str:
     }
     for lig, expansion in _ligatures.items():
         text = text.replace(lig, expansion)
+
+    # Canonically compose base-letter + combining-mark sequences before the
+    # language-specific transliterations below.  XML catalogues such as DNB
+    # can return "fu\u0308r" (decomposed) while citations contain "für"
+    # (composed); both must become "fuer", not "fur" versus "fuer".
+    text = unicodedata.normalize('NFC', text)
     
     # Then handle special characters that don't decompose properly
     # Including common transliterations
@@ -5947,6 +5953,48 @@ def titles_align_with_subtitle_tolerance(cited_title: str, actual_title: str) ->
     return False
 
 
+def titles_align_as_delimited_segments(title1: str, title2: str) -> bool:
+    """Return whether either title is a substantial, exact segment of the other.
+
+    Library catalogues sometimes compose a display title from multiple title
+    fields, for example ``Main title - cited title: responsibility statement``.
+    A whole-title fuzzy score unfairly penalises the correctly cited middle
+    segment.  Only strong catalogue-style separators are considered here, and
+    the segment must contain at least five words and thirty characters.  Those
+    bounds keep short or generic partial titles from becoming search matches.
+    """
+    if not title1 or not title2:
+        return False
+
+    def _normalise(value: str) -> str:
+        value = strip_html_markup(strip_latex_commands(value or ""))
+        value = normalize_diacritics(value).lower()
+        value = re.sub(r"[^a-z0-9\s]+", " ", value)
+        return re.sub(r"\s+", " ", value).strip()
+
+    def _segments(value: str) -> List[str]:
+        value = strip_html_markup(strip_latex_commands(value or ""))
+        # A hyphen is structural only when surrounded by whitespace, so terms
+        # such as "Lower-Limb" remain intact.  Periods require following
+        # whitespace, which also preserves decimal/version strings like 4.0.
+        parts = re.split(r"\s+[-\u2013\u2014]\s+|:\s*|\.\s+", value)
+        return [segment for part in parts if (segment := _normalise(part))]
+
+    normalised1 = _normalise(title1)
+    normalised2 = _normalise(title2)
+    if not normalised1 or not normalised2 or normalised1 == normalised2:
+        return bool(normalised1 and normalised1 == normalised2)
+
+    def _is_substantial(value: str) -> bool:
+        return len(value) >= 30 and len(value.split()) >= 5
+
+    return (
+        _is_substantial(normalised1) and normalised1 in _segments(title2)
+    ) or (
+        _is_substantial(normalised2) and normalised2 in _segments(title1)
+    )
+
+
 def titles_match_with_typo_tolerance(cited_title: str, actual_title: str, max_distance: int = 3) -> bool:
     """Conservative OCR/typo tolerance for title comparison.
 
@@ -6140,6 +6188,12 @@ def calculate_title_similarity(title1: str, title2: str) -> float:
         compact_norm_t2 = compact_alnum(norm_t2)
         if compact_norm_t1 and compact_norm_t1 == compact_norm_t2:
             return 1.0
+
+    # Catalogue records can wrap the cited title in a main title and a
+    # responsibility/subtitle statement.  An exact, substantial delimited
+    # segment is stronger evidence than a diluted whole-string fuzzy score.
+    if titles_align_as_delimited_segments(raw_title1, raw_title2):
+        return 1.0
 
     title1 = normalize_extracted_title_artifacts(raw_title1)
     title2 = normalize_extracted_title_artifacts(raw_title2)

@@ -57,6 +57,14 @@ def test_title_similarity_handles_umlaut_transliteration_from_search_cleaning():
     assert calculate_title_similarity(cited, found) == 1.0
 
 
+def test_normalize_diacritics_transliterates_decomposed_german_umlaut():
+    assert normalize_diacritics("fu\u0308r") == "fuer"
+    assert calculate_title_similarity(
+        "Umsetzungsempfehlungen fuer das Zukunftsprojekt Industrie 4.0",
+        "Umsetzungsempfehlungen fu\u0308r das Zukunftsprojekt Industrie 4.0",
+    ) == 1.0
+
+
 class TestNameMatching:
     """Test name matching functionality."""
     

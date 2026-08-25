@@ -424,6 +424,9 @@ class ArxivReferenceChecker:
             enable_openalex=True,
             enable_crossref=True,
             enable_open_library=True,
+            enable_dnb=True,
+            enable_tib=True,
+            enable_zdb=True,
             debug_mode=debug_mode,
             cache_dir=cache_dir,
         )
@@ -432,9 +435,11 @@ class ArxivReferenceChecker:
             for key in ('s2', 'openalex', 'crossref', 'dblp'):
                 if key in self.db_paths:
                     local_services.append(f"Local {DATABASE_LABELS.get(key, key)} DB")
-            self.service_order = " → ".join(local_services + ["Semantic Scholar API", "OpenAlex", "CrossRef"])
+            self.service_order = " → ".join(local_services + [
+                "Semantic Scholar API", "OpenAlex", "CrossRef", "DNB", "TIB", "ZDB",
+            ])
         else:
-            self.service_order = "Semantic Scholar API → OpenAlex → CrossRef"
+            self.service_order = "Semantic Scholar API → OpenAlex → CrossRef → DNB → TIB → ZDB"
         
         # debug mode
         self.debug_mode = debug_mode

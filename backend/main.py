@@ -22,6 +22,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic.fields import FieldInfo
 from pydantic import BaseModel, Field
 import logging
+
+# Source checkouts are commonly launched as ``python -m uvicorn
+# backend.main:app`` (including start_webui.bat and web-ui/start.js).  In that
+# form the repository root is on sys.path, but ``src`` is not.  Put it first
+# before importing refchecker so the WebUI uses the same current shared core as
+# the CLI and bulk paths instead of a possibly stale site-packages installation.
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src"
+if _SOURCE_ROOT.is_dir():
+    _source_root_text = str(_SOURCE_ROOT)
+    if _source_root_text in sys.path:
+        sys.path.remove(_source_root_text)
+    sys.path.insert(0, _source_root_text)
+
 from refchecker.__version__ import __version__
 from refchecker.utils.database_config import DATABASE_BUILD_DEPENDENCIES, DATABASE_FILE_ALIASES, DATABASE_LABELS, DATABASE_UPDATE_ORDER, resolve_database_paths, resolve_database_update_paths
 

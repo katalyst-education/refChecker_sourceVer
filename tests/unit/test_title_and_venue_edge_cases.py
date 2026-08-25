@@ -4,6 +4,7 @@ from refchecker.utils.text_utils import (
     calculate_title_similarity,
     compare_titles_with_latex_cleaning,
     normalize_venue_for_display,
+    titles_align_as_delimited_segments,
     titles_align_with_subtitle_tolerance,
     titles_match_with_typo_tolerance,
 )
@@ -61,6 +62,29 @@ def test_title_similarity_ignores_trailing_year():
     b = "Phi-4 Technical Report"
     score = calculate_title_similarity(a, b)
     assert score >= 0.95
+
+
+def test_title_similarity_accepts_exact_catalogue_title_segment():
+    cited = "Umsetzungsempfehlungen fuer das Zukunftsprojekt Industrie 4.0"
+    found = (
+        "Deutschlands Zukunft als Produktionsstandort sichern - "
+        "Umsetzungsempfehlungen für das Zukunftsprojekt Industrie 4.0: "
+        "Abschlußbericht des Arbeitskreises Industrie 4.0"
+    )
+
+    assert titles_align_as_delimited_segments(cited, found) is True
+    assert calculate_title_similarity(cited, found) == 1.0
+
+
+def test_catalogue_title_segment_match_rejects_generic_or_undelimited_overlap():
+    assert titles_align_as_delimited_segments(
+        "Industrial production",
+        "Germany's future - Industrial production: final report",
+    ) is False
+    assert titles_align_as_delimited_segments(
+        "Recommendations for the future industrial production programme",
+        "Review of recommendations for the future industrial production programme",
+    ) is False
 
 
 @pytest.mark.parametrize(
