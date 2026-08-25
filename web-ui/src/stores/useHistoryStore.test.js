@@ -113,4 +113,28 @@ describe('useHistoryStore', () => {
     expect(updated.status).toBe('completed')
     expect(updated.results).toEqual([{ index: 0, title: 'Live ref', status: 'verified' }])
   })
+
+  it('preserves a server citation index when updating an array position', async () => {
+    const { useHistoryStore } = await import('./useHistoryStore')
+    const { result } = renderHook(() => useHistoryStore())
+    const check = {
+      id: 44,
+      total_refs: 1,
+      results: [{ index: 18, title: 'Extracted title', status: 'unverified' }],
+    }
+    act(() => {
+      useHistoryStore.setState({ history: [check], selectedCheckId: 44, selectedCheck: check })
+      result.current.updateHistoryReference(44, 0, {
+        index: 18,
+        title: 'Edited title',
+        status: 'verified',
+      })
+    })
+
+    expect(result.current.selectedCheck.results[0]).toMatchObject({
+      index: 18,
+      title: 'Edited title',
+      status: 'verified',
+    })
+  })
 })

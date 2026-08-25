@@ -869,7 +869,14 @@ export const useHistoryStore = create((set, get) => ({
       if (!item) return item
       const size = Math.max(item.results?.length || 0, item.total_refs || 0, refIndex + 1)
       const newResults = Array.from({ length: size }, (_, index) => item.results?.[index] || { index, status: 'pending' })
-      newResults[refIndex] = { ...newResults[refIndex], ...refData, index: refIndex }
+      const existingIndex = newResults[refIndex]?.index
+      newResults[refIndex] = {
+        ...newResults[refIndex],
+        ...refData,
+        // Historical checks may carry 1-based citation indices. Preserve the
+        // server identity instead of replacing it with the array position.
+        index: refData?.index ?? existingIndex ?? refIndex,
+      }
       return { ...item, results: newResults }
     }
 

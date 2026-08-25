@@ -31,6 +31,26 @@ const toApiRefId = (ref, i) => {
   return `pos:${String(i)}`
 }
 
+const findReferencePosition = (list, target, fallbackPosition = -1) => {
+  const refs = Array.isArray(list) ? list : []
+  if (target?.id != null && String(target.id) !== '') {
+    const byId = refs.findIndex(ref => ref?.id != null && String(ref.id) === String(target.id))
+    if (byId >= 0) return byId
+  }
+  if (target?.index != null && String(target.index) !== '') {
+    const byIndex = refs.findIndex(ref => ref?.index != null && String(ref.index) === String(target.index))
+    if (byIndex >= 0) return byIndex
+  }
+  if (target?.title) {
+    const title = String(target.title).trim().toLocaleLowerCase()
+    const hits = refs
+        .map((ref, index) => [ref, index])
+        .filter(([ref]) => String(ref?.title || '').trim().toLocaleLowerCase() === title)
+    if (hits.length === 1) return hits[0][1]
+  }
+  return fallbackPosition >= 0 && fallbackPosition < refs.length ? fallbackPosition : -1
+}
+
 export default function useReferenceActions() {
   const selectedCheckId = useHistoryStore(s => s.selectedCheckId)
   // Per-action in-flight tracking, so Re-verify and Suggest-alternative
@@ -264,7 +284,13 @@ export default function useReferenceActions() {
     if (!selectedCheckId) return
     const ident = String(ref.id ?? ref.index ?? i)
     const apiRefId = toApiRefId(ref, i)
-    const action = opts.force_all_databases ? 'all-databases' : 'reextract'
+    const action = opts.restore_extracted
+      ? 'restore-extracted'
+      : opts.manual_edit
+        ? 'manual-edit'
+        : opts.force_all_databases
+          ? 'all-databases'
+          : 'reextract'
     setReverifyBusy(prev => {
       const next = new Map(prev)
       next.set(ident, action)
@@ -285,18 +311,27 @@ export default function useReferenceActions() {
       // The endpoint returns the complete persisted row, so update that row
       // directly instead of force-reloading the whole check. This preserves
       // the list's scroll position and keeps the user's card in view.
-      const rowIndex = Number.isInteger(ref?.index) ? ref.index : i
-      useHistoryStore.getState().updateHistoryReference?.(
-          selectedCheckId,
-          rowIndex,
+      const historyStore = useHistoryStore.getState()
+      const historyPosition = findReferencePosition(
+          historyStore.selectedCheck?.results,
+          // Completed history views remap citation indices to local 0-based
+          // display positions. The response carries the original persisted
+          // index, so use it to replace the saved row instead of its neighbor.
           updated,
+          i,
       )
+      if (historyPosition >= 0) {
+        historyStore.updateHistoryReference?.(selectedCheckId, historyPosition, updated)
+      }
       const checkStore = useCheckStore.getState()
       if (checkStore.currentCheckId === selectedCheckId) {
-        checkStore.updateReference?.(rowIndex, updated)
+        const checkPosition = findReferencePosition(checkStore.references, ref, i)
+        if (checkPosition >= 0) checkStore.updateReference?.(checkPosition, updated)
       }
+      return updated
     } catch (e) {
       alert(e?.response?.data?.detail || e?.message || 'Re-verify failed')
+      return null
     } finally {
       setReverifyBusy(prev => {
         const next = new Map(prev)
@@ -308,6 +343,19 @@ export default function useReferenceActions() {
 
   const handleReverifyAllDatabases = async (ref, i) =>
       handleReverify(ref, i, { force_all_databases: true })
+
+  const handleEditMetadata = async (ref, i, overrides) =>
+      handleReverify(ref, i, {
+        overrides,
+        manual_edit: true,
+        force_all_databases: true,
+      })
+
+  const handleRestoreExtractedMetadata = async (ref, i) =>
+      handleReverify(ref, i, {
+        restore_extracted: true,
+        force_all_databases: true,
+      })
 
   // Back-compat: a few callers (AddReferencePanel) still expect a single
   // `busyKey` string. Map the global slot onto it so '__add__'/'__restore__'
@@ -334,6 +382,8 @@ export default function useReferenceActions() {
     handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
+    handleEditMetadata,
+    handleRestoreExtractedMetadata,
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,

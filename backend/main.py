@@ -61,6 +61,11 @@ from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
 from .reference_status import classify_verification_result, split_errors_and_warnings
 from .reference_matching import find_reextracted_reference_index
+from .reference_editing import (
+    EDITABLE_REFERENCE_FIELDS,
+    apply_manual_reference_edit,
+    restore_extracted_reference_metadata,
+)
 from .models import CheckRequest, CheckHistoryItem
 from .concurrency import init_limiter, get_limiter, set_default_max_concurrent, DEFAULT_MAX_CONCURRENT
 from .cites_refs import fetch_cites_and_refs, normalize_mode as _normalize_overlap_mode
@@ -7988,8 +7993,16 @@ class _VerifySingleRequest(BaseModel):
     # the Corrections-tab "↺ Restore" button to roll a previously-
     # applied fix back to the original cited values — the FE snapshots
     # the ref before calling apply_correction and replays those fields
-    # here. Keys recognised: title, authors, year, venue, doi, arxiv_id.
+    # here. Keys recognised: title, authors, year, venue, doi, arxiv_id,
+    # cited_url.
     overrides: Optional[Dict[str, Any]] = None
+    # A user-authored metadata change. Unlike correction restores, this keeps a
+    # durable snapshot of the originally extracted fields so the edit can be
+    # undone after a refresh or from another browser.
+    manual_edit: bool = False
+    # Restore the durable snapshot created by ``manual_edit`` and verify those
+    # extracted fields again. No browser-side snapshot is required.
+    restore_extracted: bool = False
     # When true, skip the global identity cache and force a fresh verifier
     # run across the full configured database/API stack.
     force_all_databases: bool = False
@@ -8180,6 +8193,28 @@ async def verify_single_reference(
         target.get("title"),
     )
 
+    if body and body.manual_edit and body.restore_extracted:
+        raise HTTPException(
+            status_code=422,
+            detail="A reference cannot be edited and restored in the same request.",
+        )
+
+    if body and body.restore_extracted:
+        try:
+            restore_extracted_reference_metadata(target)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if body and body.manual_edit:
+        try:
+            apply_manual_reference_edit(
+                target,
+                body.overrides or {},
+                edited_by=getattr(current_user, "id", None),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     if body and body.apply_correction:
         corrected = target.get("corrected_reference") or {}
         if isinstance(corrected, dict) and corrected:
@@ -8197,8 +8232,13 @@ async def verify_single_reference(
     # reverted. Runs AFTER apply_correction so that — if both were
     # somehow set on the same call — overrides win, matching the
     # caller's intent.
-    if body and isinstance(getattr(body, 'overrides', None), dict) and body.overrides:
-        for k in ("title", "authors", "year", "venue", "doi", "arxiv_id"):
+    if (
+        body
+        and not body.manual_edit
+        and isinstance(getattr(body, 'overrides', None), dict)
+        and body.overrides
+    ):
+        for k in EDITABLE_REFERENCE_FIELDS:
             if k in body.overrides:
                 v = body.overrides[k]
                 # Allow explicit empty / None to clear a field — the
@@ -8209,7 +8249,12 @@ async def verify_single_reference(
         target["errors"] = []
         target["warnings"] = []
 
-    force_all_databases = bool(body and body.force_all_databases)
+    # User-selected fields must be checked fresh. This also guarantees manual
+    # edits and restores skip document re-extraction even if an older caller
+    # omitted ``force_all_databases``.
+    force_all_databases = bool(
+        body and (body.force_all_databases or body.manual_edit or body.restore_extracted)
+    )
 
     # Re-extract the selected entry from the source document for the ordinary
     # Re-verify button. Do this before looking in the identity cache: otherwise
@@ -8487,10 +8532,14 @@ async def verify_single_reference(
 
     # Push the freshly-verified ref into the global identity cache so the
     # next check that touches it gets an instant hit.
-    try:
-        await db.upsert_verified_reference(updated)
-    except Exception:
-        pass
+    # Manual-edit provenance belongs to this check and user. Do not copy its
+    # original snapshot into the global identity cache, where it could later be
+    # replayed into an unrelated check.
+    if not (body and (body.manual_edit or body.restore_extracted)):
+        try:
+            await db.upsert_verified_reference(updated)
+        except Exception:
+            pass
 
     return {"reference": updated, "from_cache": False}
 

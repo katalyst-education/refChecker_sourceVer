@@ -3513,7 +3513,7 @@ class ArxivReferenceChecker:
             None if this is not a web page reference
         """
         # Check if this is a web page reference
-        web_url = reference.get('url', '').strip() or reference.get('cited_url', '').strip()
+        web_url = (reference.get('url') or '').strip() or (reference.get('cited_url') or '').strip()
         if not web_url:
             return None  # No URL to check
         
@@ -3588,7 +3588,7 @@ class ArxivReferenceChecker:
         logger.debug(f"Checking raw URL for unverified reference: {reference.get('title', 'Untitled')}")
         
         # Extract URL from reference
-        web_url = reference.get('url', '').strip()
+        web_url = (reference.get('url') or '').strip()
         if not web_url:
             return None, [{"error_type": "unverified", "error_details": "Reference could not be verified"}], None
         

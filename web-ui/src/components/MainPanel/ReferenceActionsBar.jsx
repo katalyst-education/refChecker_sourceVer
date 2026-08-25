@@ -355,6 +355,8 @@ export function ReferenceRowActions({
                                       onRemove,
                                       onReverify,
                                       onReverifyAllDatabases,
+                                      onEditMetadata,
+                                      onRestoreExtractedMetadata,
                                       // Per-action busy flags so Re-verify and Suggest-alternative can
                                       // run in parallel on the same row without each disabling/clobbering
                                       // the other's spinner (#18). globalBusy blocks every per-row action
@@ -366,6 +368,67 @@ export function ReferenceRowActions({
                                       removeBusy = false,
                                       globalBusy = false,
                                     }) {
+  const referenceAuthors = Array.isArray(reference?.authors)
+    ? reference.authors
+    : reference?.authors
+      ? [reference.authors]
+      : []
+  const authorNames = referenceAuthors
+      .map(author => {
+        if (typeof author === 'string') return author
+        if (!author || typeof author !== 'object') return ''
+        return author.name || [author.givenName, author.familyName].filter(Boolean).join(' ')
+      })
+      .filter(Boolean)
+  const makeDraft = () => ({
+    title: reference?.title || '',
+    authors: authorNames.length ? authorNames : [''],
+    year: reference?.year == null ? '' : String(reference.year),
+    venue: reference?.venue || reference?.journal || '',
+    doi: reference?.doi || '',
+    arxiv_id: reference?.arxiv_id || '',
+    cited_url: reference?.cited_url || reference?.url || '',
+  })
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(makeDraft)
+  const [saving, setSaving] = useState(false)
+  const fieldStyle = {
+    borderColor: 'var(--color-border)',
+    background: 'var(--color-bg-secondary)',
+    color: 'var(--color-text-primary)',
+  }
+  const openEditor = () => {
+    setDraft(makeDraft())
+    setEditing(true)
+  }
+  const updateAuthor = (authorIndex, value) => {
+    setDraft(current => ({
+      ...current,
+      authors: current.authors.map((author, index) => index === authorIndex ? value : author),
+    }))
+  }
+  const removeAuthor = (authorIndex) => {
+    setDraft(current => ({
+      ...current,
+      authors: current.authors.length > 1
+        ? current.authors.filter((_, index) => index !== authorIndex)
+        : [''],
+    }))
+  }
+  const saveMetadata = async (event) => {
+    event.preventDefault()
+    setSaving(true)
+    try {
+      const updated = await onEditMetadata?.(reference, displayIndex, {
+        ...draft,
+        authors: draft.authors.map(author => author.trim()).filter(Boolean),
+        year: draft.year.trim() || null,
+      })
+      if (updated) setEditing(false)
+    } finally {
+      setSaving(false)
+    }
+  }
   // Match Settings panel button styling — pill, subtle border, hover lift.
   const baseStyle = {
     border: '1px solid var(--color-border)',
@@ -374,9 +437,11 @@ export function ReferenceRowActions({
     transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
   }
   const styleFor = (busy) => ({ ...baseStyle, opacity: (busy || !selectedCheckId || globalBusy) ? 0.55 : 1 })
-  const disableFor = (busy) => busy || !selectedCheckId || globalBusy
+  const disableFor = (busy) => busy || !selectedCheckId || globalBusy || editing
   const reextracting = reverifyBusy && reverifyAction === 'reextract'
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
+  const savingEdit = reverifyBusy && reverifyAction === 'manual-edit'
+  const restoringExtracted = reverifyBusy && reverifyAction === 'restore-extracted'
   return (
       <div className="px-4 pb-3 pt-1 text-xs" aria-busy={reverifyBusy || undefined}>
         <div className="flex flex-wrap gap-1.5">
@@ -402,6 +467,28 @@ export function ReferenceRowActions({
           </button>
           <button
               type="button"
+              onClick={openEditor}
+              disabled={disableFor(reverifyBusy)}
+              className="px-2.5 py-1 rounded-md font-medium"
+              style={styleFor(reverifyBusy)}
+              title="Edit the extracted title, authors, year, venue, and identifiers, then verify the changes"
+          >
+            {savingEdit ? 'Saving edit…' : 'Edit metadata'}
+          </button>
+          {reference?.manual_edit?.original && (
+              <button
+                  type="button"
+                  onClick={() => onRestoreExtractedMetadata?.(reference, displayIndex)}
+                  disabled={disableFor(reverifyBusy)}
+                  className="px-2.5 py-1 rounded-md font-medium"
+                  style={styleFor(reverifyBusy)}
+                  title="Restore the metadata originally extracted from the document and verify it again"
+              >
+                {restoringExtracted ? 'Restoring…' : 'Undo metadata edit'}
+              </button>
+          )}
+          <button
+              type="button"
               onClick={() => onSuggest(reference, displayIndex)}
               disabled={disableFor(suggestBusy)}
               className="px-2.5 py-1 rounded-md font-medium"
@@ -425,6 +512,115 @@ export function ReferenceRowActions({
             {removeBusy ? '…' : 'Remove'}
           </button>
         </div>
+        {reference?.manual_edit?.original && !editing && (
+            <div className="mt-2" style={{ color: 'var(--color-text-muted)' }}>
+              Edited by user
+              {(reference.manual_edit.edited_fields || []).length > 0
+                ? ` · ${reference.manual_edit.edited_fields.join(', ')}`
+                : ''}
+            </div>
+        )}
+        {editing && (
+            <form
+                onSubmit={saveMetadata}
+                className="mt-3 p-3 rounded-md space-y-3"
+                style={{ border: '1px solid var(--color-border)', background: 'var(--color-bg-tertiary)' }}
+            >
+              <div className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>
+                Edit extracted metadata
+              </div>
+              <label className="block">
+                <span className="block mb-1" style={{ color: 'var(--color-text-muted)' }}>Title</span>
+                <input
+                    aria-label="Title"
+                    className="w-full min-w-0 px-2 py-1.5 rounded border"
+                    value={draft.title}
+                    onChange={event => setDraft(current => ({ ...current, title: event.target.value }))}
+                    style={fieldStyle}
+                />
+              </label>
+              <fieldset>
+                <legend className="mb-1" style={{ color: 'var(--color-text-muted)' }}>Authors</legend>
+                <div className="space-y-1.5">
+                  {draft.authors.map((author, authorIndex) => (
+                      <div className="flex min-w-0 gap-1.5" key={`author-${authorIndex}`}>
+                        <input
+                            aria-label={`Author ${authorIndex + 1}`}
+                            className="flex-1 min-w-0 px-2 py-1.5 rounded border"
+                            value={author}
+                            onChange={event => updateAuthor(authorIndex, event.target.value)}
+                            style={fieldStyle}
+                        />
+                        <button
+                            type="button"
+                            aria-label={`Remove author ${authorIndex + 1}`}
+                            onClick={() => removeAuthor(authorIndex)}
+                            className="px-2 rounded"
+                            style={baseStyle}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                  ))}
+                </div>
+                <button
+                    type="button"
+                    onClick={() => setDraft(current => ({ ...current, authors: [...current.authors, ''] }))}
+                    className="mt-1.5 px-2 py-1 rounded"
+                    style={baseStyle}
+                >
+                  + Add author
+                </button>
+              </fieldset>
+              <div className="grid min-w-0 grid-cols-1 sm:grid-cols-2 gap-2">
+                {[
+                  ['year', 'Year'],
+                  ['venue', 'Venue / publisher'],
+                  ['doi', 'DOI'],
+                  ['arxiv_id', 'arXiv ID'],
+                  ['cited_url', 'URL'],
+                ].map(([field, label]) => (
+                    <label className={`min-w-0 ${field === 'cited_url' ? 'sm:col-span-2' : ''}`} key={field}>
+                      <span className="block mb-1" style={{ color: 'var(--color-text-muted)' }}>{label}</span>
+                      <input
+                          aria-label={label}
+                          inputMode={field === 'year' ? 'numeric' : undefined}
+                          className="w-full min-w-0 px-2 py-1.5 rounded border"
+                          value={draft[field]}
+                          onChange={event => setDraft(current => ({ ...current, [field]: event.target.value }))}
+                          style={fieldStyle}
+                      />
+                    </label>
+                ))}
+              </div>
+              <div style={{ color: 'var(--color-text-muted)' }}>
+                Saving verifies these exact values without extracting the document again.
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button
+                    type="button"
+                    onClick={() => setEditing(false)}
+                    disabled={saving}
+                    className="px-3 py-1.5 rounded font-medium"
+                    style={baseStyle}
+                >
+                  Cancel
+                </button>
+                <button
+                    type="submit"
+                    disabled={saving || !draft.title.trim()}
+                    className="px-3 py-1.5 rounded font-medium"
+                    style={{
+                      background: 'var(--color-accent)',
+                      color: '#fff',
+                      opacity: (saving || !draft.title.trim()) ? 0.6 : 1,
+                    }}
+                >
+                  {saving ? 'Saving and verifying…' : 'Save and verify'}
+                </button>
+              </div>
+            </form>
+        )}
         {reverifyBusy && (
             <div
                 role="status"
@@ -445,7 +641,11 @@ export function ReferenceRowActions({
               <span>
             {searchingAll
                 ? 'Searching every configured database for this reference…'
-                : 'Re-extracting this reference from the document, then verifying it…'}
+                : savingEdit
+                  ? 'Saving the edited metadata, then verifying it…'
+                  : restoringExtracted
+                    ? 'Restoring the originally extracted metadata, then verifying it…'
+                    : 'Re-extracting this reference from the document, then verifying it…'}
           </span>
             </div>
         )}

@@ -40,6 +40,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
+    handleEditMetadata,
+    handleRestoreExtractedMetadata,
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,
@@ -297,6 +299,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           onRemove={handleRemoveRef}
                           onReverify={handleReverify}
                           onReverifyAllDatabases={handleReverifyAllDatabases}
+                          onEditMetadata={handleEditMetadata}
+                          onRestoreExtractedMetadata={handleRestoreExtractedMetadata}
                           reverifyBusy={isReverifying(ident)}
                           reverifyAction={getReverifyAction(ident)}
                           suggestBusy={isSuggesting(ident)}

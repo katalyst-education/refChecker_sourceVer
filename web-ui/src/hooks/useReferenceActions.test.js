@@ -102,6 +102,93 @@ describe('useReferenceActions re-verification', () => {
       force_all_databases: true,
     }))
   })
+
+  it('sends manual metadata edits as fresh verification overrides', async () => {
+    verifyReferenceInCheck.mockResolvedValue({
+      data: { reference: { ...reference, title: 'Edited title', status: 'verified' } },
+    })
+    const { result } = renderHook(() => useReferenceActions())
+
+    await act(async () => {
+      await result.current.handleEditMetadata(reference, 0, {
+        title: 'Edited title',
+        authors: ['Edited Author'],
+        year: '2005',
+      })
+    })
+
+    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'id:ref-1', expect.objectContaining({
+      manual_edit: true,
+      force_all_databases: true,
+      overrides: {
+        title: 'Edited title',
+        authors: ['Edited Author'],
+        year: '2005',
+      },
+    }))
+  })
+
+  it('restores the server-side extracted metadata snapshot', async () => {
+    verifyReferenceInCheck.mockResolvedValue({ data: { reference } })
+    const { result } = renderHook(() => useReferenceActions())
+
+    await act(async () => {
+      await result.current.handleRestoreExtractedMetadata(reference, 0)
+    })
+
+    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'id:ref-1', expect.objectContaining({
+      restore_extracted: true,
+      force_all_databases: true,
+    }))
+  })
+
+  it('updates the persisted history row when the view remapped it to a zero-based index', async () => {
+    const persistedRows = [
+      { index: 17, title: 'Previous reference', status: 'verified' },
+      { index: 18, title: 'Bad extracted title', status: 'unverified' },
+    ]
+    const displayedReference = {
+      ...persistedRows[1],
+      index: 1,
+    }
+    const selectedCheck = {
+      id: 17,
+      total_refs: 2,
+      status: 'completed',
+      results: persistedRows,
+    }
+    useHistoryStore.setState({
+      selectedCheckId: 17,
+      selectedCheck,
+      history: [selectedCheck],
+    })
+    useCheckStore.setState({ currentCheckId: null, references: [] })
+    verifyReferenceInCheck.mockResolvedValue({
+      data: {
+        reference: {
+          ...persistedRows[1],
+          title: 'Corrected title',
+          status: 'verified',
+          manual_edit: { original: { title: 'Bad extracted title' } },
+        },
+      },
+    })
+    const { result } = renderHook(() => useReferenceActions())
+
+    await act(async () => {
+      await result.current.handleEditMetadata(displayedReference, 1, {
+        title: 'Corrected title',
+      })
+    })
+
+    const rows = useHistoryStore.getState().selectedCheck.results
+    expect(rows[0]).toMatchObject({ index: 17, title: 'Previous reference' })
+    expect(rows[1]).toMatchObject({
+      index: 18,
+      title: 'Corrected title',
+      status: 'verified',
+    })
+  })
 })
 
 afterAll(() => {
