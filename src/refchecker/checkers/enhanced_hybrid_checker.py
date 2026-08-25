@@ -103,6 +103,7 @@ class EnhancedHybridReferenceChecker:
                  enable_openalex: bool = True,
                  enable_crossref: bool = True,
                  enable_open_library: bool = True,
+                 enable_econbiz: bool = True,
                  enable_dnb: bool = True,
                  enable_zdb: bool = True,
                  enable_google_books: Optional[bool] = None,
@@ -125,6 +126,7 @@ class EnhancedHybridReferenceChecker:
             enable_openalex: Whether to use OpenAlex API
             enable_crossref: Whether to use CrossRef API
             enable_open_library: Whether to use Open Library as a book-reference fallback
+            enable_econbiz: Whether to use EconBiz for economics and business literature
             enable_dnb: Whether to use the DNB catalogue SRU API
             enable_tib: Whether to use the TIB catalogue SRU API
             enable_zdb: Whether to use the ZDB catalogue SRU API
@@ -201,6 +203,12 @@ class EnhancedHybridReferenceChecker:
         if enable_open_library:
             self.open_library = self._initialize_checker(
                 'open_library', 'OpenLibraryReferenceChecker', 'Open Library API', email=contact_email
+            )
+
+        self.econbiz = None
+        if enable_econbiz:
+            self.econbiz = self._initialize_checker(
+                'econbiz', 'EconBizReferenceChecker', 'EconBiz API', email=contact_email
             )
 
         self.dnb = None
@@ -290,7 +298,8 @@ class EnhancedHybridReferenceChecker:
         self.cache_dir = cache_dir
         all_local_checkers = [checker for _, _, checker in self.local_db_checkers]
         for checker in (self.arxiv_citation, *all_local_checkers, self.semantic_scholar,
-                        self.openalex, self.crossref, self.open_library, self.dnb, self.tib, self.zdb,
+                        self.openalex, self.crossref, self.open_library, self.econbiz,
+                        self.dnb, self.tib, self.zdb,
                         self.google_books,
                         self.openreview, self.dblp,
                         self.acl_anthology, self.paperclip):
@@ -304,6 +313,7 @@ class EnhancedHybridReferenceChecker:
             'openalex': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'crossref': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'open_library': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'econbiz': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'dnb': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'tib': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'zdb': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
@@ -335,6 +345,7 @@ class EnhancedHybridReferenceChecker:
             'crossref': threading.Semaphore(3),
             'openalex': threading.Semaphore(3),
             'open_library': threading.Semaphore(1),
+            'econbiz': threading.Semaphore(1),
             'dnb': threading.Semaphore(1),
             'tib': threading.Semaphore(1),
             'zdb': threading.Semaphore(1),
@@ -403,6 +414,7 @@ class EnhancedHybridReferenceChecker:
             'openalex': 'OpenAlex',
             'crossref': 'CrossRef',
             'open_library': 'Open Library',
+            'econbiz': 'EconBiz',
             'dnb': 'DNB Catalogue',
             'tib': 'TIB Catalogue',
             'zdb': 'ZDB Catalogue',
@@ -451,7 +463,7 @@ class EnhancedHybridReferenceChecker:
         """List every configured primary database in execution-order terms."""
         names = [key for key, _, _ in self._iter_local_db_checkers()]
         for name in (
-            'semantic_scholar', 'crossref', 'openalex', 'open_library',
+            'semantic_scholar', 'crossref', 'openalex', 'open_library', 'econbiz',
             'dnb', 'tib', 'zdb', 'dblp', 'acl_anthology', 'openreview',
             'paperclip', 'google_books',
         ):
@@ -679,10 +691,21 @@ class EnhancedHybridReferenceChecker:
                     )
                     return None, [], None, False, 'not_found', ''
                 verified_data = self._annotate_match_source(verified_data, api_name, api_instance)
+                verification_basis = (
+                    verified_data.get('_verification_basis')
+                    if isinstance(verified_data, dict)
+                    else None
+                )
+                result_status = (
+                    'verified_fulltext_evidence'
+                    if verification_basis == 'econbiz_fulltext_evidence'
+                    else 'matched'
+                )
                 logger.info(
-                    "[DATABASE_TRACE] stage=result database=%s status=matched duration_ms=%d "
+                    "[DATABASE_TRACE] stage=result database=%s status=%s duration_ms=%d "
                     "candidate=%r error_count=%d url=%r",
                     api_name,
+                    result_status,
                     round(duration * 1000),
                     self._database_trace_summary(verified_data),
                     len(errors or []),
@@ -1397,6 +1420,9 @@ class EnhancedHybridReferenceChecker:
         open_library = getattr(self, 'open_library', None)
         if open_library:
             fallback_apis.append(('open_library', open_library))
+        econbiz = getattr(self, 'econbiz', None)
+        if econbiz:
+            fallback_apis.append(('econbiz', econbiz))
         dnb = getattr(self, 'dnb', None)
         if dnb:
             fallback_apis.append(('dnb', dnb))
@@ -1442,7 +1468,8 @@ class EnhancedHybridReferenceChecker:
                         self._try_api, api_name, api_instance, reference)
 
             priority = [
-                'semantic_scholar', 'crossref', 'openalex', 'dnb', 'tib', 'zdb', 'open_library',
+                'semantic_scholar', 'crossref', 'openalex', 'dnb', 'tib', 'zdb',
+                'open_library', 'econbiz',
                 'dblp', 'acl_anthology', 'paperclip',
             ]
             for api_name in priority:

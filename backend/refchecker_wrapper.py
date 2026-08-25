@@ -1491,6 +1491,14 @@ class ProgressRefChecker:
                 err_obj['requires_user_confirmation'] = True
             if err.get('match_provenance'):
                 err_obj['match_provenance'] = err.get('match_provenance')
+            for _k in (
+                "supporting_evidence_source",
+                "supporting_evidence_url",
+                "supporting_evidence_title",
+                "supporting_evidence_id",
+            ):
+                if err.get(_k):
+                    err_obj[_k] = err.get(_k)
             # Propagate typed correction fields so the FE corrected-bibtex builder
             # always has year/venue/title/authors to insert.
             for _k in ("ref_year_correct", "ref_venue_correct", "ref_title_correct", "ref_authors_correct", "ref_doi_correct"):
@@ -1624,6 +1632,18 @@ class ProgressRefChecker:
             "suggestions": formatted_suggestions,
             "authoritative_urls": authoritative_urls,
             "matched_database": matched_database,
+            "verification_basis": (verified_data or {}).get('_verification_basis'),
+            "supporting_evidence": (
+                {
+                    "source": verified_data.get('supporting_evidence_source'),
+                    "url": verified_data.get('supporting_evidence_url'),
+                    "title": verified_data.get('supporting_evidence_title'),
+                    "id": verified_data.get('supporting_evidence_id'),
+                }
+                if isinstance(verified_data, dict)
+                and verified_data.get('_verification_basis') == 'econbiz_fulltext_evidence'
+                else None
+            ),
             "verified_via_website": verified_via_webpage,
             "enrichment": enrichment_payload,
             "publication_year_assessment": (

@@ -10,6 +10,7 @@ from .google_books import GoogleBooksReferenceChecker
 from .crossref import CrossRefReferenceChecker
 from .open_library import OpenLibraryReferenceChecker
 from .dnb_sru import DnbSruReferenceChecker, TibSruReferenceChecker, ZdbSruReferenceChecker
+from .econbiz import EconBizReferenceChecker
 from .arxiv_citation import ArXivCitationChecker
 from .acl_anthology import ACLAnthologyReferenceChecker
 
@@ -22,6 +23,7 @@ __all__ = [
     "CrossRefReferenceChecker",
     "OpenLibraryReferenceChecker",
     "DnbSruReferenceChecker",
+    "EconBizReferenceChecker",
     "TibSruReferenceChecker",
     "ZdbSruReferenceChecker",
     "ArXivCitationChecker",

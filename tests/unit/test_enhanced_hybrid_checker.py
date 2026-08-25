@@ -381,6 +381,50 @@ def test_tib_is_selected_after_dnb_in_remote_priority():
     assert verified_data["_matched_database"] == "DNB Catalogue"
 
 
+def test_econbiz_fulltext_evidence_is_verified(caplog):
+    checker = _build_checker()
+    checker.semantic_scholar = None
+    checker.crossref = None
+    checker.openalex = None
+    checker.open_library = None
+    checker.dnb = None
+    checker.tib = None
+    checker.zdb = None
+    checker.dblp = None
+    checker.acl_anthology = None
+    checker.paperclip = None
+
+    class EconBizEvidenceChecker:
+        database_label = "EconBiz"
+
+        def verify_reference(self, reference):
+            return {
+                "title": reference["title"],
+                "authors": [{"name": "Jane Doe"}],
+                "year": 2002,
+                "_verification_basis": "econbiz_fulltext_evidence",
+                "supporting_evidence_source": "EconBiz full-text search",
+            }, [], "https://www.econbiz.de/Record/-/10005852170"
+
+    checker.econbiz = EconBizEvidenceChecker()
+    with caplog.at_level(logging.INFO, logger="refchecker.checkers.enhanced_hybrid_checker"):
+        data, errors, url = checker.verify_reference({
+            "title": "A chapter in an indexed proceedings volume",
+            "authors": ["Jane Doe"],
+            "year": 2002,
+        })
+
+    assert data is not None
+    assert errors == []
+    assert data["supporting_evidence_source"] == "EconBiz full-text search"
+    assert data["_matched_database"] == "EconBiz"
+    assert url == "https://www.econbiz.de/Record/-/10005852170"
+    assert any(
+        "stage=result database=econbiz status=verified_fulltext_evidence" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_database_trace_reports_every_launched_database_and_final_selection(caplog):
     checker = _build_checker()
     checker.crossref = None

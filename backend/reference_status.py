@@ -68,6 +68,17 @@ def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
             _san['requires_user_confirmation'] = True
         if err.get('match_provenance'):
             _san['match_provenance'] = err.get('match_provenance')
+        # Evidence-only catalogue hits (currently EconBiz full-text search)
+        # must remain visible to API/WebUI consumers without being promoted to
+        # authoritative verification URLs.
+        for _k in (
+            "supporting_evidence_source",
+            "supporting_evidence_url",
+            "supporting_evidence_title",
+            "supporting_evidence_id",
+        ):
+            if err.get(_k):
+                _san[_k] = err.get(_k)
         # Carry the typed correction fields through so the FE corrected-bibtex
         # builder can recover year/venue/title/authors even when the checker
         # only set the typed field.
