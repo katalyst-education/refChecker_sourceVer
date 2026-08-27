@@ -139,6 +139,41 @@ def test_reverify_endpoint_uses_the_shared_classifier():
     assert 'warnings come back through error_type' not in source
 
 
+def test_reverify_endpoint_uses_shared_authoritative_url_projection():
+    """A DOI returned by S2 must survive a one-reference WebUI recheck."""
+    import inspect
+
+    from backend import main
+
+    source = inspect.getsource(main.verify_single_reference)
+    assert 'build_authoritative_urls(' in source
+
+
+def test_authoritative_url_projection_keeps_semantic_scholar_and_doi():
+    from backend.reference_urls import build_authoritative_urls
+
+    urls = build_authoritative_urls(
+        {'title': 'Theoretische Grundlagen'},
+        {
+            'paperId': '26fe905bbe734317c3fa0289840a104d7b0e9314',
+            'externalIds': {'DOI': '10.1007/978-3-658-04459-6_1'},
+        },
+        'https://www.semanticscholar.org/paper/26fe905bbe734317c3fa0289840a104d7b0e9314',
+        status='warning',
+    )
+
+    assert urls == [
+        {
+            'type': 'semantic_scholar',
+            'url': 'https://www.semanticscholar.org/paper/26fe905bbe734317c3fa0289840a104d7b0e9314',
+        },
+        {
+            'type': 'doi',
+            'url': 'https://doi.org/10.1007/978-3-658-04459-6_1',
+        },
+    ]
+
+
 def test_reverify_endpoint_never_replaces_by_fresh_array_position():
     """A reordered extraction must not overwrite the selected stored row."""
     import inspect

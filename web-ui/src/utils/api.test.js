@@ -68,3 +68,33 @@ describe('batch api helpers', () => {
     })
   })
 })
+
+describe('reference verification api helper', () => {
+  beforeEach(() => {
+    mocks.apiInstance.post.mockClear()
+  })
+
+  it('disables the generic client timeout when every database is requested', () => {
+    const payload = { force_all_databases: true, expected_title: 'Slow catalogue result' }
+
+    api.verifyReferenceInCheck(17, 'index:4', payload)
+
+    expect(mocks.apiInstance.post).toHaveBeenCalledWith(
+      '/history/17/references/index%3A4/verify',
+      payload,
+      { timeout: 0 },
+    )
+  })
+
+  it('keeps the shared client timeout for an ordinary verification', () => {
+    const payload = { expected_title: 'Ordinary result' }
+
+    api.verifyReferenceInCheck(17, 'index:4', payload)
+
+    expect(mocks.apiInstance.post).toHaveBeenCalledWith(
+      '/history/17/references/index%3A4/verify',
+      payload,
+      undefined,
+    )
+  })
+})

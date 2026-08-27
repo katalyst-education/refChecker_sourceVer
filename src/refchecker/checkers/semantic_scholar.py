@@ -33,7 +33,7 @@ from refchecker.utils.doi_utils import extract_doi_from_url, is_valid_doi_format
 from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.url_utils import construct_semantic_scholar_url
 from refchecker.utils.text_utils import normalize_text, clean_title_basic, find_best_match, is_name_match, are_venues_substantially_different, calculate_title_similarity, compare_authors, clean_title_for_search, strip_latex_commands, compare_titles_with_latex_cleaning
-from refchecker.utils.error_utils import format_title_mismatch
+from refchecker.utils.error_utils import format_possible_title_alternative, format_title_mismatch
 from refchecker.utils.arxiv_rate_limiter import ArXivRateLimiter, arxiv_cached_get
 from refchecker.utils.semantic_scholar_rate_limiter import SemanticScholarRateLimiter
 from refchecker.utils.venue_utils import get_semantic_scholar_venue, resolve_venue_for_validation
@@ -1341,10 +1341,7 @@ class NonArxivReferenceChecker:
                 # the same author. It is a suggestion, not proof of a bad title.
                 candidate_warning = {
                     'warning_type': 'possible_alternative',
-                    'warning_details': (
-                        "Title and authors could not be found. "
-                        "Possibly this title and authors were meant."
-                    ),
+                    'warning_details': format_possible_title_alternative(),
                     'cited_value': clean_cited_title,
                     'actual_value': found_title,
                     'ref_title_correct': paper_data.get('title', ''),

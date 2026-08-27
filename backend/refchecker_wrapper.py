@@ -34,6 +34,7 @@ from backend.reference_status import classify_verification_result
 
 from refchecker.utils.text_utils import extract_latex_references
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
+from backend.reference_urls import build_authoritative_urls
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.llm.base import create_llm_provider, ReferenceExtractor
@@ -1467,6 +1468,14 @@ class ProgressRefChecker:
             s2_inline_url = verified_data.get('_semantic_scholar_url')
             if s2_inline_url and not any(u.get('url') == s2_inline_url for u in authoritative_urls):
                 authoritative_urls.append({"type": "semantic_scholar", "url": s2_inline_url})
+
+        authoritative_urls = build_authoritative_urls(
+            reference,
+            verified_data,
+            url,
+            status=status,
+            verified_via_webpage=verified_via_webpage,
+        )
 
         # Format errors, warnings, and suggestions
         formatted_errors = []

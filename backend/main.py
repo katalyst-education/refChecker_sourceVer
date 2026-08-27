@@ -60,6 +60,7 @@ from .database import db, get_data_dir, get_logs_dir
 from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
 from .reference_status import classify_verification_result, split_errors_and_warnings
+from .reference_urls import build_authoritative_urls
 from .reference_matching import find_reextracted_reference_index
 from .reference_editing import (
     EDITABLE_REFERENCE_FIELDS,
@@ -8507,7 +8508,13 @@ async def verify_single_reference(
             if verified_data.get(src_key):
                 updated[dst_key] = verified_data[src_key]
         updated["matched_db"] = verified_data.get("source") or updated.get("matched_db")
-        updated["authoritative_urls"] = [{"url": url}] if url else []
+        updated["authoritative_urls"] = build_authoritative_urls(
+            updated,
+            verified_data,
+            url,
+            status=status,
+            verified_via_webpage=bool(verified_data.get("web_metadata")),
+        )
         # Display-ready enrichment payload — cited-by counts, reference
         # count, Field of Study, per-author ORCID/OpenAlex IDs, etc.
         # Pulled by the References tab to render the metadata strip.

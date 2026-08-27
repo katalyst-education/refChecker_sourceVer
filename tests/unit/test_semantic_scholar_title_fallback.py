@@ -135,7 +135,11 @@ class TestSemanticScholarTitleFallback(unittest.TestCase):
         self.assertEqual(len(possible_matches), 1)
         self.assertTrue(possible_matches[0]["requires_user_confirmation"])
         self.assertEqual(possible_matches[0]["ref_title_correct"], candidate["title"])
-        self.assertIn("Title and authors could not be found", possible_matches[0]["warning_details"])
+        self.assertEqual(
+            possible_matches[0]["warning_details"],
+            "The cited title could not be found. Possibly this title was meant.",
+        )
+        self.assertNotIn("authors", possible_matches[0]["warning_details"].lower())
 
     @patch.object(NonArxivReferenceChecker, "search_paper")
     @patch.object(NonArxivReferenceChecker, "match_paper_by_title")

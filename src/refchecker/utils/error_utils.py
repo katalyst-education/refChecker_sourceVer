@@ -109,6 +109,14 @@ def format_title_mismatch(cited_title: str, verified_title: str) -> str:
     return format_three_line_mismatch("Title mismatch", cited_title, verified_title)
 
 
+def format_possible_title_alternative() -> str:
+    """Describe a speculative title match without implying an author mismatch."""
+    return (
+        "The cited title could not be found. "
+        "Possibly this title was meant."
+    )
+
+
 def format_year_mismatch(cited_year: int | str, correct_year: int | str) -> str:
     """
     Three-line year mismatch message.

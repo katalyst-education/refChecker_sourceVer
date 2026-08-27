@@ -36,7 +36,13 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from refchecker.utils.doi_utils import extract_doi_from_url, compare_dois, construct_doi_url
-from refchecker.utils.error_utils import create_author_error, create_doi_error, create_venue_warning, format_title_mismatch
+from refchecker.utils.error_utils import (
+    create_author_error,
+    create_doi_error,
+    create_venue_warning,
+    format_possible_title_alternative,
+    format_title_mismatch,
+)
 from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.text_utils import normalize_author_name, normalize_paper_title, is_name_match, compare_authors, calculate_title_similarity, compare_titles_with_latex_cleaning, strip_latex_commands, are_venues_substantially_different, is_missing_title_spacing_artifact
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, get_best_available_url, construct_semantic_scholar_url
@@ -779,10 +785,7 @@ class LocalNonArxivReferenceChecker:
                 if selected_via == 'title_author_fallback':
                     candidate_warning = {
                         'warning_type': 'possible_alternative',
-                        'warning_details': (
-                            "Title and authors could not be found. "
-                            "Possibly this title and authors were meant."
-                        ),
+                        'warning_details': format_possible_title_alternative(),
                         'cited_value': clean_cited_title,
                         'actual_value': found_title,
                         'ref_title_correct': found_title,

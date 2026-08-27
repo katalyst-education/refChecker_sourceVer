@@ -344,7 +344,15 @@ export const removeReferenceFromCheck = (checkId, refId) =>
 export const suggestAlternativeReference = (checkId, refId) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/suggest-alternative`)
 export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
-  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/verify`, opts)
+  api.post(
+    `/history/${checkId}/references/${encodeURIComponent(refId)}/verify`,
+    opts,
+    // A forced search waits for every configured database. One database can
+    // legitimately consume more than the shared 90 s client timeout through
+    // its own bounded retries, while the server continues processing. Let the
+    // database-level timeouts govern this explicit long-running operation.
+    opts.force_all_databases ? { timeout: 0 } : undefined,
+  )
 export const decideReferenceWarning = (checkId, refId, payload) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/warning-decision`, payload)
 
