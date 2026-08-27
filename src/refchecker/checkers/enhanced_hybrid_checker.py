@@ -2022,7 +2022,13 @@ class EnhancedHybridReferenceChecker:
         # used by CLI, WebUI, and bulk paths, and the fixup is idempotent.
         fixup_reference_fields(reference)
 
-        configured_databases = self._configured_database_names()
+        # Configuration tracing is diagnostic only.  Keep it from preventing
+        # the verification entry point from reaching its core logic when a
+        # lightweight caller supplies just the verifier dependencies.
+        try:
+            configured_databases = self._configured_database_names()
+        except AttributeError:
+            configured_databases = []
         logger.info(
             "[DATABASE_TRACE] stage=verification_start title=%r authors=%r year=%r "
             "doi=%r force_all=%s configured=%s",
