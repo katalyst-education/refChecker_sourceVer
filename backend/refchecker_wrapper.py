@@ -35,6 +35,7 @@ from backend.reference_status import classify_verification_result
 from refchecker.utils.text_utils import extract_latex_references
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
 from backend.reference_urls import build_authoritative_urls
+from backend.reference_result import project_verification_result
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.llm.base import create_llm_provider, ReferenceExtractor
@@ -1401,6 +1402,21 @@ class ProgressRefChecker:
         
         Shared by both async and sync verification methods.
         """
+        # The per-reference re-verify route uses this same projection.  Keep
+        # verification-result shaping out of the scan orchestration so both
+        # flows persist and render the same row for an identical raw tuple.
+        return project_verification_result(
+            reference,
+            verified_data,
+            errors,
+            url,
+            index=index,
+            enrich_enabled=getattr(self, "enrich_enabled", True),
+            include_raw_errors=True,
+        )
+
+        # Kept below temporarily for source-history readability; the shared
+        # projection above is the sole active formatter.
         # Normalize findings and derive status through the canonical classifier
         # shared with the single-reference re-verify endpoint. The helper also
         # preserves branch-specific neutral publication-year information.

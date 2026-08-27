@@ -61,6 +61,7 @@ from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
 from .reference_status import classify_verification_result, split_errors_and_warnings
 from .reference_urls import build_authoritative_urls
+from .reference_result import merge_fresh_verification, project_verification_result
 from .reference_matching import find_reextracted_reference_index
 from .reference_editing import (
     EDITABLE_REFERENCE_FIELDS,
@@ -8473,6 +8474,34 @@ async def verify_single_reference(
     except Exception as e:
         logger.exception("Per-ref verify failed")
         raise HTTPException(status_code=500, detail=f"Verify failed: {e}")
+
+    # Project the raw verifier tuple through the exact same display/result
+    # builder as the initial scan.  A fresh all-databases search must replace
+    # stale source labels, findings, URLs, enrichment, and correction state;
+    # only stable citation/history fields survive the merge.
+    projection = project_verification_result(
+        dict(target),
+        verified_data,
+        errors,
+        url,
+        index=target.get("index"),
+        enrich_enabled=True,
+    )
+    updated = merge_fresh_verification(target, projection)
+    refs[idx] = updated
+    ok = await db.replace_check_references(check_id, refs, user_id=user_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to persist verified reference")
+
+    # Manual-edit provenance belongs to the current check; do not copy it to
+    # the global identity cache.
+    if not (body and (body.manual_edit or body.restore_extracted)):
+        try:
+            await db.upsert_verified_reference(updated)
+        except Exception:
+            pass
+
+    return {"reference": updated, "from_cache": False}
 
     # Assemble a verified result on top of the existing ref so the row
     # keeps its id/index but picks up the new status/errors/url.
