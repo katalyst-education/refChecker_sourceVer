@@ -355,6 +355,8 @@ export function ReferenceRowActions({
                                       onRemove,
                                       onReverify,
                                       onReverifyAllDatabases,
+                                      searchOperation = null,
+                                      onCancelReferenceSearch,
                                       onEditMetadata,
                                       onRestoreExtractedMetadata,
                                       // Per-action busy flags so Re-verify and Suggest-alternative can
@@ -437,13 +439,14 @@ export function ReferenceRowActions({
     transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
   }
   const styleFor = (busy) => ({ ...baseStyle, opacity: (busy || !selectedCheckId || globalBusy) ? 0.55 : 1 })
-  const disableFor = (busy) => busy || !selectedCheckId || globalBusy || editing
+  const activeSearch = ['queued', 'running', 'cancelling'].includes(searchOperation?.status)
+  const disableFor = (busy) => busy || activeSearch || !selectedCheckId || globalBusy || editing
   const reextracting = reverifyBusy && reverifyAction === 'reextract'
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
   const savingEdit = reverifyBusy && reverifyAction === 'manual-edit'
   const restoringExtracted = reverifyBusy && reverifyAction === 'restore-extracted'
   return (
-      <div className="px-4 pb-3 pt-1 text-xs" aria-busy={reverifyBusy || undefined}>
+      <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || activeSearch) || undefined}>
         <div className="flex flex-wrap gap-1.5">
           <button
               type="button"
@@ -457,13 +460,19 @@ export function ReferenceRowActions({
           </button>
           <button
               type="button"
-              onClick={() => onReverifyAllDatabases?.(reference, displayIndex)}
-              disabled={disableFor(reverifyBusy)}
+              onClick={() => activeSearch
+                ? onCancelReferenceSearch?.(searchOperation)
+                : onReverifyAllDatabases?.(reference, displayIndex)}
+              disabled={searchOperation?.status === 'cancelling' || reverifyBusy || !selectedCheckId || globalBusy || editing}
               className="px-2.5 py-1 rounded-md font-medium"
               style={styleFor(reverifyBusy)}
-              title="Keep the saved citation fields and search every configured database"
+              title={activeSearch ? 'Cancel this database search' : 'Keep the saved citation fields and search every configured database'}
           >
-            {searchingAll ? 'Searching all DBs…' : 'Search all DBs'}
+            {searchOperation?.status === 'cancelling'
+              ? 'Cancelling…'
+              : activeSearch
+                ? 'Cancel search'
+                : searchingAll ? 'Searching all DBs…' : 'Search all DBs'}
           </button>
           <button
               type="button"
@@ -512,6 +521,40 @@ export function ReferenceRowActions({
             {removeBusy ? '…' : 'Remove'}
           </button>
         </div>
+        {searchOperation && (
+          <div
+            className="mt-2 rounded-md p-2"
+            style={{ border: '1px solid var(--color-border)', background: 'var(--color-bg-tertiary)' }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>
+                {activeSearch ? 'Searching databases' : searchOperation.status === 'completed' ? 'Database search complete' : searchOperation.status === 'cancelled' ? 'Database search cancelled' : 'Database search failed'}
+              </span>
+              {searchOperation.duration_ms != null && (
+                <span style={{ color: 'var(--color-text-muted)' }}>{(searchOperation.duration_ms / 1000).toFixed(1)}s</span>
+              )}
+            </div>
+            {Object.values(searchOperation.sources || {}).length > 0 && (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {Object.values(searchOperation.sources || {}).map(source => (
+                  <span
+                    key={source.database}
+                    className="rounded px-1.5 py-0.5"
+                    style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-secondary)' }}
+                    title={source.candidate?.title || source.status}
+                  >
+                    {source.label || source.database}: {String(source.status || '').replaceAll('_', ' ')}
+                  </span>
+                ))}
+              </div>
+            )}
+            {searchOperation.error_message && (
+              <div className="mt-1.5" style={{ color: searchOperation.status === 'cancelled' ? 'var(--color-text-muted)' : 'var(--color-error)' }}>
+                {searchOperation.error_message}
+              </div>
+            )}
+          </div>
+        )}
         {reference?.manual_edit?.original && !editing && (
             <div className="mt-2" style={{ color: 'var(--color-text-muted)' }}>
               Edited by user

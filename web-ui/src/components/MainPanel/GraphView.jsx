@@ -3,6 +3,7 @@ import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import { fetchCitationGraph, expandPaper } from '../../utils/api'
 import { openExternal } from '../../utils/tauriBridge'
 import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
+import { referenceRowIdentity } from '../../utils/referenceIdentity'
 
 // Lazy-load the heavy graph lib so the rest of the app stays light when
 // the user never opens the Graph tab.
@@ -139,7 +140,7 @@ export default function GraphView({ references, paperTitle }) {
     let cancelled = false
     setLoadingGraph(true)
     const payload = refs.map((r, i) => ({
-      id: String(r.id ?? r.index ?? `ref-${i}`),
+      id: referenceRowIdentity(r, i),
       title: r.title,
       doi: r.doi,
       arxiv_id: r.arxiv_id,
@@ -191,7 +192,7 @@ export default function GraphView({ references, paperTitle }) {
     }
 
     refs.forEach((r, i) => {
-      const id = String(r.id ?? r.index ?? `ref-${i}`)
+      const id = referenceRowIdentity(r, i)
       const status = getEffectiveReferenceStatus(r, true)
       const serverNode = serverGraph?.byId?.[id]
       const citationCount = serverNode?.citationCount || 0
@@ -409,7 +410,7 @@ export default function GraphView({ references, paperTitle }) {
     // even when the top-level r.doi / r.arxiv_id wasn't extracted.
     return (references || [])
       .map((r, i) => {
-        const id = String(r.id ?? r.index ?? `ref-${i}`)
+        const id = referenceRowIdentity(r, i)
         if (r.doi) return { id, paperId: `DOI:${r.doi}`, title: r.title }
         if (r.arxiv_id) return { id, paperId: `arXiv:${r.arxiv_id}`, title: r.title }
         // Probe authoritative_urls / verified_url for embedded IDs.

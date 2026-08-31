@@ -121,4 +121,24 @@ describe('useCheckStore', () => {
     
     expect(result.current.status).toBe('completed')
   })
+
+  it('does not merge duplicate citation indexes into the wrong row', async () => {
+    const { useCheckStore } = await import('./useCheckStore')
+    useCheckStore.setState({
+      references: [
+        { ref_uid: 'row-first', index: 26, title: 'First', status: 'verified' },
+        { ref_uid: 'row-second', index: 26, title: 'Second', status: 'warning' },
+      ],
+    })
+
+    act(() => {
+      useCheckStore.getState().setReferences([
+        { ref_uid: 'row-first', index: 26, title: 'First', status: 'pending' },
+        { ref_uid: 'row-second', index: 26, title: 'Second', status: 'pending' },
+      ])
+    })
+
+    expect(useCheckStore.getState().references.map(row => row.title)).toEqual(['First', 'Second'])
+    expect(useCheckStore.getState().references.map(row => row.status)).toEqual(['verified', 'warning'])
+  })
 })

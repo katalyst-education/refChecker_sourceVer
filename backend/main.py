@@ -12,8 +12,9 @@ import shutil
 import sys
 import tempfile
 import json
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 from urllib.parse import urlparse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Body, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,7 +57,13 @@ if (
 
 import aiosqlite
 from . import admin_insights
-from .database import db, get_data_dir, get_logs_dir
+from .database import (
+    ReferenceSearchLimitReached,
+    db,
+    ensure_reference_uids,
+    get_data_dir,
+    get_logs_dir,
+)
 from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
 from .reference_status import classify_verification_result, split_errors_and_warnings
@@ -1619,6 +1626,14 @@ app.add_middleware(
 
 # Track active check sessions
 active_checks = {}
+# Background per-reference database searches use the same WebSocket transport,
+# but a separate registry so their terminal events never mutate whole-check
+# lifecycle state.
+active_reference_searches: Dict[str, Dict[str, Any]] = {}
+# A reference search rewrites the check's result set when it completes. Keep
+# this strictly serial per user until result persistence is row-atomic.
+MAX_REFERENCE_SEARCHES_PER_USER = 1
+REFERENCE_SEARCH_DEADLINE_SECONDS = int(os.environ.get("REFERENCE_SEARCH_DEADLINE_SECONDS", "300"))
 
 # Per-user concurrent check tracking
 _user_active_checks: Dict[int, int] = {}
@@ -2275,7 +2290,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             )
             await websocket.close(code=4001, reason="Invalid token")
             return
-        active = active_checks.get(session_id)
+        active = active_checks.get(session_id) or active_reference_searches.get(session_id)
         if not active:
             # Session no longer exists (already completed/cancelled) — close
             # silently without logging a usage event to avoid log spam from
@@ -2803,6 +2818,13 @@ async def run_check(
         # Create progress callback that also saves to DB
         async def progress_callback(event_type: str, data: dict):
             nonlocal accumulated_results, last_save_count
+            # Assign the durable row identity before either transport or
+            # persistence sees the reference. Doing this across the accumulated
+            # list also disambiguates two otherwise identical citation rows.
+            if event_type == "reference_result":
+                accumulated_results = ensure_reference_uids([*accumulated_results, data])
+                data = accumulated_results[-1]
+
             # Always include check_id so the frontend can reliably route messages
             data_with_id = {**data, "check_id": check_id}
             await manager.send_message(session_id, event_type, data_with_id)
@@ -2812,10 +2834,6 @@ async def run_check(
             # them, not just the owner's session. No-op unless someone's present.
             await _broadcast_check_event_to_batch_room(check_id, event_type, data)
 
-            # Save reference results to DB as they come in
-            if event_type == "reference_result":
-                accumulated_results.append(data)
-            
             # Save progress to DB every 3 references to reduce lock contention
             if event_type == "summary_update":
                 current_count = len(accumulated_results)
@@ -7460,8 +7478,8 @@ def _read_log_tail(path: Path, lines: int = 25) -> str:
 def _find_ref_index(refs: list, ref_id: str) -> Optional[int]:
     """Resolve a ref_id from the URL to a position in ``refs``.
 
-    Accepts (in order): explicit ``id`` match, 1-based ``index`` match,
-    or 0-based positional index. This is forgiving because different UI
+    Accepts (in order): durable ``ref_uid`` match, explicit ``id`` match,
+    1-based ``index`` match, or 0-based positional index. This is forgiving because different UI
     paths send different identifiers (manual-added refs have an id like
     'manual-...', extracted refs use index, and 'just clicked the 3rd row'
     sends the array position).
@@ -7469,6 +7487,12 @@ def _find_ref_index(refs: list, ref_id: str) -> Optional[int]:
     if not refs:
         return None
     ref_id = str(ref_id)
+    if ref_id.startswith("uid:"):
+        wanted = ref_id[4:]
+        for i, r in enumerate(refs):
+            if str(r.get("ref_uid") or "") == wanted:
+                return i
+        return None
     if ref_id.startswith("id:"):
         wanted = ref_id[3:]
         for i, r in enumerate(refs):
@@ -7478,11 +7502,11 @@ def _find_ref_index(refs: list, ref_id: str) -> Optional[int]:
         return None
     if ref_id.startswith("index:"):
         wanted = ref_id[6:]
-        for i, r in enumerate(refs):
-            idx = r.get("index")
-            if idx is not None and str(idx) == wanted:
-                return i
-        return None
+        matches = [
+            i for i, r in enumerate(refs)
+            if r.get("index") is not None and str(r.get("index")) == wanted
+        ]
+        return matches[0] if len(matches) == 1 else None
     if ref_id.startswith("pos:"):
         try:
             pos = int(ref_id[4:])
@@ -7550,7 +7574,8 @@ def _find_ref_index_precise(
     if wanted_id is None and wanted_index is None and not wanted_title:
         return base_idx
 
-    if base_idx is not None and _matches_hints(base_idx):
+    route_has_exact_row_identity = str(ref_id).startswith(("uid:", "id:", "pos:"))
+    if base_idx is not None and _matches_hints(base_idx) and route_has_exact_row_identity:
         return base_idx
 
     # Title from the clicked UI row is usually the strongest disambiguator.
@@ -7599,14 +7624,15 @@ def _find_ref_index_precise(
             )
         return top_idx
 
-    # Ambiguous hints: avoid mutating the wrong row; fall back to legacy result.
+    # Ambiguous hints must fail closed. Returning the legacy first match here
+    # is precisely how duplicate citation numbers mutated a neighboring card.
     logger.warning(
         "Precise ref targeting was ambiguous for route_ref_id=%r (top_score=%s, candidates=%s)",
         ref_id,
         top_score,
         top_count,
     )
-    return base_idx
+    return None
 
 
 class _AddReferenceRequest(BaseModel):
@@ -7938,6 +7964,8 @@ async def add_reference_to_check(
         new_ref["index"] = payload.insert_at_index + 1
     else:
         refs.append(new_ref)
+    refs = ensure_reference_uids(refs)
+    new_ref = next(r for r in refs if r.get("id") == new_ref["id"])
     ok = await db.replace_check_references(check_id, refs, user_id=user_id)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to persist reference")
@@ -8013,6 +8041,346 @@ class _VerifySingleRequest(BaseModel):
     expected_id: Optional[Any] = None
     expected_index: Optional[int] = None
     expected_title: Optional[str] = None
+
+
+class _ReferenceSearchRequest(BaseModel):
+    expected_id: Optional[Any] = None
+    expected_index: Optional[int] = None
+    expected_title: Optional[str] = None
+    semantic_scholar_api_key: Optional[str] = None
+    google_books_api_key: Optional[str] = None
+    paperclip_api_key: Optional[str] = None
+
+
+def _reference_search_fingerprint(reference: Dict[str, Any]) -> str:
+    fields = {
+        key: reference.get(key)
+        for key in (
+            "id", "index", "title", "authors", "year", "venue", "journal",
+            "doi", "arxiv_id", "cited_url", "url", "raw", "raw_text", "type",
+        )
+    }
+    return json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
+
+
+async def _create_reference_search_checker(
+    *,
+    semantic_scholar_api_key: Optional[str],
+    google_books_api_key: Optional[str],
+    paperclip_api_key: Optional[str],
+    progress_callback: Callable[[Dict[str, Any]], None],
+    cancel_event: threading.Event,
+):
+    """Build a Search-all checker with the normal WebUI local resources."""
+    from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
+
+    db_paths = await _get_configured_database_paths()
+    return EnhancedHybridReferenceChecker(
+        semantic_scholar_api_key=semantic_scholar_api_key,
+        google_books_api_key=google_books_api_key,
+        paperclip_api_key=paperclip_api_key,
+        db_path=db_paths.get("s2"),
+        db_paths=db_paths,
+        debug_mode=False,
+        cache_dir=await _get_configured_cache_dir(),
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
+
+
+async def _run_reference_search_job(
+    *, operation_id: str, session_id: str, check_id: int, ref_id: str,
+    reference_key: str, owner_id: Optional[int], expected_id: Any,
+    expected_index: Optional[int], expected_title: Optional[str],
+    semantic_scholar_api_key: Optional[str], google_books_api_key: Optional[str],
+    paperclip_api_key: Optional[str], cancel_event: threading.Event,
+) -> None:
+    """Run one forced-all verification and stream display-safe source events."""
+    started = time.perf_counter()
+    progress: Dict[str, Any] = {
+        "status": "running", "sequence": 0, "sources": {},
+        "configured_sources": [],
+    }
+
+    async def emit(message_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        progress["sequence"] = int(progress.get("sequence") or 0) + 1
+        data = {
+            "operation_id": operation_id,
+            "check_id": check_id,
+            "reference_key": reference_key,
+            "sequence": progress["sequence"],
+            **(payload or {}),
+        }
+        await manager.send_message(session_id, message_type, data)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def receive_checker_event(event: Dict[str, Any]) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, dict(event))
+
+    async def forward_source_events() -> None:
+        while True:
+            event = await queue.get()
+            if event is None:
+                return
+            database = str(event.get("database") or "unknown")
+            progress["sources"][database] = event
+            await db.update_reference_search_operation(
+                operation_id, progress=progress,
+            )
+            await emit("reference_search_source", event)
+
+    forwarder = asyncio.create_task(forward_source_events())
+    try:
+        refs = await db.get_check_references(check_id, user_id=owner_id)
+        if refs is None:
+            raise LookupError("Check not found")
+        idx = _find_ref_index_precise(
+            refs, ref_id, expected_id=expected_id,
+            expected_index=expected_index, expected_title=expected_title,
+        )
+        if idx is None:
+            raise LookupError("Reference not found")
+        target = dict(refs[idx])
+        original_fingerprint = _reference_search_fingerprint(target)
+
+        from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
+        from refchecker.core.refchecker import ArxivReferenceChecker
+        from refchecker.llm import usage_tracker as _usage_tracker
+
+        checker = await _create_reference_search_checker(
+            semantic_scholar_api_key=semantic_scholar_api_key,
+            google_books_api_key=google_books_api_key,
+            paperclip_api_key=paperclip_api_key,
+            progress_callback=receive_checker_event,
+            cancel_event=cancel_event,
+        )
+        configured = [
+            {"database": name, "label": checker._format_api_name(name)}
+            for name in checker._configured_database_names()
+        ]
+        progress["configured_sources"] = configured
+        await db.update_reference_search_operation(
+            operation_id, status="running", progress=progress,
+        )
+        await emit("reference_search_started", {"configured_sources": configured})
+
+        def run_verify():
+            _usage_tracker.set_current_check(str(check_id))
+            with _usage_tracker.FlowScope("reverify"):
+                shared_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+                shared_checker.non_arxiv_checker = checker
+                errors, url, verified_data = shared_checker.verify_reference_standard(
+                    None, dict(target), force_all_databases=True,
+                )
+                return verified_data, errors, url
+
+        try:
+            verified_data, findings, url = await asyncio.wait_for(
+                asyncio.to_thread(run_verify),
+                timeout=REFERENCE_SEARCH_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            cancel_event.set()
+            raise TimeoutError("The all-database search exceeded its deadline") from exc
+
+        if cancel_event.is_set():
+            raise VerificationCancelled("Reference search cancelled")
+
+        projection = project_verification_result(
+            target, verified_data, findings, url,
+            index=target.get("index"), enrich_enabled=True,
+        )
+        updated = merge_fresh_verification(target, projection)
+
+        # Re-read immediately before writing. A concurrent edit/removal must not
+        # be overwritten by a result computed for older cited metadata.
+        current_refs = await db.get_check_references(check_id, user_id=owner_id)
+        current_idx = _find_ref_index_precise(
+            current_refs or [], ref_id, expected_id=expected_id,
+            expected_index=expected_index, expected_title=expected_title,
+        )
+        if current_idx is None or _reference_search_fingerprint(current_refs[current_idx]) != original_fingerprint:
+            raise RuntimeError("reference_changed")
+        current_refs[current_idx] = updated
+        if not await db.replace_check_references(check_id, current_refs, user_id=owner_id):
+            raise RuntimeError("Failed to persist verified reference")
+        try:
+            await db.upsert_verified_reference(updated)
+        except Exception:
+            pass
+
+        await queue.put(None)
+        await forwarder
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        progress["status"] = "completed"
+        await db.update_reference_search_operation(
+            operation_id, status="completed", progress=progress,
+            reference=updated, terminal=True,
+        )
+        await emit("reference_search_completed", {
+            "reference": updated,
+            "sources": list(progress["sources"].values()),
+            "duration_ms": duration_ms,
+        })
+    except Exception as exc:
+        cancelled = exc.__class__.__name__ == "VerificationCancelled"
+        if not cancelled:
+            logger.exception(
+                "Reference Search-all job failed before completion: operation_id=%s check_id=%s reference_key=%s",
+                operation_id,
+                check_id,
+                reference_key,
+            )
+        cancel_event.set()
+        await queue.put(None)
+        await asyncio.gather(forwarder, return_exceptions=True)
+        error_code = (
+            "cancelled" if cancelled else
+            "deadline_exceeded" if isinstance(exc, TimeoutError) else
+            "reference_changed" if str(exc) == "reference_changed" else
+            "search_failed"
+        )
+        status = "cancelled" if cancelled else "error"
+        safe_message = (
+            "Reference search cancelled" if cancelled else
+            "The reference changed while the search was running; no result was saved."
+            if error_code == "reference_changed" else str(exc)
+        )
+        progress["status"] = status
+        await db.update_reference_search_operation(
+            operation_id, status=status, progress=progress,
+            error_code=error_code, error_message=safe_message, terminal=True,
+        )
+        await emit(
+            "reference_search_cancelled" if cancelled else "reference_search_error",
+            {"error_code": error_code, "message": safe_message,
+             "sources": list(progress["sources"].values())},
+        )
+    finally:
+        active_reference_searches.pop(session_id, None)
+
+
+@app.post("/api/history/{check_id}/references/{ref_id}/search-all", status_code=202)
+async def start_reference_search(
+    check_id: int, ref_id: str, body: _ReferenceSearchRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    owner_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=owner_id)
+    if refs is None:
+        raise HTTPException(status_code=404, detail="Check not found")
+    idx = _find_ref_index_precise(
+        refs, ref_id, expected_id=body.expected_id,
+        expected_index=body.expected_index, expected_title=body.expected_title,
+    )
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+    # Citation numbers and array positions are mutable document metadata. Bind
+    # the operation to the durable row UID so duplicate numbers and later list
+    # edits cannot move its progress panel to a neighboring card.
+    reference_key = f"uid:{refs[idx]['ref_uid']}"
+
+    owner_key = -1 if owner_id is None else owner_id
+    active_for_owner = sum(
+        1 for meta in active_reference_searches.values()
+        if (-1 if meta.get("user_id") is None else meta.get("user_id")) == owner_key
+    )
+    # An existing operation is recovered below and should not consume a new slot.
+    existing_ops = await db.list_active_reference_search_operations(owner_id)
+    existing = next(
+        (op for op in existing_ops if op["check_id"] == check_id and op["reference_key"] == reference_key),
+        None,
+    )
+    if existing and existing["session_id"] in active_reference_searches:
+        return {
+            "operation_id": existing["operation_id"], "session_id": existing["session_id"],
+            "check_id": check_id, "reference_key": reference_key, "status": existing["status"],
+        }
+    if existing:
+        # In-memory tasks do not survive a server restart. Retire the orphan so
+        # a new click can start a real operation instead of recovering a ghost.
+        await db.update_reference_search_operation(
+            existing["operation_id"], status="error", error_code="server_restarted",
+            error_message="The server restarted before the search completed.", terminal=True,
+        )
+    if active_for_owner >= MAX_REFERENCE_SEARCHES_PER_USER:
+        raise HTTPException(status_code=429, detail="Too many active reference searches")
+
+    operation_id = str(uuid.uuid4())
+    session_id = f"reference-search-{uuid.uuid4()}"
+    try:
+        operation, created = await db.create_reference_search_operation(
+            operation_id, session_id, check_id, reference_key, user_id=owner_id,
+            max_active_per_user=MAX_REFERENCE_SEARCHES_PER_USER,
+        )
+    except ReferenceSearchLimitReached:
+        raise HTTPException(status_code=429, detail="Too many active reference searches")
+    if not created:
+        return {
+            "operation_id": operation["operation_id"], "session_id": operation["session_id"],
+            "check_id": check_id, "reference_key": reference_key, "status": operation["status"],
+        }
+
+    cancel_event = threading.Event()
+    ss_key = await _resolve_semantic_scholar_api_key(body.semantic_scholar_api_key)
+    books_key = await _resolve_google_books_api_key(body.google_books_api_key)
+    paperclip_key = await _resolve_paperclip_api_key(body.paperclip_api_key)
+    task = asyncio.create_task(_run_reference_search_job(
+        operation_id=operation_id, session_id=session_id, check_id=check_id,
+        ref_id=ref_id, reference_key=reference_key, owner_id=owner_id,
+        expected_id=body.expected_id, expected_index=body.expected_index,
+        expected_title=body.expected_title,
+        semantic_scholar_api_key=ss_key, google_books_api_key=books_key,
+        paperclip_api_key=paperclip_key, cancel_event=cancel_event,
+    ))
+    active_reference_searches[session_id] = {
+        "task": task, "cancel_event": cancel_event, "check_id": check_id,
+        "user_id": owner_id, "operation_id": operation_id,
+    }
+    return {
+        "operation_id": operation_id, "session_id": session_id,
+        "check_id": check_id, "reference_key": reference_key, "status": "queued",
+    }
+
+
+@app.get("/api/reference-searches/active")
+async def list_active_reference_searches(current_user: UserInfo = Depends(require_user)):
+    operations = await db.list_active_reference_search_operations(get_user_id_filter(current_user))
+    live = []
+    for operation in operations:
+        if operation["session_id"] in active_reference_searches:
+            live.append(operation)
+        else:
+            await db.update_reference_search_operation(
+                operation["operation_id"], status="error", error_code="server_restarted",
+                error_message="The server restarted before the search completed.", terminal=True,
+            )
+    return {"operations": live}
+
+
+@app.get("/api/reference-searches/{operation_id}")
+async def get_reference_search(operation_id: str, current_user: UserInfo = Depends(require_user)):
+    operation = await db.get_reference_search_operation(operation_id, get_user_id_filter(current_user))
+    if not operation:
+        raise HTTPException(status_code=404, detail="Reference search not found")
+    return operation
+
+
+@app.post("/api/reference-searches/{operation_id}/cancel", status_code=202)
+async def cancel_reference_search(operation_id: str, current_user: UserInfo = Depends(require_user)):
+    owner_id = get_user_id_filter(current_user)
+    operation = await db.get_reference_search_operation(operation_id, owner_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="Reference search not found")
+    if operation["status"] not in {"queued", "running", "cancelling"}:
+        return {"status": operation["status"]}
+    active = active_reference_searches.get(operation["session_id"])
+    if active:
+        active["cancel_event"].set()
+        await db.update_reference_search_operation(operation_id, status="cancelling")
+    return {"status": "cancellation_requested"}
 
 
 class _WarningDecisionRequest(BaseModel):

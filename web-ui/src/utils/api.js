@@ -353,6 +353,13 @@ export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
     // database-level timeouts govern this explicit long-running operation.
     opts.force_all_databases ? { timeout: 0 } : undefined,
   )
+export const startReferenceSearch = (checkId, refId, payload = {}) =>
+  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/search-all`, payload)
+export const getReferenceSearch = (operationId) =>
+  api.get(`/reference-searches/${encodeURIComponent(operationId)}`)
+export const getActiveReferenceSearches = () => api.get('/reference-searches/active')
+export const cancelReferenceSearch = (operationId) =>
+  api.post(`/reference-searches/${encodeURIComponent(operationId)}/cancel`)
 export const decideReferenceWarning = (checkId, refId, payload) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/warning-decision`, payload)
 

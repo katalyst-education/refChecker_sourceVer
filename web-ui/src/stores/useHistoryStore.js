@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { logger } from '../utils/logger'
 import * as api from '../utils/api'
 import { useCheckStore } from './useCheckStore'
+import { referenceMatchesIdentity } from '../utils/referenceIdentity'
 
 const DETAIL_CACHE_TTL_MS = 30 * 1000
 
@@ -709,12 +710,7 @@ export const useHistoryStore = create((set, get) => ({
   optimisticApplyCorrection: (refId) => {
     const { selectedCheck } = get()
     if (!selectedCheck || !Array.isArray(selectedCheck.results)) return
-    const idStr = String(refId)
-    const findHit = (r, i) => (
-        String(r.id ?? '') === idStr ||
-        String(r.index ?? '') === idStr ||
-        String(i) === idStr
-    )
+    const findHit = (r, i) => referenceMatchesIdentity(r, i, refId)
     const nextResults = selectedCheck.results.map((r, i) => {
       if (!findHit(r, i)) return r
       const corrected = r.corrected_reference || {}
@@ -748,10 +744,9 @@ export const useHistoryStore = create((set, get) => ({
   optimisticRevertCorrection: (refId) => {
     const { selectedCheck } = get()
     if (!selectedCheck || !Array.isArray(selectedCheck.results)) return
-    const idStr = String(refId)
     let touched = false
     const nextResults = selectedCheck.results.map((r, i) => {
-      const hit = String(r.id ?? '') === idStr || String(r.index ?? '') === idStr || String(i) === idStr
+      const hit = referenceMatchesIdentity(r, i, refId)
       if (!hit || !r?._pre_correction) return r
       touched = true
       const snap = r._pre_correction
@@ -798,11 +793,8 @@ export const useHistoryStore = create((set, get) => ({
   optimisticRemoveReference: (refId) => {
     const { selectedCheck } = get()
     if (!selectedCheck || !Array.isArray(selectedCheck.results)) return
-    const idStr = String(refId)
-    const next = selectedCheck.results.filter((r, i) => !(
-        String(r?.id ?? '') === idStr ||
-        String(r?.index ?? '') === idStr ||
-        String(i) === idStr
+    const next = selectedCheck.results.filter((r, i) => (
+      !referenceMatchesIdentity(r, i, refId)
     ))
     if (next.length !== selectedCheck.results.length) {
       set({ selectedCheck: { ...selectedCheck, results: next } })

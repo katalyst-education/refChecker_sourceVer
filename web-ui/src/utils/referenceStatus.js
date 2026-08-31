@@ -84,10 +84,6 @@ export const getEffectiveReferenceStatus = (reference = {}, isCheckComplete = fa
     return 'checking'
   }
 
-  if (baseStatus === 'unverified' && !reference.hallucination_assessment && !isCheckComplete) {
-    return 'checking'
-  }
-
   // Explicit false-hallucination override: if LLM-found metadata clearly matches
   // the citation, treat it as verified even when backend labeled hallucination.
   if (baseStatus === 'hallucination' && llmMatch) {
@@ -172,9 +168,7 @@ export const computeReferenceStats = (references = [], isCheckComplete = false) 
   })
 
   const finalized = processed.filter(r => {
-    const s = (r?.status || '').toLowerCase()
     if (r?.hallucination_check_pending && !r?.hallucination_assessment) return false
-    if (s === 'unverified' && !r?.hallucination_assessment && !isCheckComplete) return false
     return true
   })
 
@@ -211,17 +205,7 @@ export const computeReferenceStats = (references = [], isCheckComplete = false) 
 
     if (
       s === 'unverified' ||
-      (s !== 'checking' && r?.errors?.some(e => e.error_type === 'unverified')) ||
-      // A ref backend-labeled `status === 'unverified'` that hasn't yet
-      // entered the hallucination LLM phase has its effective status
-      // overridden to 'checking' (see getEffectiveReferenceStatus L76)
-      // so the row shows a spinner. The Summary chip still needs to
-      // show the count so the user knows how many refs are coming up
-      // for that second-pass check. We DO NOT count refs flagged with
-      // hallucination_check_pending=true — those are transient,
-      // mid-LLM-call, and would otherwise double-flicker the badge.
-      (r?.status === 'unverified' && !r?.hallucination_assessment &&
-        !r?.hallucination_check_pending && s === 'checking')
+      (s !== 'checking' && r?.errors?.some(e => e.error_type === 'unverified'))
     ) {
       withUnverified += 1
     }

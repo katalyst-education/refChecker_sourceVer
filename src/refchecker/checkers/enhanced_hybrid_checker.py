@@ -34,12 +34,16 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib import import_module
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Callable, Dict, List, Tuple, Optional, Any
 
 from refchecker.utils.database_config import DATABASE_LABELS, DATABASE_LOOKUP_ORDER
 from refchecker.utils.reference_fixups import fixup_reference_fields
 
 logger = logging.getLogger(__name__)
+
+
+class VerificationCancelled(Exception):
+    """Raised when a caller cancels a long-running verification."""
 
 
 def _venue_text(venue: Any) -> str:
@@ -113,7 +117,9 @@ class EnhancedHybridReferenceChecker:
                  enable_paperclip: Optional[bool] = None,
                  debug_mode: bool = False,
                  cache_dir: Optional[str] = None,
-                 enable_tib: bool = True):
+                 enable_tib: bool = True,
+                 progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 cancel_event: Optional[threading.Event] = None):
         """
         Initialize the enhanced hybrid reference checker
         
@@ -138,6 +144,8 @@ class EnhancedHybridReferenceChecker:
         """
         self.contact_email = contact_email
         self.debug_mode = debug_mode
+        self.progress_callback = progress_callback
+        self.cancel_event = cancel_event
         
         # Initialize ArXiv Citation checker (authoritative source for ArXiv papers)
         self.arxiv_citation = None
@@ -367,6 +375,32 @@ class EnhancedHybridReferenceChecker:
         self._api_retry_sleep_time: float = 0.0
         self._api_time_lock = threading.Lock()
     
+    def _emit_database_event(self, **event: Any) -> None:
+        """Publish a display-safe database transition to an optional caller."""
+        # Some lightweight callers and tests intentionally construct this
+        # checker with ``__new__`` and inject only the providers they need.
+        # Keep these optional orchestration hooks compatible with that usage.
+        callback = getattr(self, 'progress_callback', None)
+        if callback is None:
+            return
+        try:
+            callback(dict(event))
+        except Exception as exc:
+            logger.debug("Database progress callback failed: %s", exc)
+
+    def _raise_if_cancelled(self) -> None:
+        cancel_event = getattr(self, 'cancel_event', None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise VerificationCancelled("Reference verification cancelled")
+
+    def _wait_or_cancel(self, delay: float) -> None:
+        cancel_event = getattr(self, 'cancel_event', None)
+        if cancel_event is not None:
+            if cancel_event.wait(max(0.0, delay)):
+                raise VerificationCancelled("Reference verification cancelled")
+        else:
+            time.sleep(delay)
+
     def _update_api_stats(self, api_name: str, success: bool, duration: float):
         """Update API performance statistics"""
         if api_name in self.api_stats:
@@ -616,6 +650,7 @@ class EnhancedHybridReferenceChecker:
         """
         if not api_instance:
             return None, [], None, False, 'none', ''
+        self._raise_if_cancelled()
         
         # Acquire per-API semaphore (limits concurrent calls to this specific API)
         sem = self._api_semaphores.get(api_name)
@@ -638,9 +673,16 @@ class EnhancedHybridReferenceChecker:
             reference.get('year'),
             reference.get('doi') or reference.get('DOI'),
         )
+        self._emit_database_event(
+            database=api_name,
+            label=getattr(api_instance, 'database_label', None) or self._format_api_name(api_name),
+            status='searching',
+            attempt=2 if is_retry else 1,
+        )
         
         try:
             verified_data, errors, url = api_instance.verify_reference(reference)
+            self._raise_if_cancelled()
             duration = time.time() - start_time
             
             # Check if we got API failure errors indicating retryable failure
@@ -655,6 +697,11 @@ class EnhancedHybridReferenceChecker:
                     api_name, round(duration * 1000), api_failure_detail,
                 )
                 logger.debug(f"Enhanced Hybrid: {api_name} API failed in {duration:.2f}s: {api_failure_detail}")
+                self._emit_database_event(
+                    database=api_name, label=self._format_api_name(api_name),
+                    status='rate_limited', attempt=2 if is_retry else 1,
+                    duration_ms=round(duration * 1000),
+                )
                 return None, [], None, False, 'throttled', self._format_failure_detail(
                     api_name,
                     'throttled',
@@ -689,6 +736,12 @@ class EnhancedHybridReferenceChecker:
                         f"Enhanced Hybrid: {api_name} returned wrong-paper match "
                         f"(year+author both off) — rejecting and falling through to next API"
                     )
+                    self._emit_database_event(
+                        database=api_name, label=self._format_api_name(api_name),
+                        status='rejected_wrong_paper', attempt=2 if is_retry else 1,
+                        duration_ms=round(duration * 1000),
+                        candidate=self._database_trace_summary(verified_data),
+                    )
                     return None, [], None, False, 'not_found', ''
                 verified_data = self._annotate_match_source(verified_data, api_name, api_instance)
                 verification_basis = (
@@ -713,6 +766,12 @@ class EnhancedHybridReferenceChecker:
                 )
                 retry_info = " (retry)" if is_retry else ""
                 logger.debug(f"Enhanced Hybrid: {api_name} successful in {duration:.2f}s{retry_info}, URL: {url}")
+                self._emit_database_event(
+                    database=api_name, label=self._format_api_name(api_name),
+                    status='matched', attempt=2 if is_retry else 1,
+                    duration_ms=round(duration * 1000),
+                    candidate=self._database_trace_summary(verified_data),
+                )
                 return verified_data, errors, url, True, 'none', ''
             else:
                 logger.info(
@@ -720,8 +779,19 @@ class EnhancedHybridReferenceChecker:
                     api_name, round(duration * 1000),
                 )
                 logger.debug(f"Enhanced Hybrid: {api_name} found no results in {duration:.2f}s")
+                self._emit_database_event(
+                    database=api_name, label=self._format_api_name(api_name),
+                    status='no_match', attempt=2 if is_retry else 1,
+                    duration_ms=round(duration * 1000),
+                )
                 return None, [], None, False, 'not_found', ''
-                
+        except VerificationCancelled:
+            self._emit_database_event(
+                database=api_name, label=self._format_api_name(api_name),
+                status='cancelled', attempt=2 if is_retry else 1,
+                duration_ms=round((time.time() - start_time) * 1000),
+            )
+            raise
         except requests.exceptions.Timeout as e:
             duration = time.time() - start_time
             self._update_api_stats(api_name, False, duration)
@@ -731,6 +801,11 @@ class EnhancedHybridReferenceChecker:
                 api_name, round(duration * 1000), str(e),
             )
             logger.debug(f"Enhanced Hybrid: {api_name} timed out in {duration:.2f}s: {e}")
+            self._emit_database_event(
+                database=api_name, label=self._format_api_name(api_name),
+                status='timed_out', attempt=2 if is_retry else 1,
+                duration_ms=round(duration * 1000),
+            )
             return None, [], None, False, failure_type, self._format_failure_detail(
                 api_name,
                 failure_type,
@@ -761,6 +836,12 @@ class EnhancedHybridReferenceChecker:
                 "http_status=%r detail=%r",
                 api_name, failure_type, round(duration * 1000), status_code, str(e),
             )
+            event_status = 'rate_limited' if failure_type == 'throttled' else 'failed'
+            self._emit_database_event(
+                database=api_name, label=self._format_api_name(api_name),
+                status=event_status, attempt=2 if is_retry else 1,
+                duration_ms=round(duration * 1000),
+            )
 
             failure_detail = str(e).strip()
             if status_code and str(status_code) not in failure_detail:
@@ -783,6 +864,11 @@ class EnhancedHybridReferenceChecker:
             logger.debug(f"Enhanced Hybrid: {api_name} failed in {duration:.2f}s: {e}")
             if api_name == 'semantic_scholar':
                 logger.exception("Enhanced Hybrid: Semantic Scholar raised an unexpected error")
+            self._emit_database_event(
+                database=api_name, label=self._format_api_name(api_name),
+                status='failed', attempt=2 if is_retry else 1,
+                duration_ms=round(duration * 1000),
+            )
             return None, [], None, False, failure_type, self._format_failure_detail(
                 api_name,
                 failure_type,
@@ -2018,6 +2104,7 @@ class EnhancedHybridReferenceChecker:
         This is the single entry point used by CLI, WebUI, and bulk paths.
         All verification logic lives here so every mode gets identical results.
         """
+        self._raise_if_cancelled()
         # Repair field swaps before comparisons. This shared entry point is
         # used by CLI, WebUI, and bulk paths, and the fixup is idempotent.
         fixup_reference_fields(reference)
@@ -2050,10 +2137,12 @@ class EnhancedHybridReferenceChecker:
             # tests that implement the original one-argument core contract.
             verified_data, errors, url = self._verify_reference_core(reference)
 
+        self._raise_if_cancelled()
         # Post-process: ArXiv re-verify, independent ArXiv ID check
         verified_data, errors, url = self._postprocess_verification(
             verified_data, errors, url, reference,
         )
+        self._raise_if_cancelled()
 
         # Cross-attribution: after a primary match lands, ask the
         # secondary signal sources (Paperclip + Wikidata) whether they
@@ -2171,15 +2260,16 @@ class EnhancedHybridReferenceChecker:
         force_all_databases: bool = False,
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """Core verification logic — parallel API calls + retries + fallbacks."""
-        # Check if this is a URL-only reference (should skip verification)
+        # Normal scans skip URL-only references, but an explicit "Search all DBs"
+        # request must still enter the checker pipeline.
         authors = reference.get('authors', [])
-        if authors and "URL Reference" in authors:
+        if authors and "URL Reference" in authors and not force_all_databases:
             logger.debug("Enhanced Hybrid: Skipping verification for URL reference")
             return None, [], reference.get('cited_url') or reference.get('url')
         
         title = self._coerce_text(reference.get('title', '')).strip()
         cited_url = self._coerce_text(reference.get('cited_url') or reference.get('url'))
-        if not title and cited_url:
+        if not title and cited_url and not force_all_databases:
             logger.debug(f"Enhanced Hybrid: Skipping verification for URL-only reference: {cited_url}")
             return None, [], cited_url
         
@@ -2351,7 +2441,11 @@ class EnhancedHybridReferenceChecker:
                 final_delay = max(0.5, delay + jitter)
                 
                 logger.debug(f"Enhanced Hybrid: Waiting {final_delay:.1f}s before retrying {api_name} after {failure_type} failure")
-                time.sleep(final_delay)
+                self._emit_database_event(
+                    database=api_name, label=self._format_api_name(api_name),
+                    status='retry_wait', attempt=2, delay_seconds=round(final_delay, 2),
+                )
+                self._wait_or_cancel(final_delay)
                 with self._api_time_lock:
                     self._api_retry_sleep_time += final_delay
                 
@@ -2378,7 +2472,12 @@ class EnhancedHybridReferenceChecker:
                         final_retry_delay = max(1.0, retry_delay + retry_jitter)
                         
                         logger.debug(f"Enhanced Hybrid: Additional Semantic Scholar retry {retry_attempt + 2} after {final_retry_delay:.1f}s")
-                        time.sleep(final_retry_delay)
+                        self._emit_database_event(
+                            database=api_name, label=self._format_api_name(api_name),
+                            status='retry_wait', attempt=retry_attempt + 3,
+                            delay_seconds=round(final_retry_delay, 2),
+                        )
+                        self._wait_or_cancel(final_retry_delay)
                         with self._api_time_lock:
                             self._api_retry_sleep_time += final_retry_delay
                         

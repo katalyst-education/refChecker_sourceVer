@@ -5,11 +5,14 @@ vi.mock('../utils/api', () => ({
   addReferenceToCheck: vi.fn(),
   removeReferenceFromCheck: vi.fn(),
   suggestAlternativeReference: vi.fn(),
+  startReferenceSearch: vi.fn(),
+  cancelReferenceSearch: vi.fn(),
   verifyReferenceInCheck: vi.fn(),
 }))
 
 import useReferenceActions from './useReferenceActions'
-import { verifyReferenceInCheck } from '../utils/api'
+import { startReferenceSearch, suggestAlternativeReference, verifyReferenceInCheck } from '../utils/api'
+import { referenceRowIdentity } from '../utils/referenceIdentity'
 import { useCheckStore } from '../stores/useCheckStore'
 import { useHistoryStore } from '../stores/useHistoryStore'
 
@@ -17,6 +20,7 @@ const originalSelectCheck = useHistoryStore.getState().selectCheck
 
 describe('useReferenceActions re-verification', () => {
   const reference = {
+    ref_uid: 'row-ref-1',
     id: 'ref-1',
     index: 0,
     title: 'Original title',
@@ -67,15 +71,15 @@ describe('useReferenceActions re-verification', () => {
       await Promise.resolve()
     })
 
-    expect(result.current.getReverifyAction('ref-1')).toBe('reextract')
-    expect(result.current.isReverifying('ref-1')).toBe(true)
+    expect(result.current.getReverifyAction('uid:row-ref-1')).toBe('reextract')
+    expect(result.current.isReverifying('uid:row-ref-1')).toBe(true)
 
     await act(async () => {
       finishRequest({ data: { reference: updated } })
       await request
     })
 
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'id:ref-1', {
+    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'uid:row-ref-1', {
       expected_id: 'ref-1',
       expected_index: 0,
       expected_title: 'Original title',
@@ -85,12 +89,15 @@ describe('useReferenceActions re-verification', () => {
     expect(useHistoryStore.getState().detailCache[17]).toBeUndefined()
     expect(useHistoryStore.getState().selectCheck).not.toHaveBeenCalled()
     expect(useHistoryStore.getState().isLoadingDetail).toBe(false)
-    expect(result.current.isReverifying('ref-1')).toBe(false)
+    expect(result.current.isReverifying('uid:row-ref-1')).toBe(false)
   })
 
   it('tracks Search all DBs separately from document re-extraction', async () => {
-    verifyReferenceInCheck.mockResolvedValue({
-      data: { reference: { ...reference, status: 'verified', warnings: [] } },
+    startReferenceSearch.mockResolvedValue({
+      data: {
+        operation_id: 'op-1', session_id: 'reference-search-1', check_id: 17,
+        reference_key: 'uid:row-ref-1', status: 'queued',
+      },
     })
     const { result } = renderHook(() => useReferenceActions())
 
@@ -98,9 +105,47 @@ describe('useReferenceActions re-verification', () => {
       await result.current.handleReverifyAllDatabases(reference, 0)
     })
 
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'id:ref-1', expect.objectContaining({
-      force_all_databases: true,
+    expect(startReferenceSearch).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
+      expected_id: 'ref-1',
+      expected_index: 0,
+      expected_title: 'Original title',
     }))
+    expect(result.current.getReferenceSearchOperation(reference, 0)).toMatchObject({
+      operation_id: 'op-1',
+      status: 'queued',
+    })
+    expect(verifyReferenceInCheck).not.toHaveBeenCalled()
+  })
+
+  it('keeps duplicate citation indexes on separate action identities', async () => {
+    const duplicateRows = [
+      { ref_uid: 'row-first', index: 26, title: 'First work', status: 'unverified' },
+      { ref_uid: 'row-second', index: 26, title: 'Second work', status: 'unverified' },
+    ]
+    useHistoryStore.setState({
+      selectedCheckId: 17,
+      selectedCheck: { id: 17, status: 'completed', results: duplicateRows },
+    })
+    let finishSuggestion
+    suggestAlternativeReference.mockImplementation(() => new Promise(resolve => {
+      finishSuggestion = resolve
+    }))
+    const { result } = renderHook(() => useReferenceActions())
+
+    let request
+    await act(async () => {
+      request = result.current.handleSuggestAlt(duplicateRows[1], 1)
+      await Promise.resolve()
+    })
+
+    expect(suggestAlternativeReference).toHaveBeenCalledWith(17, 'uid:row-second')
+    expect(result.current.isSuggesting(referenceRowIdentity(duplicateRows[0], 0))).toBe(false)
+    expect(result.current.isSuggesting(referenceRowIdentity(duplicateRows[1], 1))).toBe(true)
+
+    await act(async () => {
+      finishSuggestion({ data: { suggestions: [] } })
+      await request
+    })
   })
 
   it('sends manual metadata edits as fresh verification overrides', async () => {
@@ -117,7 +162,7 @@ describe('useReferenceActions re-verification', () => {
       })
     })
 
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'id:ref-1', expect.objectContaining({
+    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
       manual_edit: true,
       force_all_databases: true,
       overrides: {
@@ -136,7 +181,7 @@ describe('useReferenceActions re-verification', () => {
       await result.current.handleRestoreExtractedMetadata(reference, 0)
     })
 
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'id:ref-1', expect.objectContaining({
+    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
       restore_extracted: true,
       force_all_databases: true,
     }))

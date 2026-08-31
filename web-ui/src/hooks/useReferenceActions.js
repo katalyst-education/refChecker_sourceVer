@@ -3,10 +3,15 @@ import {
   addReferenceToCheck,
   removeReferenceFromCheck,
   suggestAlternativeReference,
+  startReferenceSearch,
+  cancelReferenceSearch,
   verifyReferenceInCheck,
 } from '../utils/api'
 import { useHistoryStore } from '../stores/useHistoryStore'
 import { useCheckStore } from '../stores/useCheckStore'
+import { useKeyStore } from '../stores/useKeyStore'
+import { referenceSearchKey, useReferenceSearchStore } from '../stores/useReferenceSearchStore'
+import { referenceRowIdentity, toApiReferenceId } from '../utils/referenceIdentity'
 
 const EMPTY_NEW = { title: '', authors: '', year: '', doi: '', arxiv_id: '' }
 
@@ -25,21 +30,28 @@ const leaveBusy = (setter, ident) =>
       return next
     })
 
-const toApiRefId = (ref, i) => {
-  if (ref?.id != null && String(ref.id) !== '') return `id:${String(ref.id)}`
-  if (ref?.index != null && String(ref.index) !== '') return `index:${String(ref.index)}`
-  return `pos:${String(i)}`
-}
-
 const findReferencePosition = (list, target, fallbackPosition = -1) => {
   const refs = Array.isArray(list) ? list : []
+  if (target?.ref_uid != null && String(target.ref_uid) !== '') {
+    const byUid = refs.findIndex(ref => String(ref?.ref_uid || '') === String(target.ref_uid))
+    if (byUid >= 0) return byUid
+  }
   if (target?.id != null && String(target.id) !== '') {
     const byId = refs.findIndex(ref => ref?.id != null && String(ref.id) === String(target.id))
     if (byId >= 0) return byId
   }
   if (target?.index != null && String(target.index) !== '') {
-    const byIndex = refs.findIndex(ref => ref?.index != null && String(ref.index) === String(target.index))
-    if (byIndex >= 0) return byIndex
+    const indexHits = refs
+        .map((ref, index) => [ref, index])
+        .filter(([ref]) => ref?.index != null && String(ref.index) === String(target.index))
+    if (indexHits.length === 1) return indexHits[0][1]
+    if (indexHits.length > 1 && target?.title) {
+      const title = String(target.title).trim().toLocaleLowerCase()
+      const titledHit = indexHits.find(([ref]) => (
+        String(ref?.title || '').trim().toLocaleLowerCase() === title
+      ))
+      if (titledHit) return titledHit[1]
+    }
   }
   if (target?.title) {
     const title = String(target.title).trim().toLocaleLowerCase()
@@ -53,6 +65,8 @@ const findReferencePosition = (list, target, fallbackPosition = -1) => {
 
 export default function useReferenceActions() {
   const selectedCheckId = useHistoryStore(s => s.selectedCheckId)
+  const referenceSearches = useReferenceSearchStore(state => state.operations)
+  const registerReferenceSearch = useReferenceSearchStore(state => state.register)
   // Per-action in-flight tracking, so Re-verify and Suggest-alternative
   // (and Remove) on the same row don't clobber each other's busy
   // indicators when the user fires them concurrently (#18). Each Set
@@ -141,8 +155,8 @@ export default function useReferenceActions() {
 
   const handleRemoveRef = async (ref, i) => {
     if (!selectedCheckId) return
-    const ident = String(ref.id ?? ref.index ?? i)
-    const apiRefId = toApiRefId(ref, i)
+    const ident = referenceRowIdentity(ref, i)
+    const apiRefId = toApiReferenceId(ref, i)
     enterBusy(setRemoveBusy, ident)
     // Snapshot the ref so Undo can re-create it. We stash the metadata
     // the add endpoint needs, plus a synthetic key so the UI can render
@@ -150,10 +164,7 @@ export default function useReferenceActions() {
     // Capture the original 0-based position so Undo can put the ref
     // back exactly where it was, not at the bottom of the list.
     const storeRefs = useCheckStore.getState().references || []
-    let originalPosition = storeRefs.findIndex(r => (
-        String(r?.id ?? '') === ident ||
-        String(r?.index ?? '') === ident
-    ))
+    let originalPosition = findReferencePosition(storeRefs, ref, i)
     if (originalPosition === -1) originalPosition = typeof i === 'number' ? i : 0
     const snapshot = {
       _stashKey: `${ident}-${Date.now()}`,
@@ -260,8 +271,8 @@ export default function useReferenceActions() {
 
   const handleSuggestAlt = async (ref, i) => {
     if (!selectedCheckId) return
-    const ident = String(ref.id ?? ref.index ?? i)
-    const apiRefId = toApiRefId(ref, i)
+    const ident = referenceRowIdentity(ref, i)
+    const apiRefId = toApiReferenceId(ref, i)
     enterBusy(setSuggestBusy, ident)
     latestSuggestRef.current = ident
     try {
@@ -282,8 +293,8 @@ export default function useReferenceActions() {
 
   const handleReverify = async (ref, i, opts = {}) => {
     if (!selectedCheckId) return
-    const ident = String(ref.id ?? ref.index ?? i)
-    const apiRefId = toApiRefId(ref, i)
+    const ident = referenceRowIdentity(ref, i)
+    const apiRefId = toApiReferenceId(ref, i)
     const action = opts.restore_extracted
       ? 'restore-extracted'
       : opts.manual_edit
@@ -341,8 +352,60 @@ export default function useReferenceActions() {
     }
   }
 
-  const handleReverifyAllDatabases = async (ref, i) =>
-      handleReverify(ref, i, { force_all_databases: true })
+  const handleReverifyAllDatabases = async (ref, i) => {
+    if (!selectedCheckId) return null
+    const ident = referenceRowIdentity(ref, i)
+    setReverifyBusy(prev => new Map(prev).set(ident, 'all-databases'))
+    try {
+      const keyStore = useKeyStore.getState()
+      const response = await startReferenceSearch(selectedCheckId, toApiReferenceId(ref, i), {
+        expected_id: ref?.id ?? null,
+        expected_index: ref?.index ?? null,
+        expected_title: ref?.title ?? null,
+        semantic_scholar_api_key: keyStore.getKey('semantic_scholar'),
+        google_books_api_key: keyStore.getKey('google_books'),
+        paperclip_api_key: keyStore.getKey('paperclip'),
+      })
+      registerReferenceSearch(response.data)
+      return response.data
+    } catch (e) {
+      alert(e?.response?.data?.detail || e?.message || 'Search could not be started')
+      return null
+    } finally {
+      setReverifyBusy(prev => {
+        const next = new Map(prev)
+        next.delete(ident)
+        return next
+      })
+    }
+  }
+
+  const getReferenceSearchOperation = (ref, i) => {
+    if (!selectedCheckId) return null
+    const identity = referenceRowIdentity(ref, i)
+    const direct = referenceSearches[referenceSearchKey(selectedCheckId, identity)]
+    if (direct) return direct
+
+    // Backward compatibility for an operation started by the previous
+    // position-keyed implementation and recovered after a frontend reload.
+    const historyRefs = useHistoryStore.getState().selectedCheck?.results
+    const currentRefs = useCheckStore.getState().references
+    const sourceRefs = Array.isArray(historyRefs) && historyRefs.length ? historyRefs : currentRefs
+    const position = findReferencePosition(sourceRefs, ref, i)
+    return position < 0
+      ? null
+      : referenceSearches[referenceSearchKey(selectedCheckId, `pos:${position}`)] || null
+  }
+
+  const handleCancelReferenceSearch = async (operation) => {
+    if (!operation?.operation_id) return
+    try {
+      await cancelReferenceSearch(operation.operation_id)
+      useReferenceSearchStore.getState().register({ ...operation, status: 'cancelling' })
+    } catch (e) {
+      alert(e?.response?.data?.detail || e?.message || 'Cancellation failed')
+    }
+  }
 
   const handleEditMetadata = async (ref, i, overrides) =>
       handleReverify(ref, i, {
@@ -382,6 +445,8 @@ export default function useReferenceActions() {
     handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
+    getReferenceSearchOperation,
+    handleCancelReferenceSearch,
     handleEditMetadata,
     handleRestoreExtractedMetadata,
     removedRefs,

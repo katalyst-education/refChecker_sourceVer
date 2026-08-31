@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { logger } from '../utils/logger'
 import { countLabel } from '../utils/formatters'
 import { useHistoryStore } from './useHistoryStore'
+import { referenceRowIdentity } from '../utils/referenceIdentity'
 
 /**
  * Store for current check state management
@@ -244,14 +245,14 @@ export const useCheckStore = create((set, get) => ({
     const existing = get().references || []
     // Build a map of existing refs that already have real (non-pending) data
     // so we never overwrite a more-advanced status with 'pending'.
-    const existingByIndex = new Map()
-    for (const r of existing) {
+    const existingByIdentity = new Map()
+    for (const [position, r] of existing.entries()) {
       if (r.status && r.status !== 'pending') {
-        existingByIndex.set(r.index, r)
+        existingByIdentity.set(referenceRowIdentity(r, position), r)
       }
     }
     const mappedRefs = references.map((ref, index) => {
-      const prev = existingByIndex.get(index)
+      const prev = existingByIdentity.get(referenceRowIdentity(ref, index))
       if (prev) {
         // Keep the already-processed ref — it has more up-to-date data
         return prev

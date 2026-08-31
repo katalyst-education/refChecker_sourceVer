@@ -5,6 +5,7 @@ import { getEffectiveReferenceStatus, llmFoundMetadataMatchesCitation } from '..
 import useReferenceActions from '../../hooks/useReferenceActions'
 import { useStyleStore } from '../../stores/useStyleStore'
 import { CITATION_STYLES, listCustomCitationStyles, filterIssuesForStyle } from '../../utils/formatters'
+import { referenceRowIdentity } from '../../utils/referenceIdentity'
 import {
   AddReferencePanel,
   SuggestAltPanel,
@@ -40,6 +41,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
+    getReferenceSearchOperation,
+    handleCancelReferenceSearch,
     handleEditMetadata,
     handleRestoreExtractedMetadata,
     removedRefs,
@@ -280,7 +283,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             style={{ borderColor: 'var(--color-border)' }}
         >
           {filteredReferences.map((ref, displayIndex) => (
-              <div key={`ref-${ref.index ?? displayIndex}-${displayIndex}`}>
+              <div key={referenceRowIdentity(ref, displayIndex)}>
                 <ReferenceCard
                     reference={ref}
                     index={ref.index ?? displayIndex}
@@ -289,7 +292,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                     isCheckComplete={isCheckComplete}
                 />
                 {selectedCheckId && (() => {
-                  const ident = String(ref.id ?? ref.index ?? displayIndex)
+                  const ident = referenceRowIdentity(ref, displayIndex)
                   return (
                       <ReferenceRowActions
                           reference={ref}
@@ -299,6 +302,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           onRemove={handleRemoveRef}
                           onReverify={handleReverify}
                           onReverifyAllDatabases={handleReverifyAllDatabases}
+                          searchOperation={getReferenceSearchOperation(ref, displayIndex)}
+                          onCancelReferenceSearch={handleCancelReferenceSearch}
                           onEditMetadata={handleEditMetadata}
                           onRestoreExtractedMetadata={handleRestoreExtractedMetadata}
                           reverifyBusy={isReverifying(ident)}

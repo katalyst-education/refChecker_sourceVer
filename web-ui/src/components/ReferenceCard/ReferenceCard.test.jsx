@@ -149,6 +149,24 @@ describe('ReferenceCard — R04 hallucination-pending safety net', () => {
     vi.useRealTimers()
   })
 
+  it('does not show an LLM timeout when no hallucination check was scheduled', () => {
+    vi.useFakeTimers()
+    const reference = {
+      status: 'unverified',
+      title: 'Unverified Without LLM',
+      authors: ['A. Author'],
+      errors: [{ error_type: 'unverified', error_details: 'Not found' }],
+      warnings: [],
+      suggestions: [],
+    }
+
+    render(<ReferenceCard reference={reference} index={0} />)
+    act(() => vi.advanceTimersByTime(181000))
+
+    expect(screen.queryByText(/hallucination check/i)).toBeNull()
+    expect(screen.getByText(/Could not verify/i)).toBeTruthy()
+  })
+
   it('reverts a ref stuck pending past the wall-clock cap to its base status with a timeout note', () => {
     vi.useFakeTimers()
     const reference = {

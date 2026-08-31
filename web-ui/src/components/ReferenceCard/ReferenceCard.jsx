@@ -283,10 +283,11 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
   // falls back to its real base status and shows a "check timed out" note,
   // instead of wedging on "Checking for hallucination with LLM…".
   const [hallucinationTimedOut, setHallucinationTimedOut] = useState(false)
-  const isHallucinationPending = !reference.hallucination_assessment && (
-    reference.hallucination_check_pending ||
-    (getEffectiveReferenceStatus(reference, isCheckComplete) === 'checking'
-      && reference.errors?.some(e => e.error_type === 'unverified'))
+  // Only the backend knows whether an LLM check was actually scheduled.
+  // Inferring it from an unverified result creates a false spinner (and later
+  // a false timeout) when no hallucination LLM is configured.
+  const isHallucinationPending = Boolean(
+    reference.hallucination_check_pending && !reference.hallucination_assessment,
   )
   useEffect(() => {
     if (!isHallucinationPending) {
@@ -1232,10 +1233,9 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
             </div>
           )}
 
-          {/* Hallucination check pending indicator — shows when:
-              1. Backend explicitly set hallucination_check_pending, OR
-              2. Ref is unverified during an active check (LLM check hasn't started yet)
-              R04: suppressed once the FE wall-clock cap (HALLUCINATION_PENDING_TIMEOUT_MS)
+          {/* Hallucination check pending indicator — shown only when the backend
+              explicitly confirms that a check was scheduled. R04: suppressed
+              once the FE wall-clock cap (HALLUCINATION_PENDING_TIMEOUT_MS)
               elapses — see the "check timed out" note below. */}
           {isHallucinationPending && !hallucinationTimedOut && (
             <div className="flex items-center gap-2 text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>

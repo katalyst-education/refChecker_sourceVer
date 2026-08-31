@@ -242,6 +242,10 @@ def _hybrid_without_network():
             enable_crossref=False,
             enable_open_library=False,
             enable_google_books=False,
+            # Keep the positive magazine-fallback tests independent from the
+            # process-wide setting loaded by the backend. The dedicated opt-out
+            # test below overrides this attribute explicitly.
+            google_books_include_magazines=True,
             enable_arxiv_citation=False,
             enable_acl_anthology=False,
             enable_paperclip=False,

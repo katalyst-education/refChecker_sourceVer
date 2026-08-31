@@ -97,4 +97,19 @@ describe('reference verification api helper', () => {
       undefined,
     )
   })
+
+  it('starts a streamed all-database reference search', () => {
+    const payload = { google_books_api_key: 'browser-key' }
+    api.startReferenceSearch(17, 'id:ref-1', payload)
+    expect(mocks.apiInstance.post).toHaveBeenCalledWith(
+      '/history/17/references/id%3Aref-1/search-all', payload,
+    )
+  })
+
+  it('cancels a streamed reference search', () => {
+    api.cancelReferenceSearch('operation-1')
+    expect(mocks.apiInstance.post).toHaveBeenCalledWith(
+      '/reference-searches/operation-1/cancel',
+    )
+  })
 })

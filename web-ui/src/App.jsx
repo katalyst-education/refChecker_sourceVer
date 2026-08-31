@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar/Sidebar'
 import MainPanel from './components/MainPanel/MainPanel'
 import DebugPanel from './components/DebugPanel'
 import LiveWebSocketManager from './components/LiveWebSocketManager'
+import ReferenceSearchManager from './components/ReferenceSearchManager'
 import SettingsPanel from './components/Settings/SettingsPanel'
 import LoginPage from './components/Auth/LoginPage'
 import UserMenu from './components/Auth/UserMenu'
@@ -136,6 +137,7 @@ function App() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <LiveWebSocketManager />
+        <ReferenceSearchManager />
         {/* Header */}
         <header 
           className="h-14 flex items-center justify-between px-4 lg:px-6 border-b"

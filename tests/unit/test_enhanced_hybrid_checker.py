@@ -2,9 +2,13 @@ import logging
 import threading
 
 import requests
+import pytest
 from unittest.mock import patch
 
-from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
+from refchecker.checkers.enhanced_hybrid_checker import (
+    EnhancedHybridReferenceChecker,
+    VerificationCancelled,
+)
 
 
 class NoMatchChecker:
@@ -15,6 +19,60 @@ class NoMatchChecker:
 class TimeoutChecker:
     def verify_reference(self, reference):
         raise requests.exceptions.Timeout('simulated timeout')
+
+
+def _progress_checker(events, cancel_event=None):
+    checker = EnhancedHybridReferenceChecker.__new__(EnhancedHybridReferenceChecker)
+    checker.progress_callback = events.append
+    checker.cancel_event = cancel_event or threading.Event()
+    checker._api_semaphores = {}
+    checker._api_time_lock = threading.Lock()
+    checker._api_total_time = {'demo': 0.0}
+    checker._api_sem_wait_time = {'demo': 0.0}
+    checker.api_stats = {
+        'demo': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+    }
+    return checker
+
+
+def test_database_progress_emits_searching_and_no_match():
+    events = []
+    checker = _progress_checker(events)
+
+    assert checker._try_api('demo', NoMatchChecker(), {'title': 'Missing'})[4] == 'not_found'
+
+    assert [event['status'] for event in events] == ['searching', 'no_match']
+    assert events[-1]['duration_ms'] >= 0
+
+
+def test_database_progress_emits_timeout():
+    events = []
+    checker = _progress_checker(events)
+
+    assert checker._try_api('demo', TimeoutChecker(), {'title': 'Slow'})[4] == 'timeout'
+
+    assert [event['status'] for event in events] == ['searching', 'timed_out']
+
+
+def test_cancelled_verification_does_not_call_provider():
+    events = []
+    cancel_event = threading.Event()
+    cancel_event.set()
+    checker = _progress_checker(events, cancel_event)
+    provider = NoMatchChecker()
+
+    with pytest.raises(VerificationCancelled):
+        checker._try_api('demo', provider, {'title': 'Cancelled'})
+
+    assert events == []
+
+
+def test_retry_wait_is_interruptible():
+    checker = _progress_checker([])
+    checker.cancel_event.set()
+
+    with pytest.raises(VerificationCancelled):
+        checker._wait_or_cancel(30)
 
 
 class LocalMatchChecker:
@@ -295,6 +353,33 @@ def test_google_books_retry_retains_force_all_context_and_reports_failure(_mock_
     assert errors[0]['error_details'] == (
         'All available checkers failed: Google Books: 503 Service Unavailable'
     )
+
+
+def test_force_all_databases_does_not_skip_url_reference():
+    class RecordingNoMatchChecker:
+        def __init__(self):
+            self.calls = []
+
+        def verify_reference(self, reference):
+            self.calls.append(reference)
+            return None, [], None
+
+    checker = _build_checker()
+    semantic_scholar = RecordingNoMatchChecker()
+    checker.semantic_scholar = semantic_scholar
+    checker.crossref = None
+
+    _, _, url = checker._verify_reference_core(
+        {
+            'title': 'A web publication with searchable metadata',
+            'authors': ['URL Reference'],
+            'cited_url': 'https://example.org/publication',
+        },
+        force_all_databases=True,
+    )
+
+    assert len(semantic_scholar.calls) == 1
+    assert url == 'https://example.org/publication'
 
 
 def test_verify_reference_records_matched_database_from_local_checker():

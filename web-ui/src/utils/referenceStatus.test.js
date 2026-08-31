@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { buildReferenceSummary, computeReferenceStats, getEffectiveReferenceStatus, isWebsiteVerifiedReference, llmFoundMetadataMatchesCitation } from './referenceStatus'
 
 describe('referenceStatus', () => {
+  it('does not infer an LLM check from an unverified result', () => {
+    const reference = {
+      status: 'unverified',
+      errors: [{ error_type: 'unverified', error_details: 'Not found' }],
+    }
+
+    expect(getEffectiveReferenceStatus(reference, false)).toBe('unverified')
+    expect(computeReferenceStats([reference], false)).toMatchObject({
+      count: 1,
+      withUnverified: 1,
+    })
+  })
+
   it('treats LLM-found matching metadata as verified, not hallucinated', () => {
     const reference = {
       status: 'hallucination',

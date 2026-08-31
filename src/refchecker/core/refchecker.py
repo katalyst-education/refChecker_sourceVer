@@ -3638,13 +3638,14 @@ class ArxivReferenceChecker:
         # directly; running them once here keeps every path identical.
         self._fixup_reference_fields(reference)
 
-        # GitHub references bypass the hybrid checker
+        # Direct sources short-circuit normal scans. Explicit Search-all keeps
+        # their result as a fallback but still queries the database stack.
         github_result = self.verify_github_reference(reference)
-        if github_result:
+        if github_result and not force_all_databases:
             return github_result
 
         webpage_result = self.verify_webpage_reference(reference)
-        if webpage_result:
+        if webpage_result and not force_all_databases:
             return webpage_result
 
         if force_all_databases:
@@ -3654,6 +3655,14 @@ class ArxivReferenceChecker:
             )
         else:
             verified_data, errors, paper_url = self.non_arxiv_checker.verify_reference(reference)
+
+        # An explicit Search-all request must really query the configured
+        # metadata databases even for URL/GitHub citations. If none of them can
+        # improve on the direct-source verification, retain that authoritative
+        # result instead of degrading a valid webpage into "paper not found".
+        direct_source_result = github_result or webpage_result
+        if force_all_databases and verified_data is None and direct_source_result:
+            return direct_source_result
 
         if not errors:
             return None, paper_url, verified_data

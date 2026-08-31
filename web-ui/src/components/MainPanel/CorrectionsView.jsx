@@ -24,6 +24,7 @@ import {
   classifyCorrectionReference,
   hasActionableCorrection,
 } from '../../utils/correctionUtils'
+import { referenceRowIdentity, toApiReferenceId } from '../../utils/referenceIdentity'
 
 /**
  * Mirrors the chip ids exposed by the Summary panel above the tab.
@@ -110,18 +111,16 @@ const STYLE_FONT = {
   plaintext: "'Charter', 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Times New Roman', Times, Georgia, serif",
 }
 
-const toApiRefId = (ref, i) => {
-  if (ref?.id != null && String(ref.id) !== '') return `id:${String(ref.id)}`
-  if (ref?.index != null && String(ref.index) !== '') return `index:${String(ref.index)}`
-  return `pos:${String(i)}`
-}
-
 // Locate the same logical reference without ever comparing one row's `id`
 // against another row's `index`. Numeric ids and citation indices frequently
 // overlap (for example id=14 on citation index=15), and coalescing the two
 // identities caused a warning decision for one row to overwrite its neighbour.
 const findReferencePosition = (list, target, fallbackPos = -1) => {
   const refs = Array.isArray(list) ? list : []
+  if (target?.ref_uid != null && String(target.ref_uid) !== '') {
+    const byUid = refs.findIndex(ref => String(ref?.ref_uid || '') === String(target.ref_uid))
+    if (byUid >= 0) return byUid
+  }
   if (target?.id != null && String(target.id) !== '') {
     const byId = refs.findIndex(item => item?.id != null && String(item.id) === String(target.id))
     if (byId >= 0) return byId
@@ -284,7 +283,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     })
   }, [categorized, statusFilter, summaryActive])
 
-  const keyFor = (ref, i) => ref.id || `ref-${ref.index ?? i}`
+  const keyFor = (ref, i) => referenceRowIdentity(ref, i)
 
   const renderCorrected = (ref, i) => {
     const k = keyFor(ref, i)
@@ -332,8 +331,8 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     snapshotIfMissing(k, ref)
     setDecision(k, { status: 'applied' })
     if (selectedCheckId) {
-      const refIdStr = String(ref.id ?? ref.index ?? i)
-      const apiRefId = toApiRefId(ref, i)
+      const refIdStr = referenceRowIdentity(ref, i)
+      const apiRefId = toApiReferenceId(ref, i)
       // Optimistically flip status + merge corrected metadata in BOTH
       // stores so the citation-health chip moves immediately. The
       // useHistoryStore update covers historical-view checks; the
@@ -379,7 +378,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     // immediately. Revert BOTH stores: useCheckStore drives the current-check
     // view, useHistoryStore.selectedCheck drives the historical view — without
     // the second call the badge stayed frozen on Restore for history checks.
-    const refIdForRevert = String(ref.id ?? ref.index ?? i)
+    const refIdForRevert = referenceRowIdentity(ref, i)
     useCheckStore.getState().revertCorrectionInStore?.(refIdForRevert)
     useHistoryStore.getState().optimisticRevertCorrection?.(refIdForRevert)
     const snap = originalSnapshots[k]
@@ -392,7 +391,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     }
     setDecision(k, null)
     if (!selectedCheckId) return
-    const apiRefId = toApiRefId(ref, i)
+    const apiRefId = toApiReferenceId(ref, i)
     try {
       // Persist the revert server-side; no force-reload (it would wipe the
       // optimistic snapshots — see applyAndReverify).
@@ -422,7 +421,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
   const rejectCorrection = async (ref, i, k) => {
     const prevStatus = decisions[k]?.status
     if (prevStatus === 'applied' || prevStatus === 'edited') {
-      const refIdForRevert = String(ref.id ?? ref.index ?? i)
+      const refIdForRevert = referenceRowIdentity(ref, i)
       useCheckStore.getState().revertCorrectionInStore?.(refIdForRevert)
       useHistoryStore.getState().optimisticRevertCorrection?.(refIdForRevert)
     }
@@ -433,7 +432,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
       try {
         const response = await decideReferenceWarning(
           selectedCheckId,
-          toApiRefId(ref, i),
+          toApiReferenceId(ref, i),
           {
             warning_type: confirmation.error_type || confirmation.warning_type,
             decision: 'dismissed',
@@ -493,7 +492,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
       const histStore = useHistoryStore.getState()
       const checkStoreApi = useCheckStore.getState()
       for (const { ref, i } of targets) {
-        const refIdStr = String(ref.id ?? ref.index ?? i)
+        const refIdStr = referenceRowIdentity(ref, i)
         histStore.optimisticApplyCorrection?.(refIdStr)
         checkStoreApi.applyCorrectionInStore?.(refIdStr)
       }
@@ -503,7 +502,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         while (queue.length) {
           const { ref, i } = queue.shift()
           try {
-            await verifyReferenceInCheck(selectedCheckId, toApiRefId(ref, i), {
+            await verifyReferenceInCheck(selectedCheckId, toApiReferenceId(ref, i), {
               apply_correction: true,
               expected_id: ref?.id ?? null,
               expected_index: ref?.index ?? null,
@@ -1009,7 +1008,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                     >↺ Restore</button>
                   )}
                   {tags.has('hallucination') && (() => {
-                    const ident = String(ref.id ?? ref.index ?? i)
+                    const ident = referenceRowIdentity(ref, i)
                     const suggesting = isSuggesting(ident)
                     const disabled = suggesting || !!globalBusy || !selectedCheckId
                     return (
@@ -1022,7 +1021,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                     )
                   })()}
                   {(() => {
-                    const ident = String(ref.id ?? ref.index ?? i)
+                    const ident = referenceRowIdentity(ref, i)
                     const removing = isRemoving(ident)
                     const disabled = removing || !!globalBusy || !selectedCheckId
                     return (

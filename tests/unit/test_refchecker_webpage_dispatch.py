@@ -105,6 +105,39 @@ def test_force_all_standard_verification_is_forwarded_to_hybrid_checker():
     )
 
 
+def test_force_all_queries_databases_for_web_reference_and_keeps_direct_fallback():
+    checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+    checker.verify_github_reference = MagicMock(return_value=None)
+    webpage_result = (
+        None,
+        "https://example.com/reference",
+        {"title": "Direct web reference", "_matched_database": "Web page"},
+    )
+    checker.verify_webpage_reference = MagicMock(return_value=webpage_result)
+    checker.non_arxiv_checker = MagicMock()
+    checker.non_arxiv_checker.verify_reference.return_value = (
+        None,
+        [{"error_type": "unverified", "error_details": "No database match"}],
+        None,
+    )
+    reference = {
+        "title": "Direct web reference",
+        "url": "https://example.com/reference",
+    }
+
+    result = checker.verify_reference_standard(
+        None,
+        reference,
+        force_all_databases=True,
+    )
+
+    checker.non_arxiv_checker.verify_reference.assert_called_once_with(
+        reference,
+        force_all_databases=True,
+    )
+    assert result == webpage_result
+
+
 def test_standard_verification_checks_venue_named_site_before_title_search():
     checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
     checker.verify_github_reference = MagicMock(return_value=None)

@@ -22,6 +22,66 @@ from cryptography.fernet import Fernet, InvalidToken
 logger = logging.getLogger(__name__)
 
 
+_REFERENCE_UID_FIELDS = (
+    "id", "title", "authors", "year", "venue", "journal", "doi", "DOI",
+    "arxiv_id", "pmid", "cited_url", "url", "raw", "raw_text", "type",
+)
+
+
+def ensure_reference_uids(results: Any) -> Any:
+    """Return reference rows with a stable, collision-safe ``ref_uid``.
+
+    Citation ``index`` values are document metadata, not row identifiers: PDFs
+    can contain duplicate or malformed numbering and editing can renumber the
+    list. Existing UIDs therefore win; legacy rows receive a deterministic UID
+    derived from cited metadata plus their occurrence among exact duplicates.
+    Once any mutation is persisted, that UID travels with the row permanently.
+    """
+    if not isinstance(results, list):
+        return results
+
+    used: set[str] = set()
+    occurrences: Dict[str, int] = {}
+    identified: List[Any] = []
+    for ref in results:
+        if not isinstance(ref, dict):
+            identified.append(ref)
+            continue
+
+        row = dict(ref)
+        existing = str(row.get("ref_uid") or "").strip()
+        if existing and existing not in used:
+            uid = existing
+        else:
+            identity = {
+                key: row.get(key)
+                for key in _REFERENCE_UID_FIELDS
+                if row.get(key) not in (None, "", [])
+            }
+            signature = json.dumps(
+                identity, sort_keys=True, ensure_ascii=False, default=str,
+                separators=(",", ":"),
+            )
+            occurrence = occurrences.get(signature, 0)
+            occurrences[signature] = occurrence + 1
+            seed = f"{signature}\x1f{occurrence}"
+            uid = f"ref-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"
+            collision = 1
+            while uid in used:
+                collision_seed = f"{seed}\x1f{collision}"
+                uid = f"ref-{hashlib.sha256(collision_seed.encode('utf-8')).hexdigest()[:24]}"
+                collision += 1
+
+        row["ref_uid"] = uid
+        used.add(uid)
+        identified.append(row)
+    return identified
+
+
+class ReferenceSearchLimitReached(Exception):
+    """Raised when a user already has the allowed number of live searches."""
+
+
 def _sanitize_loaded_reference_results(results: Any) -> Any:
     """Remove obsolete citation-specific suggestions from stored check rows."""
     if not isinstance(results, list):
@@ -61,7 +121,7 @@ def _sanitize_loaded_reference_results(results: Any) -> Any:
                 normalized["dismissed_corrected_reference"] = candidate
             normalized["corrected_reference"] = None
         cleaned.append(normalized)
-    return cleaned
+    return ensure_reference_uids(cleaned)
 
 
 SECRET_VALUE_PREFIX = "enc:"
@@ -310,8 +370,6 @@ def _get_effective_reference_status(ref: Dict[str, Any], is_complete: bool) -> s
 
     if ref.get("hallucination_check_pending") and not ref.get("hallucination_assessment"):
         return "checking"
-    if base_status == "unverified" and not ref.get("hallucination_assessment") and not is_complete:
-        return "checking"
     if base_status == "hallucination" and llm_match:
         return "verified"
     if base_status == "hallucination":
@@ -368,18 +426,34 @@ def _compute_reference_buckets_from_results(
     unverified_count = 0
     hallucination_count = 0
     refs_verified = 0
-    latest_results_by_index: Dict[Any, Dict[str, Any]] = {}
+    latest_results_by_citation: Dict[str, Dict[str, Any]] = {}
 
-    for fallback_index, ref in enumerate(results):
+    for fallback_index, ref in enumerate(ensure_reference_uids(results)):
+        if not isinstance(ref, dict):
+            continue
         status = str(ref.get("status") or "").strip().lower()
         if not status or status in {"pending", "checking", "in_progress", "queued", "processing", "started"}:
             continue
-        ref_index = ref.get("index")
-        if ref_index is None:
-            ref_index = fallback_index
-        latest_results_by_index[ref_index] = ref
+        # Incremental persistence can contain multiple snapshots of the same
+        # citation. Collapse only rows that share BOTH the printed index and
+        # cited metadata; two different works with the same index remain two
+        # references. This preserves the old pending->final update semantics
+        # without assuming that citation numbers themselves are unique.
+        cited_identity = {
+            key: ref.get(key)
+            for key in _REFERENCE_UID_FIELDS
+            if ref.get(key) not in (None, "", [])
+        }
+        citation_key = json.dumps(
+            {"index": ref.get("index"), "cited": cited_identity},
+            sort_keys=True, ensure_ascii=False, default=str,
+            separators=(",", ":"),
+        )
+        if not cited_identity and ref.get("index") is None:
+            citation_key = f"fallback:{fallback_index}"
+        latest_results_by_citation[citation_key] = ref
 
-    for ref in latest_results_by_index.values():
+    for ref in latest_results_by_citation.values():
         status = str(ref.get("status") or "").strip().lower()
         effective_status = _get_effective_reference_status(ref, is_complete)
         llm_match = _llm_found_metadata_matches_citation(ref)
@@ -419,7 +493,7 @@ def _compute_reference_buckets_from_results(
         if effective_status in {"verified", "suggestion"}:
             refs_verified += 1
 
-    processed_refs = len(latest_results_by_index)
+    processed_refs = len(latest_results_by_citation)
     # Reconcile the total against the REAL processed count so progress never
     # exceeds 100%. The stored total is an early extraction estimate; the
     # actual reference set can be larger after de-dup/merge/re-extraction.
@@ -556,6 +630,31 @@ class Database:
                     result_json TEXT NOT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
+            """)
+
+            # Background, per-reference "Search all DBs" operations. API keys
+            # are deliberately never stored here; only display-safe progress
+            # and the final projected reference are persisted.
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS reference_search_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL DEFAULT -1,
+                    check_id INTEGER NOT NULL,
+                    reference_key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    completed_at DATETIME
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_reference_search_active
+                ON reference_search_operations(user_id, check_id, reference_key, status)
             """)
 
             # Identity-keyed reference table. The verification_cache above is
@@ -1099,6 +1198,7 @@ class Database:
                          hallucination_count: int = 0,
                          refs_with_suggestions_only: int = 0) -> int:
         """Save a check result to database"""
+        results = ensure_reference_uids(results)
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
                 INSERT INTO check_history
@@ -1398,6 +1498,7 @@ class Database:
                                     refs_with_suggestions_only: int = 0,
                                     ai_detection: Optional[Dict[str, Any]] = None) -> bool:
         """Update a check with its results. If paper_title is None, don't update it."""
+        results = ensure_reference_uids(results)
         async with aiosqlite.connect(self.db_path) as db:
             updates = []
             params: List[Any] = []
@@ -1551,6 +1652,7 @@ class Database:
         This is called after each reference is checked to persist progress,
         so interrupted checks retain their partial results.
         """
+        results = ensure_reference_uids(results or [])
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout=5000")
             await db.execute("""
@@ -1573,7 +1675,7 @@ class Database:
                 refs_with_warnings_only,
                 refs_with_suggestions_only,
                 refs_verified,
-                json.dumps(results or []),
+                json.dumps(results),
                 check_id
             ))
             await db.commit()
@@ -2601,6 +2703,139 @@ class Database:
             await db.commit()
             return True
 
+    @staticmethod
+    def _reference_operation_user_id(user_id: Optional[int]) -> int:
+        return -1 if user_id is None else int(user_id)
+
+    @staticmethod
+    def _decode_reference_operation(row: Any) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        item = dict(row)
+        for source, destination, fallback in (
+            ("progress_json", "progress", {}),
+            ("result_json", "reference", None),
+        ):
+            raw = item.pop(source, None)
+            try:
+                item[destination] = json.loads(raw) if raw else fallback
+            except Exception:
+                item[destination] = fallback
+        return item
+
+    async def create_reference_search_operation(
+        self, operation_id: str, session_id: str, check_id: int,
+        reference_key: str, user_id: Optional[int] = None,
+        max_active_per_user: Optional[int] = None,
+    ) -> tuple[Dict[str, Any], bool]:
+        """Create one operation, or return the active duplicate atomically.
+
+        When ``max_active_per_user`` is set, enforce that user-wide limit in
+        the same write transaction so simultaneous requests cannot both pass a
+        process-level pre-check.
+        """
+        owner_id = self._reference_operation_user_id(user_id)
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            cursor = await conn.execute(
+                """SELECT * FROM reference_search_operations
+                   WHERE user_id = ? AND check_id = ? AND reference_key = ?
+                     AND status IN ('queued', 'running', 'cancelling')
+                   ORDER BY created_at DESC LIMIT 1""",
+                (owner_id, check_id, reference_key),
+            )
+            existing = await cursor.fetchone()
+            if existing:
+                await conn.commit()
+                return self._decode_reference_operation(existing), False
+            if max_active_per_user is not None:
+                cursor = await conn.execute(
+                    """SELECT COUNT(*) AS active_count
+                       FROM reference_search_operations
+                      WHERE user_id = ?
+                        AND status IN ('queued', 'running', 'cancelling')""",
+                    (owner_id,),
+                )
+                active_count = int((await cursor.fetchone())["active_count"] or 0)
+                if active_count >= max_active_per_user:
+                    await conn.rollback()
+                    raise ReferenceSearchLimitReached()
+            await conn.execute(
+                """INSERT INTO reference_search_operations
+                   (operation_id, session_id, user_id, check_id, reference_key, status)
+                   VALUES (?, ?, ?, ?, ?, 'queued')""",
+                (operation_id, session_id, owner_id, check_id, reference_key),
+            )
+            await conn.commit()
+            cursor = await conn.execute(
+                "SELECT * FROM reference_search_operations WHERE operation_id = ?",
+                (operation_id,),
+            )
+            return self._decode_reference_operation(await cursor.fetchone()), True
+
+    async def get_reference_search_operation(
+        self, operation_id: str, user_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        owner_id = self._reference_operation_user_id(user_id)
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT * FROM reference_search_operations WHERE operation_id = ? AND user_id = ?",
+                (operation_id, owner_id),
+            )
+            return self._decode_reference_operation(await cursor.fetchone())
+
+    async def list_active_reference_search_operations(
+        self, user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        owner_id = self._reference_operation_user_id(user_id)
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                """SELECT * FROM reference_search_operations
+                   WHERE user_id = ? AND status IN ('queued', 'running', 'cancelling')
+                   ORDER BY created_at""",
+                (owner_id,),
+            )
+            return [self._decode_reference_operation(row) for row in await cursor.fetchall()]
+
+    async def update_reference_search_operation(
+        self, operation_id: str, *, status: Optional[str] = None,
+        progress: Optional[Dict[str, Any]] = None,
+        reference: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = None, error_message: Optional[str] = None,
+        terminal: bool = False,
+    ) -> bool:
+        assignments = ["updated_at = CURRENT_TIMESTAMP"]
+        values: List[Any] = []
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(status)
+        if progress is not None:
+            assignments.append("progress_json = ?")
+            values.append(json.dumps(progress))
+        if reference is not None:
+            assignments.append("result_json = ?")
+            values.append(json.dumps(reference))
+        if error_code is not None:
+            assignments.append("error_code = ?")
+            values.append(error_code)
+        if error_message is not None:
+            assignments.append("error_message = ?")
+            values.append(error_message)
+        if terminal:
+            assignments.append("completed_at = CURRENT_TIMESTAMP")
+        values.append(operation_id)
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(
+                f"UPDATE reference_search_operations SET {', '.join(assignments)} WHERE operation_id = ?",
+                values,
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
     async def get_check_references(self, check_id: int, user_id: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -2622,6 +2857,7 @@ class Database:
         """Persist a mutated reference list back into a check_history row,
         recomputing the rolled-up counters in lockstep so the history
         sidebar / Seen Refs tab don't drift from the actual results."""
+        results = ensure_reference_uids(results)
         total = len(results)
         refs_with_errors = sum(1 for r in results if (r.get("errors") or []))
         refs_with_warnings_only = sum(1 for r in results if not (r.get("errors") or []) and (r.get("warnings") or []))
