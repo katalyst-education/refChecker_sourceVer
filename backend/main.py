@@ -1487,6 +1487,9 @@ async def _run_startup_tasks() -> None:
             if await db.has_setting("google_books_api_key"):
                 await db.delete_setting("google_books_api_key")
                 logger.info("Removed server-side Google Books API key in multi-user mode")
+            if await db.has_setting("springer_nature_api_key"):
+                await db.delete_setting("springer_nature_api_key")
+                logger.info("Removed server-side Springer Nature API key in multi-user mode")
         except Exception as e:
             logger.warning(f"Failed to clear Semantic Scholar key in multi-user mode: {e}")
 
@@ -1568,6 +1571,12 @@ async def lifespan(app: FastAPI):
                 os.environ["REFCHECKER_GOOGLE_BOOKS_INCLUDE_MAGAZINES"] = stored_google_books_magazines
         except Exception as e:
             logger.debug(f"Could not hydrate Google Books settings: {e}")
+        try:
+            stored_springer_key = await db.get_setting("springer_nature_api_key")
+            if stored_springer_key and not os.environ.get("SPRINGER_NATURE_API_KEY"):
+                os.environ["SPRINGER_NATURE_API_KEY"] = stored_springer_key
+        except Exception as e:
+            logger.debug(f"Could not hydrate Springer Nature settings: {e}")
 
     # In multiuser mode, pre-start GROBID so users without LLM keys can extract refs
     if is_multiuser_mode():
@@ -6344,6 +6353,14 @@ class GoogleBooksKeyValidate(BaseModel):
     api_key: str
 
 
+class SpringerNatureKeyUpdate(BaseModel):
+    api_key: str
+
+
+class SpringerNatureKeyValidate(BaseModel):
+    api_key: str
+
+
 async def _resolve_semantic_scholar_api_key(api_key: Optional[str]) -> Optional[str]:
     """Use per-request browser keys first, then env, then the single-user stored key.
 
@@ -6576,8 +6593,13 @@ async def validate_google_books_key(
         raise
     except httpx.TimeoutException:
         raise HTTPException(status_code=400, detail="Connection timed out. Please try again.")
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=400, detail=f"Connection error: {exc}")
+    except httpx.RequestError:
+        # httpx exception text can contain the full prepared URL, including
+        # the query-parameter API key required by Springer Nature.
+        raise HTTPException(
+            status_code=400,
+            detail="Connection error while contacting Springer Nature",
+        )
 
 
 @app.get("/api/settings/google-books")
@@ -6639,6 +6661,162 @@ async def delete_google_books_key(current_user: UserInfo = Depends(require_user)
         "has_key": False,
         "storage": "database",
         "message": "Google Books API key removed from the local RefChecker database",
+    }
+
+
+@app.post("/api/settings/springer-nature/validate")
+async def validate_springer_nature_key(
+    data: SpringerNatureKeyValidate,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Validate a Springer Nature key against Meta API v2."""
+    import httpx
+
+    api_key = (data.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://api.springernature.com/meta/v2/json",
+                headers={"Accept": "application/json"},
+                params={
+                    "api_key": api_key,
+                    # DOI is available on the Basic plan.  The title/name
+                    # contains constraints are Premium-only and caused valid
+                    # free keys to receive a misleading 403 during validation.
+                    "q": "doi:10.1007/978-3-030-58259-3_6",
+                    "s": 1,
+                    "p": 1,
+                },
+            )
+        if response.status_code != 200:
+            # Log only the upstream status and provider error category. Never
+            # log the request URL, query parameters, response body, or key.
+            provider_error = None
+            try:
+                payload = response.json()
+                error_value = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(error_value, dict):
+                    provider_error = error_value.get("error")
+                elif isinstance(error_value, str):
+                    provider_error = error_value
+                provider_error = provider_error or (
+                    payload.get("code") if isinstance(payload, dict) else None
+                )
+            except (TypeError, ValueError):
+                provider_error = None
+            logger.warning(
+                "Springer Nature key validation failed: upstream_status=%d provider_error=%r",
+                response.status_code,
+                provider_error,
+            )
+        if response.status_code == 200:
+            return {"valid": True, "message": "Springer Nature API key is valid"}
+        if response.status_code == 429:
+            return {
+                "valid": True,
+                "message": "Springer Nature accepted the key, but its request limit is currently exhausted",
+            }
+        if response.status_code == 401:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Springer Nature returned 401: the key is invalid or has no active subscription. "
+                    "In API Management, activate the Meta API and copy the plain API key—not the "
+                    "API metric or a key/metric combination."
+                ),
+            )
+        if response.status_code == 403:
+            # Authentication succeeded. A Basic key can legitimately receive
+            # 403 when a record is outside its content rights; the checker will
+            # skip that lookup and continue with the other databases.
+            return {
+                "valid": True,
+                "message": (
+                    "Springer Nature accepted the key. The validation record is outside this "
+                    "plan's content rights, so some Springer lookups may be unavailable."
+                ),
+            }
+        if response.status_code == 400:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Springer Nature returned 400 for the Meta API validation request. Confirm that the Meta API "
+                    "is active for this key; if it is, contact supportapi@springernature.com."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Springer Nature validation failed with status {response.status_code}",
+        )
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=400, detail="Connection timed out. Please try again.")
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=400, detail=f"Connection error: {exc}")
+
+
+@app.get("/api/settings/springer-nature")
+async def get_springer_nature_key_status(current_user: UserInfo = Depends(require_user)):
+    """Return Springer Nature API key storage status."""
+    if is_multiuser_mode():
+        if os.getenv("SPRINGER_NATURE_API_KEY") or os.getenv("SPRINGER_API_KEY"):
+            return {
+                "has_key": True,
+                "storage": "environment",
+                "message": "Springer Nature API key provided by the server environment",
+            }
+        return {
+            "has_key": False,
+            "storage": "environment-only",
+            "message": "A server administrator must configure SPRINGER_NATURE_API_KEY",
+        }
+    return {
+        "has_key": await db.has_setting("springer_nature_api_key"),
+        "storage": "database",
+        "message": "Springer Nature API key is encrypted in the local RefChecker database",
+    }
+
+
+@app.put("/api/settings/springer-nature")
+async def set_springer_nature_key(
+    data: SpringerNatureKeyUpdate,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Store and activate a Springer Nature key in single-user mode."""
+    if is_multiuser_mode():
+        raise HTTPException(
+            status_code=410,
+            detail="Configure SPRINGER_NATURE_API_KEY in the server environment",
+        )
+    api_key = (data.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+    await db.set_setting("springer_nature_api_key", api_key)
+    os.environ["SPRINGER_NATURE_API_KEY"] = api_key
+    return {
+        "has_key": True,
+        "storage": "database",
+        "message": "Springer Nature API key saved and active for the next check",
+    }
+
+
+@app.delete("/api/settings/springer-nature")
+async def delete_springer_nature_key(current_user: UserInfo = Depends(require_user)):
+    """Delete the single-user Springer Nature key."""
+    if is_multiuser_mode():
+        raise HTTPException(
+            status_code=410,
+            detail="Configure SPRINGER_NATURE_API_KEY in the server environment",
+        )
+    await db.delete_setting("springer_nature_api_key")
+    os.environ.pop("SPRINGER_NATURE_API_KEY", None)
+    return {
+        "has_key": False,
+        "storage": "database",
+        "message": "Springer Nature API key removed from the local RefChecker database",
     }
 
 

@@ -17,6 +17,10 @@ const mocks = vi.hoisted(() => ({
   validateGoogleBooksKey: vi.fn(),
   setGoogleBooksKey: vi.fn(),
   deleteGoogleBooksKey: vi.fn(),
+  getSpringerNatureKeyStatus: vi.fn(),
+  validateSpringerNatureKey: vi.fn(),
+  setSpringerNatureKey: vi.fn(),
+  deleteSpringerNatureKey: vi.fn(),
   getContactEmail: vi.fn(),
   setContactEmail: vi.fn(),
   deleteContactEmail: vi.fn(),
@@ -65,6 +69,10 @@ vi.mock('../../utils/api', () => ({
   validateGoogleBooksKey: mocks.validateGoogleBooksKey,
   setGoogleBooksKey: mocks.setGoogleBooksKey,
   deleteGoogleBooksKey: mocks.deleteGoogleBooksKey,
+  getSpringerNatureKeyStatus: mocks.getSpringerNatureKeyStatus,
+  validateSpringerNatureKey: mocks.validateSpringerNatureKey,
+  setSpringerNatureKey: mocks.setSpringerNatureKey,
+  deleteSpringerNatureKey: mocks.deleteSpringerNatureKey,
   getContactEmail: mocks.getContactEmail,
   setContactEmail: mocks.setContactEmail,
   deleteContactEmail: mocks.deleteContactEmail,
@@ -118,6 +126,10 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     mocks.validateGoogleBooksKey.mockResolvedValue({ data: { valid: true } })
     mocks.setGoogleBooksKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
     mocks.deleteGoogleBooksKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
+    mocks.getSpringerNatureKeyStatus.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
+    mocks.validateSpringerNatureKey.mockResolvedValue({ data: { valid: true } })
+    mocks.setSpringerNatureKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
+    mocks.deleteSpringerNatureKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
     mocks.getContactEmail.mockResolvedValue({ data: { contact_email: '', storage: 'database' } })
     mocks.setContactEmail.mockResolvedValue({ data: { contact_email: 'maintainer@example.org', storage: 'database' } })
     mocks.deleteContactEmail.mockResolvedValue({ data: { contact_email: '', storage: 'database' } })
@@ -154,6 +166,42 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     fireEvent.click(toggle)
 
     expect(mocks.updateSetting).toHaveBeenCalledWith('google_books_include_magazines', false)
+  })
+
+  it('stores and activates a Springer Nature key in single-user mode', async () => {
+    render(<SettingsPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }))
+    const section = screen.getByText('Springer Nature API Key').closest('.py-3')
+    fireEvent.click(within(section).getByRole('button', { name: 'Set' }))
+    fireEvent.change(within(section).getByPlaceholderText('Enter Springer Nature API key...'), {
+      target: { value: 'springer-key' },
+    })
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(mocks.validateSpringerNatureKey).toHaveBeenCalledWith('springer-key'))
+    expect(mocks.setSpringerNatureKey).toHaveBeenCalledWith('springer-key')
+  })
+
+  it('shows an encoding-safe status while checking a Springer Nature key', async () => {
+    let finishValidation
+    mocks.validateSpringerNatureKey.mockReturnValueOnce(new Promise(resolve => {
+      finishValidation = resolve
+    }))
+
+    render(<SettingsPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }))
+    const section = screen.getByText('Springer Nature API Key').closest('.py-3')
+    fireEvent.click(within(section).getByRole('button', { name: 'Set' }))
+    fireEvent.change(within(section).getByPlaceholderText('Enter Springer Nature API key...'), {
+      target: { value: 'springer-key' },
+    })
+    fireEvent.click(within(section).getByRole('button', { name: 'Save' }))
+
+    expect(await within(section).findByRole('button', { name: 'Checking...' })).toBeDisabled()
+    expect(section.textContent).not.toMatch(/Ã|â‚|Â/)
+
+    finishValidation({ data: { valid: true } })
+    await waitFor(() => expect(mocks.setSpringerNatureKey).toHaveBeenCalledWith('springer-key'))
   })
 
   it('stores Semantic Scholar keys in the browser cache in multi-user mode', async () => {

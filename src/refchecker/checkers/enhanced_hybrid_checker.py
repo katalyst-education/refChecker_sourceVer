@@ -9,10 +9,11 @@ with more reliable alternatives while maintaining backward compatibility.
 New API Integration Priority:
 1. Local Semantic Scholar Database (fastest, offline)
 2. Semantic Scholar API (reliable, good coverage)  
-3. OpenAlex API (excellent reliability, replaces Google Scholar)
-4. CrossRef API (best for DOI-based verification)
+3. CrossRef API (best for DOI-based verification)
+4. OpenAlex API (excellent reliability, replaces Google Scholar)
 5. DNB, TIB, ZDB, Open Library, and specialist indexes
-6. Google Books (keyed, book-only final fallback)
+6. Springer Nature Meta API (keyed, final publisher fallback)
+7. Google Books (keyed, book-only final fallback)
 
 Usage:
     from enhanced_hybrid_checker import EnhancedHybridReferenceChecker
@@ -119,7 +120,9 @@ class EnhancedHybridReferenceChecker:
                  cache_dir: Optional[str] = None,
                  enable_tib: bool = True,
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-                 cancel_event: Optional[threading.Event] = None):
+                 cancel_event: Optional[threading.Event] = None,
+                 springer_nature_api_key: Optional[str] = None,
+                 enable_springer_nature: Optional[bool] = None):
         """
         Initialize the enhanced hybrid reference checker
         
@@ -127,6 +130,7 @@ class EnhancedHybridReferenceChecker:
             semantic_scholar_api_key: Optional API key for Semantic Scholar
             paperclip_api_key: Optional API key for Paperclip secondary verification
             google_books_api_key: Optional API key for the final Google Books fallback
+            springer_nature_api_key: Optional API key for Springer Nature Meta API v2
             db_path: Optional path to local Semantic Scholar database
             contact_email: Email for polite pool access to APIs
             enable_openalex: Whether to use OpenAlex API
@@ -137,6 +141,7 @@ class EnhancedHybridReferenceChecker:
             enable_tib: Whether to use the TIB catalogue SRU API
             enable_zdb: Whether to use the ZDB catalogue SRU API
             enable_google_books: Whether to use Google Books as the final book/magazine fallback
+            enable_springer_nature: Whether to use Springer Nature as a final publisher fallback
             google_books_include_magazines: Whether explicit magazine citations may use that fallback
             enable_arxiv_citation: Whether to use ArXiv Citation checker as authoritative source
             enable_acl_anthology: Whether to use ACL Anthology API
@@ -205,6 +210,21 @@ class EnhancedHybridReferenceChecker:
         if enable_crossref:
             self.crossref = self._initialize_checker(
                 'crossref', 'CrossRefReferenceChecker', 'CrossRef API', email=contact_email
+            )
+
+        if enable_springer_nature is None:
+            enable_springer_nature = bool(
+                springer_nature_api_key
+                or os.environ.get('SPRINGER_NATURE_API_KEY')
+                or os.environ.get('SPRINGER_API_KEY')
+            )
+        self.springer_nature = None
+        if enable_springer_nature:
+            self.springer_nature = self._initialize_checker(
+                'springer_nature',
+                'SpringerNatureReferenceChecker',
+                'Springer Nature Meta API',
+                api_key=springer_nature_api_key,
             )
 
         self.open_library = None
@@ -307,6 +327,7 @@ class EnhancedHybridReferenceChecker:
         all_local_checkers = [checker for _, _, checker in self.local_db_checkers]
         for checker in (self.arxiv_citation, *all_local_checkers, self.semantic_scholar,
                         self.openalex, self.crossref, self.open_library, self.econbiz,
+                        self.springer_nature,
                         self.dnb, self.tib, self.zdb,
                         self.google_books,
                         self.openreview, self.dblp,
@@ -320,6 +341,7 @@ class EnhancedHybridReferenceChecker:
             'semantic_scholar': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'openalex': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'crossref': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'springer_nature': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'open_library': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'econbiz': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'dnb': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
@@ -351,6 +373,7 @@ class EnhancedHybridReferenceChecker:
             'arxiv_citation': threading.Semaphore(2),   # ArXiv has 3s rate gap
             'semantic_scholar': threading.Semaphore(3),  # moderate parallelism
             'crossref': threading.Semaphore(3),
+            'springer_nature': threading.Semaphore(1),
             'openalex': threading.Semaphore(3),
             'open_library': threading.Semaphore(1),
             'econbiz': threading.Semaphore(1),
@@ -447,6 +470,7 @@ class EnhancedHybridReferenceChecker:
             'semantic_scholar': 'Semantic Scholar',
             'openalex': 'OpenAlex',
             'crossref': 'CrossRef',
+            'springer_nature': 'Springer Nature',
             'open_library': 'Open Library',
             'econbiz': 'EconBiz',
             'dnb': 'DNB Catalogue',
@@ -499,7 +523,7 @@ class EnhancedHybridReferenceChecker:
         for name in (
             'semantic_scholar', 'crossref', 'openalex', 'open_library', 'econbiz',
             'dnb', 'tib', 'zdb', 'dblp', 'acl_anthology', 'openreview',
-            'paperclip', 'google_books',
+            'paperclip', 'springer_nature', 'google_books',
         ):
             if getattr(self, name, None) is not None:
                 names.append(name)
@@ -1631,6 +1655,49 @@ class EnhancedHybridReferenceChecker:
                             'failure_detail': failure_detail,
                             'active': True,
                         })
+
+        # Springer Nature is intentionally sequential and near-last. It is
+        # never launched with the normal fallback pool, so any complete result
+        # from the general scholarly/catalogue sources consumes no Springer
+        # quota. Search-all mode still queries it for an explicit comparison.
+        springer_nature = getattr(self, 'springer_nature', None)
+        if springer_nature:
+            logger.info(
+                "SPRINGER_NATURE_API_TRACE event=fallback_reached forced=%s title=%r",
+                force_all_databases,
+                reference.get('title', ''),
+            )
+            self._append_attempted_api(attempted_apis, 'springer_nature')
+            verified_data, errors, url, success, failure_type, failure_detail = self._try_api(
+                'springer_nature', springer_nature, reference,
+            )
+            if success:
+                logger.info(
+                    "SPRINGER_NATURE_API_TRACE event=fallback_result outcome=match title=%r",
+                    reference.get('title', ''),
+                )
+                result = (verified_data, errors, url)
+                best_result = self._pick_preferred_result(best_result, result, reference)
+                if not force_all_databases and self._is_data_complete(verified_data, reference):
+                    return result, {}
+            elif failure_type not in ('none', 'not_found'):
+                logger.info(
+                    "SPRINGER_NATURE_API_TRACE event=fallback_result outcome=%s title=%r",
+                    failure_type,
+                    reference.get('title', ''),
+                )
+                failed_apis.append({
+                    'name': 'springer_nature',
+                    'instance': springer_nature,
+                    'failure_type': failure_type,
+                    'failure_detail': failure_detail,
+                    'active': True,
+                })
+            else:
+                logger.info(
+                    "SPRINGER_NATURE_API_TRACE event=fallback_result outcome=no_match title=%r",
+                    reference.get('title', ''),
+                )
 
         # Google Books is intentionally sequential and last. It is never
         # launched with the normal fallback pool, so a complete result from

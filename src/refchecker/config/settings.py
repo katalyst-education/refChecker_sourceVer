@@ -90,6 +90,18 @@ DEFAULT_CONFIG = {
         "max_retries": 3,
         "timeout": 30,
     },
+
+    "springer_nature": {
+        "base_url": "https://api.springernature.com/meta/v2/json",
+        "rate_limit_delay": 1.0,
+        # Conservative free-plan guardrails (provider allowance: 100/min,
+        # 500/day).  The lower defaults leave room for key validation and
+        # other applications that may share the same key.
+        "minute_request_limit": 90,
+        "daily_request_limit": 450,
+        "max_retries": 3,
+        "timeout": 30,
+    },
     
     "arxiv": {
         "base_url": "https://export.arxiv.org/api/query",
@@ -197,6 +209,10 @@ def get_config() -> Dict[str, Any]:
     # Override with environment variables if present
     if os.getenv("SEMANTIC_SCHOLAR_API_KEY"):
         config["semantic_scholar"]["api_key"] = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+
+    springer_key = os.getenv("SPRINGER_NATURE_API_KEY") or os.getenv("SPRINGER_API_KEY")
+    if springer_key:
+        config["springer_nature"]["api_key"] = springer_key
     
     if os.getenv("REFCHECKER_DEBUG"):
         config["debug"] = os.getenv("REFCHECKER_DEBUG").lower() == "true"

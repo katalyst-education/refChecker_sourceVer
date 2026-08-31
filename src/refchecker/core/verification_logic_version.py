@@ -31,8 +31,13 @@ History:
         with the shared scorer and the shared acceptance threshold instead of a
         private token-Jaccard with its own cut-offs, so a reference is judged
         the same whether it was verified fresh or replayed from cache.
+    5 - optional Springer Nature publisher metadata is part of the shared
+        verification cascade, and BookReview records are no longer accepted as
+        title-only matches for the underlying book.
+    6 - Springer Nature title fallback uses Basic-plan-compatible general-text
+        phrases instead of Premium-only title/name constraints.
 """
 
-VERIFICATION_LOGIC_VERSION = 4
+VERIFICATION_LOGIC_VERSION = 6
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

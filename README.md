@@ -512,6 +512,7 @@ Verification:
   --openalex-min-year YEAR   Only ingest OpenAlex works published in YEAR or later during updates
   --db-path PATH             (Deprecated) alias for --s2-db
   --semantic-scholar-api-key KEY   Override SEMANTIC_SCHOLAR_API_KEY env var
+  --springer-nature-api-key KEY    Override SPRINGER_NATURE_API_KEY env var
   --disable-parallel         Run verification sequentially
   --max-workers N            Max parallel verification threads (default: 6)
 
@@ -1100,7 +1101,25 @@ export REFCHECKER_LMSTUDIO_TIMEOUT=3600
 
 # Performance
 export SEMANTIC_SCHOLAR_API_KEY=your_key    # Higher rate limits / faster verification
+export SPRINGER_NATURE_API_KEY=your_key      # Springer Nature Meta API v2
+# Free-plan safety limits. RefChecker counts actual attempts over rolling
+# windows, persists only a hash of the key, and does not count cache hits.
+export REFCHECKER_SPRINGER_NATURE_MINUTE_LIMIT=90
+export REFCHECKER_SPRINGER_NATURE_DAILY_LIMIT=450
+export REFCHECKER_SPRINGER_NATURE_RATE_LIMIT_DELAY=1.0
 ```
+
+Springer Nature is a sequential final-resort lookup: a normal check queries it
+only when the general metadata and catalogue sources have not supplied a
+complete result. An explicit "search all databases" run still includes it.
+Title-only lookups use the Basic-plan-compatible quoted general-text search;
+the Premium-only `title:` and `name:` constraints are not required.
+The safety defaults deliberately stay below the provider's free-plan allowances
+(100 requests/minute and 500 requests/day). Request attempts, including retries,
+share one persistent budget across RefChecker processes. When the local budget
+is exhausted, Springer Nature is skipped and the other configured databases
+continue normally. A provider `429` response starts a cooldown and is not
+retried. Raise these values only for an upgraded API plan.
 
 ---
 

@@ -284,12 +284,14 @@ class ArxivReferenceChecker:
                  ai_detection_enabled=False, ai_detection_device='cpu',
                  extraction_mode=None,
                  # Deprecated parameters kept for backward compatibility
-                 scan_mode='standard', only_flagged=False):
+                 scan_mode='standard', only_flagged=False,
+                 springer_nature_api_key=None):
         # Initialize the reference checker for non-arXiv references
         self.fatal_error = False
         self.fatal_error_message = None
         self.last_download_error = None
         self.semantic_scholar_api_key = semantic_scholar_api_key
+        self.springer_nature_api_key = springer_nature_api_key
         explicit_db_paths = dict(db_paths or {})
         if db_path and 's2' not in explicit_db_paths:
             explicit_db_paths['s2'] = db_path
@@ -418,6 +420,7 @@ class ArxivReferenceChecker:
         # for S2 lookups first, then falls back to live APIs (CrossRef, OpenAlex, etc.)
         self.non_arxiv_checker = EnhancedHybridReferenceChecker(
             semantic_scholar_api_key=semantic_scholar_api_key,
+            springer_nature_api_key=springer_nature_api_key,
             db_path=self.db_path,
             db_paths=self.db_paths,
             contact_email=os.environ.get("REFCHECKER_CONTACT_EMAIL"),
@@ -8065,6 +8068,8 @@ def main():
                         help="Path for the generated OpenReview paper list created by --openreview")
     parser.add_argument("--semantic-scholar-api-key", type=str,
                         help="API key for Semantic Scholar (optional, increases rate limits). Can also be set via SEMANTIC_SCHOLAR_API_KEY environment variable")
+    parser.add_argument("--springer-nature-api-key", type=str,
+                        help="API key for Springer Nature Meta API v2. Can also be set via SPRINGER_NATURE_API_KEY environment variable")
     parser.add_argument("--db-path", type=str,
                         help="(Deprecated) Path to local Semantic Scholar database")
     parser.add_argument("--database-dir", type=str,
@@ -8291,11 +8296,17 @@ def main():
     
     # Get Semantic Scholar API key from command line or environment variable
     semantic_scholar_api_key = args.semantic_scholar_api_key or os.getenv('SEMANTIC_SCHOLAR_API_KEY')
+    springer_nature_api_key = (
+        args.springer_nature_api_key
+        or os.getenv('SPRINGER_NATURE_API_KEY')
+        or os.getenv('SPRINGER_API_KEY')
+    )
     
     try:
         # Initialize the reference checker
         checker = ArxivReferenceChecker(
             semantic_scholar_api_key=semantic_scholar_api_key,
+            springer_nature_api_key=springer_nature_api_key,
             db_path=resolved_db_paths.get("s2"),
             db_paths=resolved_db_paths,
             database_directory=args.database_dir,

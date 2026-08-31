@@ -99,6 +99,10 @@ export const validateGoogleBooksKey = (apiKey) => api.post('/settings/google-boo
 export const getGoogleBooksKeyStatus = () => api.get('/settings/google-books')
 export const setGoogleBooksKey = (apiKey) => api.put('/settings/google-books', { api_key: apiKey })
 export const deleteGoogleBooksKey = () => api.delete('/settings/google-books')
+export const validateSpringerNatureKey = (apiKey) => api.post('/settings/springer-nature/validate', { api_key: apiKey })
+export const getSpringerNatureKeyStatus = () => api.get('/settings/springer-nature')
+export const setSpringerNatureKey = (apiKey) => api.put('/settings/springer-nature', { api_key: apiKey })
+export const deleteSpringerNatureKey = () => api.delete('/settings/springer-nature')
 
 // Public contact detail included in the User-Agent for Open Library and
 // other polite-pool metadata requests. This is not an API key.

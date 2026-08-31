@@ -7,6 +7,7 @@ from .local_semantic_scholar import LocalNonArxivReferenceChecker
 from .enhanced_hybrid_checker import EnhancedHybridReferenceChecker
 from .openalex import OpenAlexReferenceChecker
 from .google_books import GoogleBooksReferenceChecker
+from .springer_nature import SpringerNatureReferenceChecker
 from .crossref import CrossRefReferenceChecker
 from .open_library import OpenLibraryReferenceChecker
 from .dnb_sru import DnbSruReferenceChecker, TibSruReferenceChecker, ZdbSruReferenceChecker

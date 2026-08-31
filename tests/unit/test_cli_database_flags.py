@@ -14,6 +14,7 @@ def test_cli_exposes_multi_database_flags():
         "--update-databases",
         "--openalex-since",
         "--openalex-min-year",
+        "--springer-nature-api-key",
     ):
         assert flag in src
 

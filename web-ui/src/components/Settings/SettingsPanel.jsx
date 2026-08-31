@@ -114,6 +114,13 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [gbError, setGbError] = useState(null)
   const [gbServerHasKey, setGbServerHasKey] = useState(false)
   const [gbKeyStorage, setGbKeyStorage] = useState(null)
+  const [snApiKey, setSnApiKey] = useState('')
+  const [snIsEditing, setSnIsEditing] = useState(false)
+  const [snIsSaving, setSnIsSaving] = useState(false)
+  const [snIsValidating, setSnIsValidating] = useState(false)
+  const [snError, setSnError] = useState(null)
+  const [snServerHasKey, setSnServerHasKey] = useState(false)
+  const [snKeyStorage, setSnKeyStorage] = useState(null)
   const [contactEmail, setContactEmail] = useState('')
   const [contactEmailDraft, setContactEmailDraft] = useState('')
   const [contactEmailEditing, setContactEmailEditing] = useState(false)
@@ -122,11 +129,13 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [contactEmailStorage, setContactEmailStorage] = useState(null)
   const ssHasKey = hasKey('semantic_scholar') || ssServerHasKey
   const gbHasKey = hasKey('google_books') || gbServerHasKey
+  const snHasKey = snServerHasKey
   const pcHasKey = hasKey('paperclip') || pcServerHasKey
   // Server env keys ("environment" storage) serve all sessions, like env
   // LLM keys — users can override with a browser key but not remove them.
   const ssEnvKey = ssKeyStorage === 'environment'
   const gbEnvKey = gbKeyStorage === 'environment'
+  const snEnvKey = snKeyStorage === 'environment'
   const pcEnvKey = pcKeyStorage === 'environment'
 
   // Local DB path state
@@ -479,6 +488,14 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   }
   useEffect(refreshGbKeyStatus, [])
 
+  const refreshSnKeyStatus = () => {
+    api.getSpringerNatureKeyStatus().then(res => {
+      setSnServerHasKey(res.data.has_key)
+      setSnKeyStorage(res.data.storage || null)
+    }).catch(() => {})
+  }
+  useEffect(refreshSnKeyStatus, [])
+
   // Same for Paperclip — server tells us whether a shared key is on file
   // (single-user database key, or a server environment key in multi-user
   // mode), while useKeyStore tracks the user's browser-cached key.
@@ -667,6 +684,57 @@ export default function SettingsPanel({ theme, onThemeChange }) {
     setGbIsEditing(false)
     setGbApiKey('')
     setGbError(null)
+  }
+
+  const handleSnSave = async () => {
+    if (!snApiKey.trim()) {
+      setSnError('API key cannot be empty')
+      return
+    }
+    try {
+      setSnIsSaving(true)
+      setSnIsValidating(true)
+      setSnError(null)
+      const validationResponse = await api.validateSpringerNatureKey(snApiKey.trim())
+      if (!validationResponse.data.valid) {
+        setSnError(validationResponse.data.message || 'Invalid API key')
+        return
+      }
+      await api.setSpringerNatureKey(snApiKey.trim())
+      setSnServerHasKey(true)
+      setSnKeyStorage('database')
+      setSnIsEditing(false)
+      setSnApiKey('')
+      notifyApiKeyStatusChanged()
+    } catch (err) {
+      logger.error('SettingsPanel', 'Failed to save Springer Nature key', err)
+      setSnError(formatApiError(err.response?.data?.detail, 'Failed to save API key'))
+    } finally {
+      setSnIsValidating(false)
+      setSnIsSaving(false)
+    }
+  }
+
+  const handleSnDelete = async () => {
+    try {
+      setSnIsSaving(true)
+      await api.deleteSpringerNatureKey()
+      setSnServerHasKey(false)
+      setSnIsEditing(false)
+      setSnApiKey('')
+      setSnError(null)
+      notifyApiKeyStatusChanged()
+    } catch (err) {
+      setSnError(formatApiError(err.response?.data?.detail, 'Failed to remove API key'))
+    } finally {
+      setSnIsSaving(false)
+    }
+  }
+
+  const handleSnCancel = () => {
+    setSnIsEditing(false)
+    setSnApiKey('')
+    setSnError(null)
   }
 
   const handleContactEmailSave = async () => {
@@ -2363,6 +2431,52 @@ export default function SettingsPanel({ theme, onThemeChange }) {
               <button onClick={handleGbCancel} disabled={gbIsSaving || gbIsValidating} className="px-3 py-1.5 text-xs rounded border cursor-pointer" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}>Cancel</button>
             </div>
             {gbError && <div className="text-xs" style={{ color: 'var(--color-error)' }}>{gbError}</div>}
+          </div>
+        )}
+      </div>
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>Springer Nature API Key</div>
+            <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+              Optional. Uses Springer Nature publisher metadata and rejects book-review records as matches for the underlying book.
+              {multiuser && !snEnvKey ? ' A server administrator must configure this key.' : ''}
+              {snEnvKey ? ' A server-provided key is active.' : ''}
+            </div>
+          </div>
+          {!snIsEditing && (
+            <div className="flex items-center gap-2">
+              {!multiuser && !snEnvKey && (
+                <button onClick={() => setSnIsEditing(true)} className="text-xs px-2 py-1 rounded cursor-pointer" style={{ color: 'var(--color-accent)' }}>
+                  {snHasKey ? 'Edit' : 'Set'}
+                </button>
+              )}
+              {!multiuser && snHasKey && !snEnvKey && (
+                <button onClick={handleSnDelete} disabled={snIsSaving} className="text-xs px-2 py-1 rounded cursor-pointer" style={{ color: 'var(--color-error)' }}>Remove</button>
+              )}
+            </div>
+          )}
+        </div>
+        {snIsEditing && (
+          <div className="mt-2 space-y-2">
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={snApiKey}
+                onChange={(e) => setSnApiKey(e.target.value)}
+                placeholder="Enter Springer Nature API key..."
+                className="flex-1 px-2 py-1.5 text-sm rounded border"
+                style={{ backgroundColor: 'var(--color-bg-primary)', borderColor: snError ? 'var(--color-error)' : 'var(--color-border)', color: 'var(--color-text-primary)' }}
+                disabled={snIsSaving || snIsValidating}
+                autoFocus
+                onKeyDown={(e) => { if (e.key === 'Enter' && snApiKey.trim()) handleSnSave(); if (e.key === 'Escape') handleSnCancel() }}
+              />
+              <button onClick={handleSnSave} disabled={snIsSaving || snIsValidating || !snApiKey.trim()} className="px-3 py-1.5 text-xs rounded cursor-pointer" style={{ backgroundColor: 'var(--color-accent)', color: 'white', opacity: snIsSaving || snIsValidating || !snApiKey.trim() ? 0.5 : 1 }}>
+                {snIsValidating || snIsSaving ? 'Checking...' : 'Save'}
+              </button>
+              <button onClick={handleSnCancel} disabled={snIsSaving || snIsValidating} className="px-3 py-1.5 text-xs rounded border cursor-pointer" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}>Cancel</button>
+            </div>
+            {snError && <div className="text-xs" style={{ color: 'var(--color-error)' }}>{snError}</div>}
           </div>
         )}
       </div>
