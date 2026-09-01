@@ -10,9 +10,12 @@ import { resolveDoi } from '../../utils/api'
 
 const databaseStatusLabel = (status) => ({
   matched: 'Match',
+  confirmed_same_work: 'Confirmed',
   verified_fulltext_evidence: 'Full-text match',
   no_match: 'No match',
   rejected_wrong_paper: 'Rejected wrong paper',
+  excluded_wrong_match: 'Excluded: likely wrong match',
+  metadata_conflict: 'Metadata conflict',
   rate_limited: 'Rate limited',
   timed_out: 'Timed out',
   failed: 'Failed',
@@ -23,9 +26,10 @@ const databaseStatusLabel = (status) => ({
 }[status] || String(status || 'Waiting').replaceAll('_', ' '))
 
 const databaseStatusColor = (status) => {
-  if (status === 'matched' || status === 'verified_fulltext_evidence') return 'var(--color-success, #16a34a)'
+  if (['matched', 'confirmed_same_work', 'verified_fulltext_evidence'].includes(status)) return 'var(--color-success, #16a34a)'
   if (status === 'searching') return 'var(--color-accent)'
-  if (['failed', 'timed_out', 'rate_limited'].includes(status)) return 'var(--color-error, #ef4444)'
+  if (status === 'metadata_conflict') return 'var(--color-warning, #d97706)'
+  if (['failed', 'timed_out', 'rate_limited', 'excluded_wrong_match'].includes(status)) return 'var(--color-error, #ef4444)'
   return 'var(--color-text-muted)'
 }
 
@@ -43,6 +47,18 @@ const candidateAuthorText = (candidate) => {
     return author?.name || author?.display_name || ''
   }).filter(Boolean).join(', ')
 }
+
+const LoadingSpinner = ({ className = 'h-3.5 w-3.5' }) => (
+  <svg
+    aria-hidden="true"
+    className={`motion-safe:animate-spin shrink-0 ${className}`}
+    fill="none"
+    viewBox="0 0 24 24"
+  >
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+  </svg>
+)
 
 export function AddReferencePanel({ newRef, setNewRef, busyKey, onSave, onCancel }) {
   const disabled = busyKey === '__add__'
@@ -476,6 +492,7 @@ export function ReferenceRowActions({
   }
   const styleFor = (busy) => ({ ...baseStyle, opacity: (busy || !selectedCheckId || globalBusy) ? 0.55 : 1 })
   const activeSearch = ['queued', 'running', 'cancelling'].includes(searchOperation?.status)
+  const databaseSearchWaiting = ['queued', 'running'].includes(searchOperation?.status)
   const databaseSources = (() => {
     const sourceMap = searchOperation?.sources || {}
     const configured = Array.isArray(searchOperation?.configured_sources)
@@ -579,8 +596,23 @@ export function ReferenceRowActions({
             style={{ border: '1px solid var(--color-border)', background: 'var(--color-bg-tertiary)' }}
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>
-                {activeSearch ? 'Searching databases' : searchOperation.status === 'completed' ? 'Database search complete' : searchOperation.status === 'cancelled' ? 'Database search cancelled' : 'Database search failed'}
+              <span
+                aria-label={databaseSearchWaiting ? 'Database search in progress' : undefined}
+                aria-live={databaseSearchWaiting ? 'polite' : undefined}
+                className="flex items-center gap-1.5 font-semibold"
+                role={databaseSearchWaiting ? 'status' : undefined}
+                style={{ color: 'var(--color-text-primary)' }}
+              >
+                {databaseSearchWaiting && <LoadingSpinner />}
+                {searchOperation.status === 'cancelling'
+                  ? 'Cancelling database search'
+                  : activeSearch
+                    ? 'Searching databases'
+                    : searchOperation.status === 'completed'
+                      ? 'Database search complete'
+                      : searchOperation.status === 'cancelled'
+                        ? 'Database search cancelled'
+                        : 'Database search failed'}
               </span>
               {searchOperation.duration_ms != null && (
                 <span style={{ color: 'var(--color-text-muted)' }}>{(searchOperation.duration_ms / 1000).toFixed(1)}s</span>
@@ -598,8 +630,11 @@ export function ReferenceRowActions({
                   {databaseSources.map(source => {
                     const candidate = source.candidate || {}
                     const authors = candidateAuthorText(candidate)
+                    const corporateContributors = Array.isArray(candidate.corporate_contributors)
+                      ? candidate.corporate_contributors.filter(Boolean).join(', ')
+                      : ''
                     const resultUrl = safeResultUrl(candidate)
-                    const hasOverview = candidate.title || authors || candidate.year || resultUrl
+                    const hasOverview = candidate.title || authors || corporateContributors || candidate.year || resultUrl
                     return (
                       <li
                         key={source.database}
@@ -610,7 +645,11 @@ export function ReferenceRowActions({
                           <span className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
                             {source.label || source.database}
                           </span>
-                          <span className="flex-shrink-0" style={{ color: databaseStatusColor(source.status) }}>
+                          <span
+                            className={`flex flex-shrink-0 items-center gap-1 ${source.status === 'waiting' ? 'motion-safe:animate-pulse' : ''}`}
+                            style={{ color: databaseStatusColor(source.status) }}
+                          >
+                            {source.status === 'searching' && <LoadingSpinner className="h-3 w-3" />}
                             {databaseStatusLabel(source.status)}
                           </span>
                         </div>
@@ -622,6 +661,9 @@ export function ReferenceRowActions({
                             {(authors || candidate.year) && (
                               <div>{[authors, candidate.year].filter(Boolean).join(' · ')}</div>
                             )}
+                            {corporateContributors && (
+                              <div>Corporate contributor: {corporateContributors}</div>
+                            )}
                             {resultUrl && (
                               <a
                                 href={resultUrl}
@@ -632,6 +674,11 @@ export function ReferenceRowActions({
                                 Open database result ↗
                               </a>
                             )}
+                          </div>
+                        )}
+                        {source.reason && (
+                          <div className="mt-1" style={{ color: 'var(--color-text-muted)' }}>
+                            {source.reason}
                           </div>
                         )}
                       </li>

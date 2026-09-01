@@ -30,6 +30,10 @@ def _verified():
         "source": "not-the-display-source",
         "_matched_database": "CrossRef",
         "_verification_basis": "catalogue",
+        "_evidence_reconciliation": {
+            "decision": "accept_cited_authors",
+            "supporting_sources": ["CrossRef", "OpenAlex"],
+        },
     }
 
 
@@ -67,7 +71,7 @@ def test_fresh_reverify_replaces_all_display_derived_state():
     for key in (
         "status", "errors", "warnings", "infos", "suggestions",
         "authoritative_urls", "matched_database", "verification_basis",
-        "enrichment", "corrected_reference", "hallucination_assessment",
+        "evidence_reconciliation", "enrichment", "corrected_reference", "hallucination_assessment",
         "verified_title", "verified_authors", "verified_year", "verified_venue",
         "verified_doi",
     ):
@@ -90,3 +94,19 @@ def test_projection_preserves_cited_metadata_and_separates_verified_metadata():
     assert result["verified_title"] == "Canonical title"
     assert result["verified_year"] == 2021
     assert result["matched_database"] == "CrossRef"
+    assert result["evidence_reconciliation"]["decision"] == "accept_cited_authors"
+
+
+def test_resolved_catalogue_metadata_conflict_is_informational():
+    result = project_verification_result(
+        _reference(), _verified(), [{
+            "info_type": "metadata_conflict",
+            "info_details": "Two catalogues confirm the cited personal authors.",
+            "metadata_classification": "catalogue_author_conflict_resolved",
+        }], "https://doi.org/10.1000/canonical", index=17, enrich_enabled=False,
+    )
+
+    assert result["status"] == "verified"
+    assert result["errors"] == []
+    assert result["warnings"] == []
+    assert result["infos"][0]["info_type"] == "metadata_conflict"

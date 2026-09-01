@@ -155,6 +155,7 @@ def project_verification_result(
         "matched_database": verified.get("_matched_database") or (
             "Web page" if verified_via_webpage else None
         ),
+        "evidence_reconciliation": verified.get("_evidence_reconciliation"),
         "verification_basis": verified.get("_verification_basis"),
         "supporting_evidence": (
             {
@@ -200,7 +201,8 @@ def project_verification_result(
 # These must be removed before merging a fresh projection into a persisted row.
 VERIFICATION_DERIVED_FIELDS = frozenset({
     "status", "errors", "warnings", "infos", "suggestions", "verified_url",
-    "authoritative_urls", "matched_database", "matched_db", "verification_basis",
+    "authoritative_urls", "matched_database", "matched_db", "evidence_reconciliation",
+    "verification_basis",
     "supporting_evidence", "verified_via_website", "enrichment",
     "publication_year_assessment", "corrected_reference", "hallucination_assessment",
     "hallucination_check_pending", "_raw_errors", "from_cache", "from_fuzzy_cache",

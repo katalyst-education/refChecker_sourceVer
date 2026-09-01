@@ -23,6 +23,7 @@ MARC_RESPONSE = b"""<?xml version="1.0" encoding="UTF-8"?>
       <marc:datafield tag="022" ind1=" " ind2=" "><marc:subfield code="a">1234-5678</marc:subfield></marc:datafield>
       <marc:datafield tag="024" ind1="7" ind2=" "><marc:subfield code="a">10.1000/example</marc:subfield><marc:subfield code="2">doi</marc:subfield></marc:datafield>
       <marc:datafield tag="100" ind1="1" ind2=" "><marc:subfield code="a">Doe, Jane</marc:subfield></marc:datafield>
+      <marc:datafield tag="710" ind1="2" ind2=" "><marc:subfield code="a">Example Research Institute</marc:subfield><marc:subfield code="4">isb</marc:subfield></marc:datafield>
       <marc:datafield tag="245" ind1="1" ind2="0"><marc:subfield code="a">Reliable reference checking</marc:subfield><marc:subfield code="b">methods and systems</marc:subfield></marc:datafield>
       <marc:datafield tag="264" ind1=" " ind2="1"><marc:subfield code="b">Example Press</marc:subfield><marc:subfield code="c">2024</marc:subfield></marc:datafield>
     </marc:record>
@@ -41,7 +42,13 @@ def test_dnb_sru_uses_supported_endpoint_schema_and_page_size(mock_get, monkeypa
     results = checker.search('tit all "Reliable reference checking"', limit=1000)
 
     assert results[0]["title"] == "Reliable reference checking: methods and systems"
-    assert results[0]["authors"] == [{"name": "Doe, Jane"}]
+    assert results[0]["authors"] == [{"name": "Doe, Jane", "kind": "person", "marc_tag": "100"}]
+    assert results[0]["corporate_contributors"] == [{
+        "name": "Example Research Institute",
+        "kind": "organization",
+        "marc_tag": "710",
+        "role": "isb",
+    }]
     assert results[0]["publication_year"] == 2024
     assert results[0]["doi"] == "10.1000/example"
     assert results[0]["isbn"] == "978-3-16-148410-0"

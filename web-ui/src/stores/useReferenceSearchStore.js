@@ -118,6 +118,7 @@ export const useReferenceSearchStore = create((set, get) => ({
           database: message.database, label: message.label, status: message.status,
           attempt: message.attempt, duration_ms: message.duration_ms,
           delay_seconds: message.delay_seconds, candidate: message.candidate,
+          reason: message.reason, identity: message.identity,
         },
       } }
     } else if (message.type === 'reference_search_completed') {

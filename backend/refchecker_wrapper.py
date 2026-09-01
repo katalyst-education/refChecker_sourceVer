@@ -1363,6 +1363,7 @@ class ProgressRefChecker:
             db_paths=db_paths,
             debug_mode=False,
             cache_dir=cache_dir,
+            llm_provider=self.llm,
         )
         if db_path:
             logger.info(f"Using local Semantic Scholar database at {db_path}")
@@ -1657,6 +1658,7 @@ class ProgressRefChecker:
             "suggestions": formatted_suggestions,
             "authoritative_urls": authoritative_urls,
             "matched_database": matched_database,
+            "evidence_reconciliation": (verified_data or {}).get('_evidence_reconciliation'),
             "verification_basis": (verified_data or {}).get('_verification_basis'),
             "supporting_evidence": (
                 {

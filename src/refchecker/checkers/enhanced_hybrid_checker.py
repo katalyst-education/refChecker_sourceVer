@@ -27,6 +27,7 @@ Usage:
     verified_data, errors, url = checker.verify_reference(reference)
 """
 
+import json
 import logging
 import os
 import random
@@ -122,7 +123,8 @@ class EnhancedHybridReferenceChecker:
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                  cancel_event: Optional[threading.Event] = None,
                  springer_nature_api_key: Optional[str] = None,
-                 enable_springer_nature: Optional[bool] = None):
+                 enable_springer_nature: Optional[bool] = None,
+                 llm_provider: Optional[Any] = None):
         """
         Initialize the enhanced hybrid reference checker
         
@@ -151,6 +153,7 @@ class EnhancedHybridReferenceChecker:
         self.debug_mode = debug_mode
         self.progress_callback = progress_callback
         self.cancel_event = cancel_event
+        self.llm_provider = llm_provider
         
         # Initialize ArXiv Citation checker (authoritative source for ArXiv papers)
         self.arxiv_citation = None
@@ -534,6 +537,20 @@ class EnhancedHybridReferenceChecker:
             if isinstance(name, str) and name.strip():
                 authors.append(name.strip())
 
+        corporate_contributors: List[str] = []
+        raw_corporate = data.get('corporate_contributors') or []
+        if isinstance(raw_corporate, (str, dict)):
+            raw_corporate = [raw_corporate]
+        for contributor in raw_corporate if isinstance(raw_corporate, (list, tuple)) else []:
+            if isinstance(contributor, str):
+                name = contributor
+            elif isinstance(contributor, dict):
+                name = contributor.get('name') or contributor.get('display_name') or ''
+            else:
+                name = str(contributor)
+            if str(name).strip():
+                corporate_contributors.append(str(name).strip())
+
         result_url = (
             url or data.get('url') or data.get('URL') or data.get('landing_page_url')
             or data.get('landingPageUrl')
@@ -549,6 +566,7 @@ class EnhancedHybridReferenceChecker:
         return {
             'title': data.get('title') or data.get('display_name'),
             'authors': authors,
+            'corporate_contributors': corporate_contributors,
             'year': data.get('publication_year') or data.get('year'),
             'url': result_url,
             'doi': doi,
@@ -625,19 +643,546 @@ class EnhancedHybridReferenceChecker:
         def _score(result):
             data, errors, _url = result
             issues = errors or []
-            non_unverified_errors = sum(
+            non_unverified_issues = sum(
                 1
                 for issue in issues
-                if issue.get('error_type') and str(issue.get('error_type')).lower() != 'unverified'
+                if (
+                    issue.get('error_type') or issue.get('warning_type')
+                ) and self._finding_kind(issue) != 'unverified'
+            )
+            author_issues = sum(
+                1 for issue in issues if self._finding_kind(issue).startswith('author')
             )
             return (
                 0 if self._is_data_complete(data or {}, reference) else 1,
                 1 if self._has_doi_mismatch(issues) else 0,
                 1 if self._has_major_author_discrepancy(issues) else 0,
-                non_unverified_errors,
+                author_issues,
+                non_unverified_issues,
             )
 
         return candidate if _score(candidate) < _score(current) else current
+
+    @staticmethod
+    def _finding_kind(finding: Dict[str, Any]) -> str:
+        return str(
+            finding.get('error_type') or finding.get('warning_type')
+            or finding.get('info_type') or ''
+        ).lower()
+
+    @staticmethod
+    def _candidate_author_names(data: Optional[Dict[str, Any]]) -> List[str]:
+        if not isinstance(data, dict):
+            return []
+        raw = data.get('authors') or []
+        if isinstance(raw, (str, dict)):
+            raw = [raw]
+        names: List[str] = []
+        for author in raw if isinstance(raw, (list, tuple)) else []:
+            if isinstance(author, str):
+                name = author
+            elif isinstance(author, dict):
+                name = author.get('name') or author.get('display_name') or ''
+            else:
+                name = str(author)
+            if str(name).strip():
+                names.append(str(name).strip())
+        return names
+
+    @staticmethod
+    def _normalize_identifier(kind: str, value: Any) -> str:
+        text = str(value or '').strip().lower()
+        if not text:
+            return ''
+        if kind == 'doi':
+            for prefix in ('https://doi.org/', 'http://doi.org/', 'doi:'):
+                if text.startswith(prefix):
+                    text = text[len(prefix):]
+                    break
+            return text.rstrip('.,;)')
+        if kind == 'isbn':
+            return ''.join(char for char in text if char.isdigit() or char == 'x')
+        if kind == 'arxiv':
+            text = text.removeprefix('arxiv:')
+            if 'arxiv.org/' in text:
+                text = text.rsplit('/', 1)[-1]
+            import re
+            return re.sub(r'v\d+$', '', text)
+        return ''.join(char for char in text if char.isalnum())
+
+    @classmethod
+    def _candidate_identifiers(cls, data: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        if not isinstance(data, dict):
+            return {}
+        external = data.get('externalIds') or data.get('ids') or {}
+        if not isinstance(external, dict):
+            external = {}
+        values = {
+            'doi': data.get('doi') or data.get('DOI') or external.get('DOI') or external.get('doi'),
+            'isbn': data.get('isbn') or data.get('ISBN') or external.get('ISBN'),
+            'arxiv': data.get('arxiv_id') or external.get('ArXiv') or external.get('arxiv'),
+            'pmid': data.get('pmid') or external.get('PubMed') or external.get('PMID'),
+        }
+        normalized = {
+            kind: cls._normalize_identifier(kind, value)
+            for kind, value in values.items()
+        }
+        return {kind: value for kind, value in normalized.items() if value}
+
+    @staticmethod
+    def _independent_source_group(source: str) -> str:
+        source = str(source or '').lower()
+        if source in {'semantic_scholar', 'local_s2'}:
+            return 'semantic_scholar'
+        if source in {'crossref', 'local_crossref'}:
+            return 'crossref'
+        if source in {'openalex', 'local_openalex'}:
+            return 'openalex'
+        if source in {'dblp', 'local_dblp'}:
+            return 'dblp'
+        return source
+
+    def _assess_candidate_identity(
+        self,
+        reference: Dict[str, Any],
+        data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Classify whether one database candidate describes the cited work."""
+        if not isinstance(data, dict):
+            return {'status': 'uncertain', 'reason': 'candidate has no structured metadata'}
+
+        cited_ids = self._candidate_identifiers(reference)
+        candidate_ids = self._candidate_identifiers(data)
+        shared_id_kinds = set(cited_ids) & set(candidate_ids)
+        matching_ids = sorted(
+            kind for kind in shared_id_kinds if cited_ids[kind] == candidate_ids[kind]
+        )
+        conflicting_ids = sorted(
+            kind for kind in shared_id_kinds if cited_ids[kind] != candidate_ids[kind]
+        )
+
+        cited_title = self._coerce_text(reference.get('title')).strip()
+        actual_title = self._coerce_text(data.get('title') or data.get('display_name')).strip()
+        title_similarity = None
+        title_aligned = False
+        if cited_title and actual_title:
+            try:
+                from refchecker.utils.text_utils import (
+                    compare_titles_with_latex_cleaning,
+                    titles_align_with_subtitle_tolerance,
+                )
+                title_similarity = float(compare_titles_with_latex_cleaning(cited_title, actual_title))
+                title_aligned = titles_align_with_subtitle_tolerance(cited_title, actual_title)
+            except Exception:
+                title_similarity = 1.0 if cited_title.casefold() == actual_title.casefold() else 0.0
+
+        cited_authors = self._candidate_author_names(reference)
+        actual_authors = self._candidate_author_names(data)
+        has_author_overlap = None
+        if cited_authors and actual_authors:
+            try:
+                from refchecker.utils.text_utils import enhanced_name_match
+                has_author_overlap = any(
+                    enhanced_name_match(cited, actual)
+                    for cited in cited_authors
+                    for actual in actual_authors
+                )
+            except Exception:
+                has_author_overlap = None
+
+        cited_year = reference.get('year')
+        actual_year = data.get('publication_year') or data.get('year')
+        try:
+            year_gap = abs(int(cited_year) - int(actual_year)) if cited_year and actual_year else None
+        except (TypeError, ValueError):
+            year_gap = None
+
+        short_title = 0 < len(cited_title.split()) <= 3
+        strong_identifier_match = bool(matching_ids)
+        hard_identifier_conflict = any(kind in {'doi', 'arxiv', 'pmid'} for kind in conflicting_ids)
+        weak_title = title_similarity is not None and title_similarity < 0.55 and not title_aligned
+
+        status = 'same_work'
+        reason = 'title and metadata are compatible'
+        if strong_identifier_match:
+            reason = f"matching {', '.join(matching_ids)}"
+        elif hard_identifier_conflict:
+            status = 'wrong_match'
+            reason = f"conflicting authoritative {', '.join(conflicting_ids)} identifier"
+        elif conflicting_ids and weak_title:
+            status = 'wrong_match'
+            reason = f"conflicting {', '.join(conflicting_ids)} and weak title agreement"
+        elif weak_title:
+            status = 'wrong_match'
+            reason = f"title similarity is only {title_similarity:.2f}"
+        elif short_title and has_author_overlap is False:
+            status = 'wrong_match'
+            reason = 'generic title with no personal-author overlap'
+        elif year_gap is not None and year_gap >= 5 and has_author_overlap is False:
+            status = 'wrong_match'
+            reason = f'{year_gap}-year gap with no personal-author overlap'
+        elif conflicting_ids:
+            status = 'same_work_different_version'
+            reason = f"compatible metadata but different {', '.join(conflicting_ids)}"
+        elif not strong_identifier_match and title_similarity is None:
+            status = 'uncertain'
+            reason = 'insufficient title or identifier evidence'
+
+        return {
+            'status': status,
+            'reason': reason,
+            'title_similarity': round(title_similarity, 3) if title_similarity is not None else None,
+            'matching_identifiers': matching_ids,
+            'conflicting_identifiers': conflicting_ids,
+            'author_overlap': has_author_overlap,
+            'year_gap': year_gap,
+        }
+
+    def _database_evidence(
+        self,
+        source: str,
+        result: Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]],
+    ) -> Dict[str, Any]:
+        data, findings, url = result
+        return {
+            'source': source,
+            'label': (
+                data.get('_matched_database') if isinstance(data, dict) else None
+            ) or self._format_api_name(source),
+            'data': data,
+            'findings': list(findings or []),
+            'url': url,
+        }
+
+    @staticmethod
+    def _authors_support_citation(cited_authors: List[str], actual_authors: List[str]) -> bool:
+        """Require every explicitly cited person to occur in the candidate.
+
+        ``compare_authors`` intentionally accepts some shortened catalogue
+        lists. That is useful for ordinary mismatch reporting, but too lenient
+        for treating a source as affirmative consensus evidence.
+        """
+        if not cited_authors or not actual_authors:
+            return False
+        import re
+        from refchecker.utils.text_utils import enhanced_name_match
+
+        explicit = [
+            name for name in cited_authors
+            if not re.fullmatch(r'\s*(?:et\.?\s*al\.?|and others?)\s*', str(name), re.I)
+        ]
+        return bool(explicit) and all(
+            any(enhanced_name_match(cited, actual) for actual in actual_authors)
+            for cited in explicit
+        )
+
+    def _llm_adjudicate_evidence(
+        self,
+        reference: Dict[str, Any],
+        evidence: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Ask the configured LLM only about unresolved, same-work evidence."""
+        provider = getattr(self, 'llm_provider', None)
+        if provider is None:
+            return None
+        try:
+            if hasattr(provider, 'is_available') and not provider.is_available():
+                return None
+            payload = {
+                'citation': {
+                    'title': reference.get('title'),
+                    'authors': reference.get('authors'),
+                    'year': reference.get('year'),
+                    'doi': reference.get('doi'),
+                    'isbn': reference.get('isbn'),
+                },
+                'same_work_candidates': [
+                    {
+                        'source': item['source'],
+                        'title': (item['data'] or {}).get('title'),
+                        'authors': self._candidate_author_names(item['data']),
+                        'corporate_contributors': (item['data'] or {}).get('corporate_contributors') or [],
+                        'year': (item['data'] or {}).get('publication_year') or (item['data'] or {}).get('year'),
+                        'findings': item['findings'],
+                        'identity': item['identity'],
+                    }
+                    for item in evidence
+                ],
+            }
+            prompt = (
+                'Resolve an academic catalogue metadata conflict. All candidates below have already '
+                'passed deterministic same-work identity checks. Do not merge different works and do '
+                'not override identifier conflicts. Decide whether the cited personal authors are '
+                'supported, whether database authors should be used, or whether the evidence is unresolved. '
+                'Corporate contributors must not replace personal authors unless explicitly identified as '
+                'the primary corporate author. Return JSON only with keys decision, confidence, '
+                'supporting_sources, explanation. decision must be accept_cited_authors, '
+                'use_database_authors, metadata_conflict, or unresolved.\n\n'
+                + json.dumps(payload, ensure_ascii=False, default=str)
+            )
+            response = provider._call_llm(prompt)
+            text = str(response or '').strip()
+            if text.startswith('```'):
+                text = text.strip('`').removeprefix('json').strip()
+            decision = json.loads(text)
+            if decision.get('decision') not in {
+                'accept_cited_authors', 'use_database_authors',
+                'metadata_conflict', 'unresolved',
+            }:
+                return None
+            decision['confidence'] = max(0.0, min(1.0, float(decision.get('confidence') or 0.0)))
+            return decision
+        except Exception as exc:
+            logger.debug('LLM metadata adjudication failed: %s', exc)
+            return None
+
+    def _reconcile_year_evidence(
+        self,
+        reference: Dict[str, Any],
+        accepted: List[Dict[str, Any]],
+        selected_data: Dict[str, Any],
+        findings: List[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """Rebuild the year verdict from every accepted same-work record."""
+        import re
+
+        def year_value(value: Any) -> Optional[int]:
+            if isinstance(value, bool) or value is None:
+                return None
+            match = re.search(r'\b(1\d{3}|2\d{3})\b', str(value))
+            return int(match.group(1)) if match else None
+
+        cited_year = year_value(reference.get('year'))
+        if not cited_year:
+            return selected_data, findings
+
+        evidence: List[Dict[str, Any]] = []
+        independent_groups = set()
+        for item in accepted:
+            candidate = item.get('data') or {}
+            actual_year = year_value(
+                candidate.get('publication_year') or candidate.get('year')
+                or candidate.get('publicationDate') or candidate.get('publication_date')
+            )
+            if actual_year:
+                evidence.append({'source': item['label'], 'year': actual_year})
+                independent_groups.add(self._independent_source_group(item['source']))
+        evidence = list({(item['source'], item['year']): item for item in evidence}.values())
+        if not evidence:
+            return selected_data, findings
+
+        def is_year_finding(item: Dict[str, Any]) -> bool:
+            return self._finding_kind(item) in {'year', 'publication_year', 'publication_year_discrepancy'}
+
+        previous_year_findings = [item for item in findings if is_year_finding(item)]
+        reconciled = [item for item in findings if not is_year_finding(item)]
+        years = {item['year'] for item in evidence}
+        classification = None
+
+        if cited_year in years:
+            if len(years) > 1:
+                classification = 'metadata_discrepancy'
+                reconciled.append({
+                    'info_type': 'publication_year_discrepancy',
+                    'info_details': 'Publication dates differ across databases',
+                    'cited_value': str(cited_year),
+                    'source_years': evidence,
+                    'metadata_classification': classification,
+                })
+            else:
+                classification = 'verified'
+        elif len(independent_groups) >= 2 and len(years) == 1:
+            classification = 'likely_citation_error'
+            actual_year = next(iter(years))
+            reconciled.append({
+                'warning_type': 'year',
+                'warning_details': 'Likely citation error',
+                'cited_value': str(cited_year),
+                'actual_value': str(actual_year),
+                'ref_year_correct': str(actual_year),
+                'source_years': evidence,
+                'metadata_classification': classification,
+            })
+        else:
+            # One disagreeing source, or mutually inconsistent actual years,
+            # cannot establish a replacement year. Preserve the selected
+            # checker's conservative finding if it supplied one.
+            return selected_data, reconciled + previous_year_findings
+
+        selected_data['_publication_year_sources'] = evidence
+        selected_data['_publication_year_assessment'] = {
+            'classification': classification,
+            'cited_year': cited_year,
+            'sources': evidence,
+        }
+        return selected_data, reconciled
+
+    def _reconcile_database_evidence(
+        self,
+        reference: Dict[str, Any],
+        evidence: List[Dict[str, Any]],
+    ) -> Optional[Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]]:
+        """Identity-gate database matches, then reconcile their author evidence."""
+        if not evidence:
+            return None
+
+        accepted: List[Dict[str, Any]] = []
+        excluded: List[Dict[str, Any]] = []
+        for item in evidence:
+            item = dict(item)
+            item['identity'] = self._assess_candidate_identity(reference, item.get('data'))
+            if item['identity']['status'] == 'wrong_match':
+                excluded.append(item)
+                self._emit_database_event(
+                    database=item['source'], label=item['label'],
+                    status='excluded_wrong_match',
+                    reason=item['identity']['reason'], identity=item['identity'],
+                    candidate=self._database_trace_summary(item.get('data'), item.get('url')),
+                )
+            else:
+                accepted.append(item)
+
+        if not accepted:
+            reasons = '; '.join(
+                f"{item['label']}: {item['identity']['reason']}" for item in excluded
+            )
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': f'All database candidates were excluded as likely wrong matches: {reasons}',
+                'metadata_classification': 'all_candidates_wrong_match',
+            }], None
+
+        cited_authors = self._candidate_author_names(reference)
+        confirming: List[Dict[str, Any]] = []
+        conflicting: List[Dict[str, Any]] = []
+        if cited_authors:
+            for item in accepted:
+                actual_authors = self._candidate_author_names(item.get('data'))
+                if not actual_authors:
+                    continue
+                matches = self._authors_support_citation(cited_authors, actual_authors)
+                (confirming if matches else conflicting).append(item)
+
+        source_priority = {
+            'crossref': 0, 'semantic_scholar': 1, 'openalex': 2,
+            'dnb': 3, 'tib': 4, 'open_library': 5, 'econbiz': 6,
+            'dblp': 7, 'acl_anthology': 8, 'openreview': 9,
+        }
+
+        def rank(item: Dict[str, Any]) -> Tuple[Any, ...]:
+            findings = item.get('findings') or []
+            author_issues = sum(1 for finding in findings if self._finding_kind(finding).startswith('author'))
+            hard_issues = sum(1 for finding in findings if finding.get('error_type'))
+            warning_issues = sum(1 for finding in findings if finding.get('warning_type'))
+            data = item.get('data') or {}
+            missing = sum(not data.get(field) for field in ('title', 'authors', 'year'))
+            identity_rank = {
+                'same_work': 0, 'same_work_different_version': 1, 'uncertain': 2,
+            }.get(item['identity']['status'], 3)
+            return (
+                identity_rank, author_issues, hard_issues, warning_issues, missing,
+                source_priority.get(item['source'], 50),
+            )
+
+        confirming_groups = {
+            self._independent_source_group(item['source']) for item in confirming
+        }
+        decisive_consensus = len(confirming_groups) >= 2
+        llm_decision = None
+        if confirming and conflicting and not decisive_consensus:
+            llm_decision = self._llm_adjudicate_evidence(reference, accepted)
+            decisive_consensus = bool(
+                llm_decision
+                and llm_decision.get('decision') == 'accept_cited_authors'
+                and llm_decision.get('confidence', 0.0) >= 0.8
+            )
+
+        selection_pool = confirming if (confirming and decisive_consensus) else accepted
+        selected = min(selection_pool, key=rank)
+        data = dict(selected.get('data') or {})
+        findings = list(selected.get('findings') or [])
+
+        if decisive_consensus:
+            findings = [
+                finding for finding in findings
+                if not self._finding_kind(finding).startswith('author')
+            ]
+            for item in confirming:
+                self._emit_database_event(
+                    database=item['source'], label=item['label'],
+                    status='confirmed_same_work', identity=item['identity'],
+                    candidate=self._database_trace_summary(item.get('data'), item.get('url')),
+                )
+
+        data, findings = self._reconcile_year_evidence(
+            reference, accepted, data, findings,
+        )
+
+        conflict_labels = list(dict.fromkeys(item['label'] for item in conflicting))
+        support_labels = list(dict.fromkeys(item['label'] for item in confirming))
+        if conflicting and confirming:
+            conflict_descriptions = []
+            for item in conflicting:
+                candidate_summary = self._database_trace_summary(
+                    item.get('data'), item.get('url')
+                )
+                corporations = candidate_summary.get('corporate_contributors') or []
+                suffix = (
+                    f" (corporate contributor: {', '.join(corporations)})"
+                    if corporations else ''
+                )
+                conflict_descriptions.append(f"{item['label']}{suffix}")
+                reason = 'The database author list does not contain every cited personal author.'
+                if corporations:
+                    reason += ' Its corporate contributor is kept separate from personal authors.'
+                self._emit_database_event(
+                    database=item['source'], label=item['label'],
+                    status='metadata_conflict', reason=reason,
+                    identity=item['identity'], candidate=candidate_summary,
+                )
+            details = (
+                f"Author metadata conflict: {', '.join(support_labels)} confirm the cited personal "
+                f"authors; {', '.join(dict.fromkeys(conflict_descriptions))} provide different or "
+                "incomplete contributor metadata."
+            )
+            if decisive_consensus:
+                findings.append({
+                    'info_type': 'metadata_conflict',
+                    'info_details': details,
+                    'metadata_classification': 'catalogue_author_conflict_resolved',
+                })
+            else:
+                findings.append({
+                    'warning_type': 'metadata_conflict',
+                    'warning_details': details,
+                    'metadata_classification': 'catalogue_author_conflict_unresolved',
+                })
+
+        trace = {
+            'decision': (
+                'accept_cited_authors' if decisive_consensus
+                else llm_decision.get('decision') if llm_decision
+                else 'best_supported_candidate'
+            ),
+            'confidence': (
+                llm_decision.get('confidence') if llm_decision
+                else 0.95 if decisive_consensus else 0.6
+            ),
+            'selected_source': selected['label'],
+            'supporting_sources': support_labels,
+            'conflicting_sources': conflict_labels,
+            'excluded_sources': [
+                {'source': item['label'], 'reason': item['identity']['reason']}
+                for item in excluded
+            ],
+            'llm_used': bool(llm_decision),
+            'llm_explanation': llm_decision.get('explanation') if llm_decision else None,
+        }
+        data['_evidence_reconciliation'] = trace
+        if support_labels:
+            data['_verified_by'] = support_labels
+        logger.info('[DATABASE_TRACE] stage=evidence_reconciled decision=%r', trace)
+        return data, findings, selected.get('url')
 
     def _format_failure_detail(self, api_name: str, failure_type: str,
                                detail: Optional[str] = None) -> str:
@@ -789,6 +1334,7 @@ class EnhancedHybridReferenceChecker:
                 # authoritative and any year/author mismatch is a real
                 # error we want to surface, not a wrong-paper drift.
                 if self._is_wrong_paper_match(reference, verified_data, errors, api_name):
+                    identity = self._assess_candidate_identity(reference, verified_data)
                     logger.info(
                         "[DATABASE_TRACE] stage=result database=%s status=rejected_wrong_paper "
                         "duration_ms=%d candidate=%r errors=%r",
@@ -805,6 +1351,8 @@ class EnhancedHybridReferenceChecker:
                         database=api_name, label=self._format_api_name(api_name),
                         status='rejected_wrong_paper', attempt=2 if is_retry else 1,
                         duration_ms=round(duration * 1000),
+                        reason=identity.get('reason') or 'year and author metadata identify a different work',
+                        identity=identity,
                         candidate=self._database_trace_summary(verified_data, url),
                     )
                     return None, [], None, False, 'not_found', ''
@@ -1508,6 +2056,7 @@ class EnhancedHybridReferenceChecker:
         attempted_apis,
         skip_ss: bool = False,
         force_all_databases: bool = False,
+        seed_evidence: Optional[List[Dict[str, Any]]] = None,
     ):
         """Query the general-purpose remote metadata sources in parallel.
         
@@ -1521,6 +2070,7 @@ class EnhancedHybridReferenceChecker:
         last_openalex_result = None
         last_doi_mismatch_result = None
         best_result = None
+        successful_evidence = list(seed_evidence or [])
         doi_first = self._should_try_doi_apis_first(reference)
 
         # A cited DOI is more authoritative than a title match.  Ask CrossRef
@@ -1533,6 +2083,7 @@ class EnhancedHybridReferenceChecker:
             )
             if success:
                 result = (verified_data, errors, url)
+                successful_evidence.append(self._database_evidence('crossref', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
                 if (
                     not force_all_databases
@@ -1638,9 +2189,8 @@ class EnhancedHybridReferenceChecker:
                     })
                 if success:
                     result = (verified_data, errors, url)
+                    successful_evidence.append(self._database_evidence(api_name, result))
                     best_result = self._pick_preferred_result(best_result, result, reference)
-                    if (not force_all_databases) and self._is_data_complete(verified_data, reference):
-                        return (verified_data, errors, url), {}
                     if api_name == 'crossref':
                         last_crossref_result = result
                     elif api_name == 'openalex':
@@ -1648,8 +2198,21 @@ class EnhancedHybridReferenceChecker:
                     if doi_first and self._has_doi_mismatch(errors):
                         last_doi_mismatch_result = last_doi_mismatch_result or result
 
+        # All catalogues above have already run concurrently. Reconcile their
+        # responses before returning so a fast but incomplete authority record
+        # cannot overrule two clean, independent records for the same work.
+        if successful_evidence and not force_all_databases:
+            reconciled = self._reconcile_database_evidence(reference, successful_evidence)
+            if (
+                reconciled is not None
+                and reconciled[0] is not None
+                and self._is_data_complete(reconciled[0], reference)
+            ):
+                return reconciled, {}
+
         arxiv_title_result = self._try_arxiv_title_search(reference, attempted_apis)
         if arxiv_title_result is not None:
+            successful_evidence.append(self._database_evidence('arxiv_citation', arxiv_title_result))
             best_result = self._pick_preferred_result(best_result, arxiv_title_result, reference)
             if not force_all_databases:
                 return arxiv_title_result, {}
@@ -1661,6 +2224,7 @@ class EnhancedHybridReferenceChecker:
                 verified_data, errors, url, success, failure_type, failure_detail = self._try_api('openreview', self.openreview, reference)
                 if success:
                     result = (verified_data, errors, url)
+                    successful_evidence.append(self._database_evidence('openreview', result))
                     best_result = self._pick_preferred_result(best_result, result, reference)
                     if not force_all_databases:
                         return result, {}
@@ -1685,6 +2249,7 @@ class EnhancedHybridReferenceChecker:
                     verified_data, errors, url, success, failure_type, failure_detail = self._try_openreview_search(reference)
                     if success:
                         result = (verified_data, errors, url)
+                        successful_evidence.append(self._database_evidence('openreview', result))
                         best_result = self._pick_preferred_result(best_result, result, reference)
                         if not force_all_databases:
                             return result, {}
@@ -1718,6 +2283,7 @@ class EnhancedHybridReferenceChecker:
                     reference.get('title', ''),
                 )
                 result = (verified_data, errors, url)
+                successful_evidence.append(self._database_evidence('springer_nature', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
                 if not force_all_databases and self._is_data_complete(verified_data, reference):
                     return result, {}
@@ -1779,6 +2345,7 @@ class EnhancedHybridReferenceChecker:
                     reference.get('title', ''),
                 )
                 result = (verified_data, errors, url)
+                successful_evidence.append(self._database_evidence('google_books', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
                 if not force_all_databases and self._is_data_complete(verified_data, reference):
                     return result, {}
@@ -1820,8 +2387,10 @@ class EnhancedHybridReferenceChecker:
             # final fallback can still verify the reference after every source
             # has had a chance to provide a more complete record.
             incomplete['best'] = best_result
-        if force_all_databases and best_result is not None:
-            return best_result, {}
+        if force_all_databases and successful_evidence:
+            reconciled = self._reconcile_database_evidence(reference, successful_evidence)
+            if reconciled is not None:
+                return reconciled, {}
         return None, incomplete
 
     def _try_arxiv_title_search(self, reference, attempted_apis):
@@ -2290,7 +2859,8 @@ class EnhancedHybridReferenceChecker:
         Doesn't raise; any source that errors out is silently skipped.
         """
         primary = verified_data.get('_matched_database') or verified_data.get('_matched_checker') or 'verified'
-        confirmations = [primary]
+        confirmations = list(verified_data.get('_verified_by') or [])
+        confirmations.insert(0, primary)
 
         # Canonical DOI for cross-source lookup: prefer the primary
         # verifier's DOI, fall back to the cited DOI.
@@ -2387,6 +2957,7 @@ class EnhancedHybridReferenceChecker:
         incomplete_data = None
         local_doi_mismatch_result = None
         forced_best_result = None
+        forced_evidence: List[Dict[str, Any]] = []
         is_arxiv = self.arxiv_citation and self.arxiv_citation.is_arxiv_reference(reference)
         
         # ── PHASE 1: Parallel API calls ──
@@ -2438,6 +3009,9 @@ class EnhancedHybridReferenceChecker:
                     reference,
                 )
                 if success:
+                    local_result = (verified_data, errors, url)
+                    if force_all_databases:
+                        forced_evidence.append(self._database_evidence(local_key, local_result))
                     # A title match may identify the right work but expose only
                     # its arXiv DOI.  Keep searching configured local databases
                     # and DOI-aware remote sources for the DOI that was actually
@@ -2456,14 +3030,14 @@ class EnhancedHybridReferenceChecker:
                         if force_all_databases:
                             forced_best_result = self._pick_preferred_result(
                                 forced_best_result,
-                                (verified_data, errors, url),
+                                local_result,
                                 reference,
                             )
                         continue
                     if force_all_databases:
                         forced_best_result = self._pick_preferred_result(
                             forced_best_result,
-                            (verified_data, errors, url),
+                            local_result,
                             reference,
                         )
                         continue
@@ -2490,14 +3064,13 @@ class EnhancedHybridReferenceChecker:
                 # based on local-DB miss heuristics.
                 skip_ss=(db_not_found and not force_all_databases),
                 force_all_databases=force_all_databases,
+                seed_evidence=forced_evidence,
             )
             if result is not None:
                 if force_all_databases:
-                    forced_best_result = self._pick_preferred_result(
-                        forced_best_result,
-                        result,
-                        reference,
-                    )
+                    # Search-all has already identity-gated and reconciled the
+                    # local and remote evidence as one set.
+                    return result
                 else:
                     return result
             if force_all_databases and forced_best_result is not None:

@@ -19,13 +19,17 @@ describe('reference search operation state', () => {
       reference_key: 'id:ref-1', status: 'queued' })
     store.handleMessage({ type: 'reference_search_source', operation_id: 'op-1',
       check_id: 17, reference_key: 'id:ref-1', sequence: 4,
-      database: 'crossref', label: 'CrossRef', status: 'matched' })
+      database: 'crossref', label: 'CrossRef', status: 'excluded_wrong_match',
+      reason: 'title similarity is only 0.21',
+      identity: { status: 'wrong_match', title_similarity: 0.21 } })
     store.handleMessage({ type: 'reference_search_source', operation_id: 'op-1',
       check_id: 17, reference_key: 'id:ref-1', sequence: 3,
       database: 'crossref', label: 'CrossRef', status: 'failed' })
 
     const operation = useReferenceSearchStore.getState().getForReference(17, 'id:ref-1')
-    expect(operation.sources.crossref.status).toBe('matched')
+    expect(operation.sources.crossref.status).toBe('excluded_wrong_match')
+    expect(operation.sources.crossref.reason).toBe('title similarity is only 0.21')
+    expect(operation.sources.crossref.identity.status).toBe('wrong_match')
     expect(operation.sequence).toBe(4)
   })
 

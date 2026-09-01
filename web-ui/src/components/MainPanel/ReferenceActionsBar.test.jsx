@@ -45,6 +45,34 @@ describe('ReferenceRowActions progress feedback', () => {
     )
     expect(screen.getByRole('button', { name: 'Searching all DBs…' })).toBeDisabled()
   })
+
+  it('animates while database sources are still pending', () => {
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        searchOperation={{
+          status: 'running',
+          configured_sources: [
+            { database: 'crossref', label: 'CrossRef' },
+            { database: 'openalex', label: 'OpenAlex' },
+          ],
+          sources: {
+            crossref: { database: 'crossref', label: 'CrossRef', status: 'searching' },
+          },
+        }}
+      />,
+    )
+
+    const progress = screen.getByRole('status', { name: 'Database search in progress' })
+    expect(progress).toHaveTextContent('Searching databases')
+    expect(progress.querySelector('svg')).toHaveClass('motion-safe:animate-spin')
+
+    fireEvent.click(screen.getByText('Database results (2)'))
+    expect(screen.getByText('Searching').closest('span').querySelector('svg'))
+      .toHaveClass('motion-safe:animate-spin')
+    expect(screen.getByText('Waiting').closest('span')).toHaveClass('motion-safe:animate-pulse')
+  })
+
   it('shows a collapsible result row for every configured database', () => {
     render(
       <ReferenceRowActions
@@ -59,28 +87,41 @@ describe('ReferenceRowActions progress feedback', () => {
           ],
           sources: {
             crossref: {
-              database: 'crossref', label: 'CrossRef', status: 'matched',
+              database: 'crossref', label: 'CrossRef', status: 'confirmed_same_work',
               candidate: {
                 title: 'A database title', authors: ['Ada Lovelace', 'Grace Hopper'],
+                corporate_contributors: ['Example Research Institute'],
                 year: 2024, url: 'https://doi.org/10.1000/example',
               },
             },
-            openalex: { database: 'openalex', label: 'OpenAlex', status: 'no_match' },
+            openalex: {
+              database: 'openalex', label: 'OpenAlex', status: 'excluded_wrong_match',
+              reason: 'title similarity is only 0.31',
+            },
+            dnb: {
+              database: 'dnb', label: 'DNB Catalogue', status: 'metadata_conflict',
+              reason: 'The database author list does not contain every cited personal author.',
+            },
           },
         }}
       />,
     )
 
-    expect(screen.getByText('Database results (3)')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Database results (3)'))
+    expect(screen.getByText('Database results (4)')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Database results (4)'))
     expect(screen.getByText('CrossRef')).toBeInTheDocument()
     expect(screen.getByText('OpenAlex')).toBeInTheDocument()
     expect(screen.getByText('Semantic Scholar')).toBeInTheDocument()
+    expect(screen.getByText('DNB Catalogue')).toBeInTheDocument()
     expect(screen.getByText('A database title')).toBeInTheDocument()
     expect(screen.getByText('Ada Lovelace, Grace Hopper · 2024')).toBeInTheDocument()
+    expect(screen.getByText('Corporate contributor: Example Research Institute')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open database result ↗' }))
       .toHaveAttribute('href', 'https://doi.org/10.1000/example')
-    expect(screen.getByText('No match')).toBeInTheDocument()
+    expect(screen.getByText('Confirmed')).toBeInTheDocument()
+    expect(screen.getByText('Excluded: likely wrong match')).toBeInTheDocument()
+    expect(screen.getByText('Metadata conflict')).toBeInTheDocument()
+    expect(screen.getByText('title similarity is only 0.31')).toBeInTheDocument()
     expect(screen.getByText('Not searched')).toBeInTheDocument()
   })
 })

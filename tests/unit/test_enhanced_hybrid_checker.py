@@ -71,6 +71,7 @@ def test_database_candidate_summary_includes_display_metadata_and_result_url():
     assert summary == {
         'title': 'Matched work',
         'authors': ['Ada Lovelace', 'Grace Hopper'],
+        'corporate_contributors': [],
         'year': 2024,
         'url': 'https://example.org/result',
         'doi': '10.1000/example',
@@ -488,6 +489,192 @@ def test_tib_is_selected_after_dnb_in_remote_priority():
     assert url == "https://example/dnb"
     assert verified_data["_matched_checker"] == "dnb"
     assert verified_data["_matched_database"] == "DNB Catalogue"
+
+
+class CatalogueCandidateChecker:
+    def __init__(self, label, data, findings=None, url=None):
+        self.database_label = label
+        self.data = data
+        self.findings = findings or []
+        self.url = url or f"https://example.org/{label.lower().replace(' ', '-')}"
+
+    def verify_reference(self, reference):
+        return dict(self.data), list(self.findings), self.url
+
+
+def _catalogue_reconciliation_checker(events=None):
+    checker = _build_checker()
+    checker.local_db = None
+    checker.local_db_checkers = []
+    for name in (
+        'semantic_scholar', 'crossref', 'openalex', 'econbiz', 'zdb', 'dblp',
+        'acl_anthology', 'paperclip', 'openreview', 'springer_nature',
+        'google_books', 'arxiv_citation',
+    ):
+        setattr(checker, name, None)
+    checker.progress_callback = events.append if events is not None else None
+    return checker
+
+
+def test_catalogue_consensus_resolves_lay_nippa_corporate_author_conflict():
+    events = []
+    checker = _catalogue_reconciliation_checker(events)
+    title = 'Management produktbegleitender Dienstleistungen'
+    checker.dnb = CatalogueCandidateChecker(
+        'DNB Catalogue',
+        {
+            'title': title,
+            'authors': [{'name': 'Lay, Gunter'}],
+            'corporate_contributors': [{
+                'name': 'Fraunhofer-Institut für Systemtechnik und Innovationsforschung',
+                'kind': 'organization',
+                'marc_tag': '710',
+            }],
+            'year': 2005,
+        },
+        [{
+            'warning_type': 'author',
+            'warning_details': 'Author 2 mismatch: Michael Nippa vs Fraunhofer-Institut',
+        }],
+    )
+    checker.tib = CatalogueCandidateChecker('TIB Catalogue', {
+        'title': title,
+        'authors': [{'name': 'Lay, Gunter'}, {'name': 'Nippa, Michael'}],
+        'year': 2005,
+    })
+    checker.open_library = CatalogueCandidateChecker('Open Library', {
+        'title': title,
+        'authors': [{'name': 'Gunter Lay'}, {'name': 'Michael Nippa'}],
+        'year': 2005,
+    })
+
+    data, findings, _ = checker._verify_reference_core({
+        'title': title,
+        'authors': ['Gunter Lay', 'Michael Nippa'],
+        'year': 2005,
+    }, force_all_databases=True)
+
+    assert data['_matched_database'] == 'TIB Catalogue'
+    assert data['_evidence_reconciliation']['decision'] == 'accept_cited_authors'
+    assert set(data['_evidence_reconciliation']['supporting_sources']) == {
+        'TIB Catalogue', 'Open Library',
+    }
+    assert not any(checker._finding_kind(item).startswith('author') for item in findings)
+    assert any(
+        item.get('info_type') == 'metadata_conflict'
+        and 'Fraunhofer-Institut' in item.get('info_details', '')
+        for item in findings
+    )
+    dnb_event = next(
+        event for event in events
+        if event.get('database') == 'dnb' and event.get('status') == 'metadata_conflict'
+    )
+    assert dnb_event['status'] == 'metadata_conflict'
+    assert 'corporate contributor' in dnb_event['reason']
+
+
+def test_search_all_preserves_year_warning_when_two_sources_agree_on_actual_year():
+    checker = _catalogue_reconciliation_checker()
+    title = 'Der Referenzmodellkatalog – Ein Instrument des Wissensmanagements'
+    checker.semantic_scholar = CatalogueCandidateChecker('Semantic Scholar', {
+        'title': title,
+        'authors': [{'name': 'Peter Fettke'}, {'name': 'P. Loos'}],
+        'year': 2001,
+    }, [{
+        'warning_type': 'author',
+        'warning_details': 'Abbreviated author metadata',
+    }])
+    checker.dnb = CatalogueCandidateChecker('DNB Catalogue', {
+        'title': title,
+        'authors': [{'name': 'Fettke, Peter'}, {'name': 'Loos, Peter'}],
+        'year': 2001,
+    })
+    checker.tib = None
+    checker.open_library = None
+
+    data, findings, _ = checker.verify_reference({
+        'title': title,
+        'authors': ['Peter Fettke', 'Peter Loos'],
+        'year': 2002,
+    }, force_all_databases=True)
+
+    assert data['_matched_database'] == 'DNB Catalogue'
+    year_warning = next(item for item in findings if item.get('warning_type') == 'year')
+    assert year_warning['cited_value'] == '2002'
+    assert year_warning['actual_value'] == '2001'
+    assert {item['source'] for item in year_warning['source_years']} == {
+        'Semantic Scholar', 'DNB Catalogue',
+    }
+    assert data['_publication_year_assessment']['classification'] == 'likely_citation_error'
+
+
+def test_wrong_database_match_is_rejected_before_metadata_reconciliation():
+    events = []
+    checker = _catalogue_reconciliation_checker(events)
+    checker.dnb = CatalogueCandidateChecker('DNB Catalogue', {
+        'title': 'A completely different industrial economics book',
+        'authors': [{'name': 'Another Person'}],
+        'year': 2005,
+    })
+    checker.tib = CatalogueCandidateChecker('TIB Catalogue', {
+        'title': 'Management produktbegleitender Dienstleistungen',
+        'authors': [{'name': 'Gunter Lay'}, {'name': 'Michael Nippa'}],
+        'year': 2005,
+    })
+    checker.open_library = None
+
+    data, findings, _ = checker._verify_reference_core({
+        'title': 'Management produktbegleitender Dienstleistungen',
+        'authors': ['Gunter Lay', 'Michael Nippa'],
+        'year': 2005,
+    }, force_all_databases=True)
+
+    assert data['_matched_database'] == 'TIB Catalogue'
+    assert findings == []
+    excluded = [event for event in events if event.get('status') == 'rejected_wrong_paper']
+    assert len(excluded) == 1
+    assert excluded[0]['database'] == 'dnb'
+    assert 'title similarity' in excluded[0]['reason']
+
+
+def test_llm_only_adjudicates_unresolved_candidates_that_pass_identity_gate():
+    class RecordingProvider:
+        def __init__(self):
+            self.prompt = ''
+
+        def _call_llm(self, prompt):
+            self.prompt = prompt
+            return ('{"decision":"accept_cited_authors","confidence":0.91,'
+                    '"supporting_sources":["TIB Catalogue"],"explanation":"Supported"}')
+
+    events = []
+    checker = _catalogue_reconciliation_checker(events)
+    provider = RecordingProvider()
+    checker.llm_provider = provider
+    reference = {
+        'title': 'A well identified work with a sufficiently specific title',
+        'authors': ['Ada Author', 'Bob Writer'],
+        'year': 2024,
+    }
+    evidence = [
+        checker._database_evidence('tib', ({
+            'title': reference['title'], 'authors': reference['authors'], 'year': 2024,
+        }, [], 'https://example.org/tib')),
+        checker._database_evidence('dnb', ({
+            'title': reference['title'], 'authors': ['Ada Author'], 'year': 2024,
+        }, [{'warning_type': 'author', 'warning_details': 'Second author missing'}], 'https://example.org/dnb')),
+        checker._database_evidence('open_library', ({
+            'title': 'A different work', 'authors': ['Wrong Person'], 'year': 1990,
+        }, [], 'https://example.org/wrong')),
+    ]
+
+    data, findings, _ = checker._reconcile_database_evidence(reference, evidence)
+
+    assert data['_evidence_reconciliation']['llm_used'] is True
+    assert data['_evidence_reconciliation']['decision'] == 'accept_cited_authors'
+    assert 'A different work' not in provider.prompt
+    assert not any(checker._finding_kind(item).startswith('author') for item in findings)
+    assert any(event.get('status') == 'excluded_wrong_match' for event in events)
 
 
 def test_econbiz_fulltext_evidence_is_verified(caplog):

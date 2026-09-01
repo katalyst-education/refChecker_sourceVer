@@ -498,6 +498,8 @@ class ArxivReferenceChecker:
             self.config = {}
         self.llm_config_override = llm_config
         self.llm_extractor = self._initialize_llm_extractor()
+        if self.llm_extractor and self.llm_extractor.llm_provider:
+            self.non_arxiv_checker.llm_provider = self.llm_extractor.llm_provider
         
         # if we were supposed to create an llm extractor but failed, we should not continue
         if self.llm_enabled and not self.llm_extractor:

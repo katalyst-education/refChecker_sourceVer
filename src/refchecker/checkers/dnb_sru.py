@@ -174,6 +174,46 @@ class DnbSruReferenceChecker:
         return values
 
     @classmethod
+    def _contributors(cls, record: ElementTree.Element) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+        """Return personal creators and corporate contributors separately.
+
+        MARC 100/700 fields name people, while 110/111/710/711 name
+        organisations or meetings.  Treating all six fields as a positional
+        author list lets an issuing body replace a real second author.  Keep
+        role subfields so later reconciliation can explain the distinction.
+        """
+        people: List[Dict[str, str]] = []
+        organisations: List[Dict[str, str]] = []
+        seen = set()
+        for tag, kind in (
+            ("100", "person"), ("700", "person"),
+            ("110", "organization"), ("710", "organization"),
+            ("111", "meeting"), ("711", "meeting"),
+        ):
+            for field in record.findall(f"{{{_MARC_NS}}}datafield[@tag='{tag}']"):
+                names = [
+                    (subfield.text or "").strip(" ,")
+                    for subfield in field.findall(f"{{{_MARC_NS}}}subfield[@code='a']")
+                    if (subfield.text or "").strip(" ,")
+                ]
+                roles = [
+                    (subfield.text or "").strip(" ,")
+                    for code in ("e", "4")
+                    for subfield in field.findall(f"{{{_MARC_NS}}}subfield[@code='{code}']")
+                    if (subfield.text or "").strip(" ,")
+                ]
+                for name in names:
+                    key = (kind, name.casefold(), tuple(role.casefold() for role in roles))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    contributor = {"name": name, "kind": kind, "marc_tag": tag}
+                    if roles:
+                        contributor["role"] = "; ".join(roles)
+                    (people if kind == "person" else organisations).append(contributor)
+        return people, organisations
+
+    @classmethod
     def _parse_record(cls, record: ElementTree.Element) -> Dict[str, Any]:
         control = {
             field.get("tag"): (field.text or "").strip()
@@ -185,10 +225,7 @@ class DnbSruReferenceChecker:
         if subtitle and subtitle.casefold() not in title_main.casefold():
             title = f"{title_main}: {subtitle}".strip(": ")
 
-        author_values: List[str] = []
-        for tag in ("100", "110", "111", "700", "710", "711"):
-            author_values.extend(cls._subfields(record, tag, "a"))
-        authors = [{"name": value.rstrip(" ,")} for value in dict.fromkeys(author_values)]
+        authors, corporate_contributors = cls._contributors(record)
 
         publication_text = " ".join(
             cls._subfields(record, "264", "c")
@@ -216,6 +253,7 @@ class DnbSruReferenceChecker:
             "title": title,
             "subtitle": subtitle or None,
             "authors": authors,
+            "corporate_contributors": corporate_contributors,
             "publication_year": year,
             "year": year,
             "publisher": _first(

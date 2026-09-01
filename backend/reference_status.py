@@ -39,7 +39,9 @@ def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
         # citation remains verified and the UI renders the source comparison in
         # its dedicated info section. Other legacy info entries retain the
         # existing suggestion behavior.
-        is_metadata_info = is_info and e_type == 'publication_year_discrepancy'
+        is_metadata_info = is_info and e_type in {
+            'publication_year_discrepancy', 'metadata_conflict',
+        }
         is_warning = 'warning_type' in err
         # Backfill actual_value from the typed correction fields: "missing"
         # issues (year/venue/title/authors) populate ONLY ref_*_correct, not
