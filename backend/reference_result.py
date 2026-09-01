@@ -37,6 +37,7 @@ def _format_findings(sanitized: Iterable[Dict[str, Any]]) -> tuple[List[Dict[str
         }
         for key in (
             "source_years", "metadata_classification", "requires_user_confirmation",
+            "requires_authentication", "authentication_domain", "authentication_url",
             "match_provenance", "supporting_evidence_source",
             "supporting_evidence_url", "supporting_evidence_title",
             "supporting_evidence_id", "ref_year_correct", "ref_venue_correct",

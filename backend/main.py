@@ -1441,6 +1441,11 @@ db_degraded = False
 async def _run_startup_tasks() -> None:
     """Initialize persistent services used by the API."""
     global db_degraded
+    try:
+        from refchecker.authenticated_browser import configure_authenticated_browser_dir
+        configure_authenticated_browser_dir(get_data_dir() / "authenticated-browser")
+    except Exception as e:
+        logger.debug("Authenticated browser profile setup skipped: %s", e)
     # Deliberately not awaited: reclaiming a multi-GB staging dir on a slow
     # network disk must not delay the server from accepting connections, or
     # Render's health check fails and restarts the instance mid-sweep.
@@ -1607,6 +1612,11 @@ async def lifespan(app: FastAPI):
         if refresh_loop_task is not None and not refresh_loop_task.done():
             refresh_loop_task.cancel()
             await asyncio.gather(refresh_loop_task, return_exceptions=True)
+        try:
+            from refchecker.authenticated_browser import get_authenticated_browser_manager
+            await asyncio.to_thread(get_authenticated_browser_manager().close_all)
+        except Exception as e:
+            logger.debug("Authenticated browser shutdown skipped: %s", e)
 
 
 app = FastAPI(title="RefChecker Web UI API", version="1.0.0", lifespan=lifespan)
@@ -2270,6 +2280,107 @@ async def auth_logout(
     response = JSONResponse(content={"ok": True})
     clear_auth_cookie(response)
     return response
+
+
+class _AuthenticatedSourceRequest(BaseModel):
+    url: str
+
+
+def _authenticated_browser_profile_for_user(current_user: UserInfo) -> str:
+    """Return an isolated browser profile key or reject remote/multi-user use."""
+    if is_multiuser_mode() or current_user.id != 0:
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticated browser sessions are available only in local single-user mode.",
+        )
+    return "local"
+
+
+@app.get("/api/authenticated-sources/session")
+async def authenticated_source_status(current_user: UserInfo = Depends(require_user)):
+    profile_key = _authenticated_browser_profile_for_user(current_user)
+    from refchecker.authenticated_browser import get_authenticated_browser_manager
+    state = await asyncio.to_thread(get_authenticated_browser_manager().status, profile_key)
+    requested = state.get("requested_url") or ""
+    return {
+        "active": bool(state.get("active")),
+        "domain": (urlparse(requested).hostname or "").lower() if requested else None,
+    }
+
+
+@app.post("/api/authenticated-sources/session")
+async def begin_authenticated_source_session(
+    body: _AuthenticatedSourceRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Open a visible local browser so the user can complete site login."""
+    profile_key = _authenticated_browser_profile_for_user(current_user)
+    try:
+        safe_url = await asyncio.to_thread(validate_remote_fetch_url, body.url)
+        from refchecker.authenticated_browser import get_authenticated_browser_manager
+        await asyncio.to_thread(
+            get_authenticated_browser_manager().open_login,
+            profile_key,
+            safe_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Could not open authenticated browser: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "active": True,
+        "domain": (urlparse(safe_url).hostname or "").lower(),
+        "message": "Complete sign-in in the browser window, then return to RefChecker.",
+    }
+
+
+@app.post("/api/authenticated-sources/session/complete")
+async def complete_authenticated_source_session(
+    body: _AuthenticatedSourceRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Confirm that the original source now resolves beyond its login screen."""
+    profile_key = _authenticated_browser_profile_for_user(current_user)
+    try:
+        safe_url = await asyncio.to_thread(validate_remote_fetch_url, body.url)
+        from bs4 import BeautifulSoup
+        from refchecker.authenticated_browser import get_authenticated_browser_manager
+        from refchecker.checkers.webpage_checker import detect_authentication_interstitial
+        page = await asyncio.to_thread(
+            get_authenticated_browser_manager().fetch,
+            profile_key,
+            safe_url,
+        )
+        # Validate the post-login destination as well as the requested URL.
+        await asyncio.to_thread(validate_remote_fetch_url, page.url)
+        reason = detect_authentication_interstitial(
+            BeautifulSoup(page.content, "html.parser"), page.url
+        )
+        if reason:
+            raise HTTPException(
+                status_code=409,
+                detail="The source is still showing its sign-in page. Complete login and try again.",
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Authenticated browser access check failed: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "authenticated": True,
+        "domain": (urlparse(safe_url).hostname or "").lower(),
+    }
+
+
+@app.delete("/api/authenticated-sources/session")
+async def close_authenticated_source_session(current_user: UserInfo = Depends(require_user)):
+    profile_key = _authenticated_browser_profile_for_user(current_user)
+    from refchecker.authenticated_browser import get_authenticated_browser_manager
+    closed = await asyncio.to_thread(get_authenticated_browser_manager().close, profile_key)
+    return {"closed": closed}
 
 
 @app.websocket("/api/ws/{session_id}")
@@ -8214,6 +8325,10 @@ class _VerifySingleRequest(BaseModel):
     # When true, skip the global identity cache and force a fresh verifier
     # run across the full configured database/API stack.
     force_all_databases: bool = False
+    # Use the local, user-controlled browser session for cited web pages.
+    # This is deliberately separate from force_all_databases: authenticated
+    # retry should verify the cited page directly and must bypass shared cache.
+    use_authenticated_browser: bool = False
     # Hint fields from the UI row the user clicked. Used to disambiguate
     # refs when legacy route ids collide.
     expected_id: Optional[Any] = None
@@ -8808,7 +8923,11 @@ async def verify_single_reference(
     # Re-verify button. Do this before looking in the identity cache: otherwise
     # a stale cached verification could mask newly extracted cited metadata.
     reextract_from_document = not force_all_databases and not (
-        body and (body.apply_correction or bool(body.overrides))
+        body and (
+            body.apply_correction
+            or bool(body.overrides)
+            or body.use_authenticated_browser
+        )
     )
     if reextract_from_document:
         check = await db.get_check_by_id(check_id, user_id=user_id)
@@ -8938,7 +9057,11 @@ async def verify_single_reference(
     # Try the global identity cache first unless caller explicitly forced a
     # fresh all-databases re-search.
     cached = None
-    if not force_all_databases and not reextract_from_document:
+    if (
+        not force_all_databases
+        and not reextract_from_document
+        and not (body and body.use_authenticated_browser)
+    ):
         try:
             cached = await db.lookup_verified_reference(target)
         except Exception:
@@ -9006,15 +9129,25 @@ async def verify_single_reference(
 
         def _run_verify():
             _usage_tracker.set_current_check(str(check_id))
-            with _usage_tracker.FlowScope("reverify"):
-                shared_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
-                shared_checker.non_arxiv_checker = checker
-                errors, url, verified_data = shared_checker.verify_reference_standard(
-                    None,
-                    dict(target),
-                    force_all_databases=force_all_databases,
+            from contextlib import nullcontext
+            auth_scope = nullcontext()
+            if body and body.use_authenticated_browser:
+                # The endpoint is local-only; keep the profile key opaque to
+                # the verifier and scoped to this worker invocation.
+                from refchecker.authenticated_browser import authenticated_browser_profile
+                auth_scope = authenticated_browser_profile(
+                    _authenticated_browser_profile_for_user(current_user)
                 )
-                return verified_data, errors, url
+            with auth_scope:
+                with _usage_tracker.FlowScope("reverify"):
+                    shared_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+                    shared_checker.non_arxiv_checker = checker
+                    errors, url, verified_data = shared_checker.verify_reference_standard(
+                        None,
+                        dict(target),
+                        force_all_databases=force_all_databases,
+                    )
+                    return verified_data, errors, url
 
         verified_data, errors, url = await asyncio.to_thread(_run_verify)
     except Exception as e:
@@ -9041,7 +9174,14 @@ async def verify_single_reference(
 
     # Manual-edit provenance belongs to the current check; do not copy it to
     # the global identity cache.
-    if not (body and (body.manual_edit or body.restore_extracted)):
+    if not (
+        body
+        and (
+            body.manual_edit
+            or body.restore_extracted
+            or body.use_authenticated_browser
+        )
+    ):
         try:
             await db.upsert_verified_reference(updated)
         except Exception:

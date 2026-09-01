@@ -12,6 +12,42 @@ from refchecker.utils.text_utils import strip_latex_commands
 
 logger = logging.getLogger(__name__)
 
+
+_AUTH_TITLE_MARKERS = (
+    'sign in', 'signin', 'log in', 'login', 'authentication required',
+    'institutional login', 'institutional sign in', 'access through your institution',
+)
+
+
+def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '') -> Optional[str]:
+    """Return a human-readable reason when HTML is an authentication screen.
+
+    URLs and hostnames are deliberately not treated as evidence: some services
+    keep login-shaped permalinks after authentication. Detection instead needs
+    multiple signals from the returned page itself.
+    """
+    title = ''
+    if soup.title and soup.title.get_text(strip=True):
+        title = soup.title.get_text(' ', strip=True).casefold()
+    visible = soup.get_text(' ', strip=True).casefold()[:12000]
+    has_password = soup.find('input', attrs={'type': re.compile(r'^password$', re.I)}) is not None
+    has_auth_title = any(marker in title for marker in _AUTH_TITLE_MARKERS)
+    has_auth_content = any(
+        marker in visible[:2500]
+        for marker in (
+            'sign in to access', 'sign in with your institution', 'institutional sign in',
+            'choose your institution', 'log in to continue', 'authentication required',
+            'find your institution', 'enter username or email', 'forgot your password',
+            'sign in with google', 'continue with google', 'single sign-on',
+        )
+    )
+
+    if has_password and (has_auth_title or has_auth_content):
+        return 'The source returned a sign-in page instead of the cited content.'
+    if has_auth_title and has_auth_content:
+        return 'The source requires an authenticated browser session.'
+    return None
+
 class WebPageChecker:
     """
     Checker for verifying web page references (documentation, tutorials, etc.)
@@ -204,7 +240,22 @@ class WebPageChecker:
         
         try:
             logger.debug(f"Making request to: {url}")
-            response = self.session.get(url, timeout=timeout, allow_redirects=True)
+            response = None
+            try:
+                from refchecker.authenticated_browser import (
+                    current_authenticated_browser_profile,
+                    get_authenticated_browser_manager,
+                )
+                profile_key = current_authenticated_browser_profile()
+                if profile_key:
+                    response = get_authenticated_browser_manager().fetch(profile_key, url)
+                    logger.debug("Fetched page through authenticated browser profile")
+            except Exception as exc:
+                # The ordinary request still provides a useful access-required
+                # result when the optional browser runtime/session is absent.
+                logger.debug("Authenticated browser fetch unavailable: %s", exc)
+            if response is None:
+                response = self.session.get(url, timeout=timeout, allow_redirects=True)
             self.last_request_time = time.time()
             logger.debug(f"Request successful: {response.status_code}, content-type: {response.headers.get('content-type', 'unknown')}")
             return response
@@ -255,6 +306,17 @@ class WebPageChecker:
             
             # Parse HTML content
             soup = BeautifulSoup(response.content, 'html.parser')
+
+            authentication_reason = detect_authentication_interstitial(soup, response.url)
+            if authentication_reason:
+                domain = (urlparse(web_url).hostname or '').lower()
+                return None, [{
+                    'warning_type': 'authentication',
+                    'warning_details': f'Authentication required: {authentication_reason}',
+                    'requires_authentication': True,
+                    'authentication_domain': domain,
+                    'authentication_url': web_url,
+                }], web_url
             
             # Extract page metadata
             page_title = self._extract_page_title(soup)
@@ -328,20 +390,29 @@ class WebPageChecker:
     
     def _extract_page_title(self, soup: BeautifulSoup) -> Optional[str]:
         """Extract the page title"""
-        # Try <title> tag
-        title_tag = soup.find('title')
-        if title_tag and title_tag.text.strip():
-            return title_tag.text.strip()
-        
-        # Try <h1> tag
+        # Structured record metadata is more specific than the browser-tab
+        # title used by catalogue hosts (often just "EBSCOhost" or the
+        # publisher name). Prefer citation/DC/OpenGraph metadata when present.
+        for attribute, value in (
+            ('name', 'citation_title'),
+            ('name', 'dc.title'),
+            ('name', 'eprints.title'),
+            ('property', 'og:title'),
+        ):
+            meta_title = soup.find('meta', {attribute: re.compile(
+                rf'^{re.escape(value)}$', re.IGNORECASE)})
+            if meta_title and meta_title.get('content'):
+                return meta_title['content'].strip()
+
+        # A record heading is more specific than a browser-tab title, which a
+        # JavaScript catalogue may leave as a generic or temporary label.
         h1_tag = soup.find('h1')
         if h1_tag and h1_tag.text.strip():
             return h1_tag.text.strip()
-        
-        # Try meta property title
-        meta_title = soup.find('meta', {'property': 'og:title'})
-        if meta_title and meta_title.get('content'):
-            return meta_title['content'].strip()
+
+        title_tag = soup.find('title')
+        if title_tag and title_tag.text.strip():
+            return title_tag.text.strip()
         
         return None
     
@@ -456,6 +527,8 @@ class WebPageChecker:
 
         meta_names = []
         meta_selectors = [
+            ('name', 'citation_author'),
+            ('name', 'dc.creator'),
             ('name', 'author'),
             ('property', 'article:author'),
             ('name', 'parsely-author'),
@@ -486,7 +559,36 @@ class WebPageChecker:
             if markup_names:
                 break
 
-        return unique_clean_names(markup_names)
+        authors = unique_clean_names(markup_names)
+        if authors:
+            return authors
+
+        # Some JavaScript catalogues render bibliographic metadata as visible
+        # labelled text without schema.org or citation meta tags. Keep this
+        # fallback domain-neutral and conservative: require a leading author
+        # label, a colon, and a short container rather than scanning arbitrary
+        # prose for names.
+        author_label = re.compile(
+            r'^\s*(?:by|von|authors?|autoren|auteurs?|autores?)\s*:\s*(.+)$',
+            re.IGNORECASE,
+        )
+        for element in soup.find_all(['p', 'div', 'span', 'li', 'dd']):
+            text = element.get_text(' ', strip=True)
+            if not text or len(text) > 500:
+                continue
+            match = author_label.match(text)
+            if not match:
+                continue
+            values = re.split(
+                r'\s*(?:;|\||\band\b|\bund\b|&)\s*',
+                match.group(1),
+                flags=re.IGNORECASE,
+            )
+            authors = unique_clean_names(values)
+            if authors:
+                return authors
+
+        return []
     
     def _determine_organization(self, domain: str) -> str:
         """Determine the organization from domain"""
@@ -642,10 +744,18 @@ class WebPageChecker:
             return True
         
         if page_authors:
-            return any(
-                cited_lower in author or author in cited_lower
-                for author in page_authors
+            cited_names = [
+                name.strip()
+                for name in re.split(r'\s*(?:,|;|\band\b|&)\s*', cited_lower)
+                if name.strip()
+            ]
+            if not cited_names:
+                cited_names = [cited_lower]
+            matched = sum(
+                1 for cited_name in cited_names
+                if any(cited_name in author or author in cited_name for author in page_authors)
             )
+            return matched >= max(1, int(len(cited_names) * 0.6 + 0.999))
 
         # Direct organization matches when the page has no named author
         if cited_lower in organization or organization in cited_lower:
@@ -788,6 +898,10 @@ class WebPageChecker:
             
             # Parse HTML content
             soup = BeautifulSoup(response.content, 'html.parser')
+
+            authentication_reason = detect_authentication_interstitial(soup, response.url)
+            if authentication_reason:
+                return "authentication required"
             
             # Extract page content for searching
             page_title = self._extract_page_title(soup)
@@ -909,6 +1023,16 @@ class WebPageChecker:
             
             # Parse HTML content
             soup = BeautifulSoup(response.content, 'html.parser')
+
+            authentication_reason = detect_authentication_interstitial(soup, response.url)
+            if authentication_reason:
+                return None, [{
+                    'warning_type': 'authentication',
+                    'warning_details': f'Authentication required: {authentication_reason}',
+                    'requires_authentication': True,
+                    'authentication_domain': (urlparse(web_url).hostname or '').lower(),
+                    'authentication_url': web_url,
+                }], web_url
             
             # Extract page content for searching
             page_title = self._extract_page_title(soup)

@@ -75,6 +75,7 @@ hiddenimports += collect_submodules("uvicorn.loops")
 hiddenimports += collect_submodules("uvicorn.lifespan")
 hiddenimports += collect_submodules("backend")
 hiddenimports += collect_submodules("refchecker")
+hiddenimports += collect_submodules("selenium")
 hiddenimports += collect_submodules("reportlab")
 hiddenimports += [
     "fastapi",

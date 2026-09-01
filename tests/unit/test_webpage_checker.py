@@ -1,4 +1,7 @@
-from refchecker.checkers.webpage_checker import WebPageChecker
+from refchecker.checkers.webpage_checker import (
+    WebPageChecker,
+    detect_authentication_interstitial,
+)
 
 
 class DummyResponse:
@@ -144,6 +147,125 @@ def test_non_academic_url_can_verify_even_with_academic_venue(monkeypatch):
     assert verified_data is not None
     assert errors == []
     assert url == "https://www.anthropic.com/index/introducing-claude/"
+
+
+def test_institutional_sign_in_is_access_required_not_metadata_mismatch(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = "http://search.ebscohost.com/login.aspx?direct=true&db=nlebk&AN=979090"
+    html = """
+    <html><head><title>Provider Sign In</title></head>
+    <body><h1>Sign in</h1><p>Let's find your institution</p></body></html>
+    """
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda requested: DummyResponse(
+            html,
+            url="https://login.provider.example/?requestIdentifier=example",
+        ),
+    )
+
+    data, issues, checked_url = checker.verify_reference({
+        "title": "Big Data - Fluch oder Segen?",
+        "authors": ["Ronald Bachmann", "Guido Kemper", "Thomas Gerzer"],
+        "year": 2014,
+        "url": url,
+    })
+
+    assert data is None
+    assert checked_url == url
+    assert len(issues) == 1
+    assert issues[0]["warning_type"] == "authentication"
+    assert issues[0]["requires_authentication"] is True
+    assert issues[0]["authentication_domain"] == "search.ebscohost.com"
+    assert "Title mismatch" not in issues[0]["warning_details"]
+    assert "Author mismatch" not in issues[0]["warning_details"]
+
+
+def test_login_shaped_permalink_needs_page_evidence_before_classification():
+    html = """
+    <html><head><title>Big Data - Fluch oder Segen?</title></head>
+    <body><h1>Big Data - Fluch oder Segen?</h1><p>Ronald Bachmann</p></body></html>
+    """
+    from bs4 import BeautifulSoup
+
+    assert detect_authentication_interstitial(
+        BeautifulSoup(html, "html.parser"),
+        "https://search.ebscohost.com/login.aspx?direct=true&AN=979090",
+    ) is None
+
+
+def test_article_about_login_is_not_an_authentication_interstitial():
+    html = """
+    <html><head><title>How to log in securely</title></head>
+    <body><article><p>This guide explains account security for administrators.</p></article></body></html>
+    """
+    from bs4 import BeautifulSoup
+
+    assert detect_authentication_interstitial(
+        BeautifulSoup(html, "html.parser"),
+        "https://docs.example.org/how-to-login",
+    ) is None
+
+
+def test_authenticated_catalogue_prefers_structured_record_metadata(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = "https://search.ebscohost.com/login.aspx?direct=true&AN=979090"
+    html = """
+    <html><head>
+      <title>EBSCOhost</title>
+      <meta name="citation_title" content="Big Data - Fluch oder Segen?">
+      <meta name="citation_author" content="Ronald Bachmann">
+      <meta name="citation_author" content="Guido Kemper">
+      <meta name="citation_author" content="Thomas Gerzer">
+    </head><body><main>
+      <p>Big Data - Fluch oder Segen? Ronald Bachmann, Guido Kemper, Thomas Gerzer.</p>
+    </main></body></html>
+    """
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda requested: DummyResponse(html, url=url),
+    )
+
+    data, issues, _ = checker.verify_reference({
+        "title": "Big Data - Fluch oder Segen?",
+        "authors": ["Ronald Bachmann", "Guido Kemper", "Thomas Gerzer"],
+        "year": 2014,
+        "url": url,
+    })
+
+    assert data["title"] == "Big Data - Fluch oder Segen?"
+    assert data["authors"] == ["Ronald Bachmann", "Guido Kemper", "Thomas Gerzer"]
+    assert issues == []
+
+
+def test_dynamic_catalogue_uses_record_heading_and_visible_author_line(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = "https://catalogue.example.org/record/979090"
+    html = """
+    <html><head><title>Research Databases</title></head><body><main>
+      <h1>Big Data - Fluch oder Segen? Unternehmen im Spiegel gesellschaftlichen Wandels</h1>
+      <div>Von: Ronald Bachmann; Guido Kemper; Thomas Gerzer</div>
+      <p>Big Data, Datenmanagement und gesellschaftlicher Wandel.</p>
+    </main></body></html>
+    """
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda requested: DummyResponse(html, url=url),
+    )
+
+    data, issues, _ = checker.verify_reference({
+        "title": "Big Data - Fluch oder Segen? Unternehmen im Spiegel des gesellschaftlichen Wandels",
+        "authors": ["Ronald Bachmann", "Guido Kemper", "Thomas Gerzer"],
+        "year": 2014,
+        "url": url,
+    })
+
+    assert data["title"].startswith("Big Data - Fluch oder Segen?")
+    assert data["authors"] == ["Ronald Bachmann", "Guido Kemper", "Thomas Gerzer"]
+    assert not any(issue.get("warning_type") in {"title", "author"} for issue in issues)
 
 
 def test_academic_url_with_academic_venue_still_requires_paper_verification(monkeypatch):

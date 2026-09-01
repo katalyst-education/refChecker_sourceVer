@@ -295,7 +295,9 @@ export default function useReferenceActions() {
     if (!selectedCheckId) return
     const ident = referenceRowIdentity(ref, i)
     const apiRefId = toApiReferenceId(ref, i)
-    const action = opts.restore_extracted
+    const action = opts.use_authenticated_browser
+      ? 'authenticated'
+      : opts.restore_extracted
       ? 'restore-extracted'
       : opts.manual_edit
         ? 'manual-edit'

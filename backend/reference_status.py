@@ -68,6 +68,11 @@ def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
             _san['metadata_classification'] = err.get('metadata_classification')
         if err.get('requires_user_confirmation'):
             _san['requires_user_confirmation'] = True
+        if err.get('requires_authentication'):
+            _san['requires_authentication'] = True
+        for _k in ('authentication_domain', 'authentication_url'):
+            if err.get(_k):
+                _san[_k] = err.get(_k)
         if err.get('match_provenance'):
             _san['match_provenance'] = err.get('match_provenance')
         # Evidence-only catalogue hits (currently EconBiz full-text search)

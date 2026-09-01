@@ -43,6 +43,8 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [cacheClearLoading, setCacheClearLoading] = useState(false)
   const [cacheClearSuccess, setCacheClearSuccess] = useState(false)
   const [cacheClearError, setCacheClearError] = useState(null)
+  const [authenticatedBrowser, setAuthenticatedBrowser] = useState(null)
+  const [authenticatedBrowserBusy, setAuthenticatedBrowserBusy] = useState(false)
 
   // Honor deep-links from the onboarding banner (and anywhere else that
   // calls openSettings(section)) by jumping to the requested pane.
@@ -55,6 +57,25 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   // Key store for Semantic Scholar API key management
   const { hasKey, setKey, deleteKey } = useKeyStore()
   const multiuser = useAuthStore(state => state.multiuser)
+
+  useEffect(() => {
+    if (!isSettingsOpen || activeSection !== 'General' || multiuser) return
+    let cancelled = false
+    api.getAuthenticatedSourceSession()
+      .then(response => { if (!cancelled) setAuthenticatedBrowser(response.data) })
+      .catch(() => { if (!cancelled) setAuthenticatedBrowser(null) })
+    return () => { cancelled = true }
+  }, [isSettingsOpen, activeSection, multiuser])
+
+  const closeAuthenticatedBrowser = async () => {
+    setAuthenticatedBrowserBusy(true)
+    try {
+      await api.closeAuthenticatedSourceSession()
+      setAuthenticatedBrowser({ active: false, domain: null })
+    } finally {
+      setAuthenticatedBrowserBusy(false)
+    }
+  }
   // Accounts / Teams section needs the full auth picture (single vs multi-user,
   // configured OAuth providers, and the signed-in user when there is one).
   const authRequired = useAuthStore(state => state.authRequired)
@@ -1584,6 +1605,37 @@ export default function SettingsPanel({ theme, onThemeChange }) {
               {updateStatus.text}
             </div>
           )}
+        </div>
+      )}
+
+      {!multiuser && (
+        <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
+                Authenticated sources
+              </div>
+              <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+                {authenticatedBrowser?.active
+                  ? `Browser session open${authenticatedBrowser.domain ? ` for ${authenticatedBrowser.domain}` : ''}.`
+                  : 'No authenticated source browser is currently open.'}
+              </div>
+              <div className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+                When a reference requires sign-in, use "Sign in and retry" on its card. Passwords and MFA stay in the browser; its dedicated local profile can be reused by other protected sites.
+              </div>
+            </div>
+            {authenticatedBrowser?.active && (
+              <button
+                type="button"
+                onClick={closeAuthenticatedBrowser}
+                disabled={authenticatedBrowserBusy}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium border"
+                style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}
+              >
+                {authenticatedBrowserBusy ? 'Closing...' : 'Close browser'}
+              </button>
+            )}
+          </div>
         </div>
       )}
 

@@ -415,6 +415,14 @@ refchecker-webui --port 9000        # custom port
 <!-- screenshot: webui-hallucination-card — reference card with a 🚩 hallucination flag and explanation -->
 <!-- screenshot: webui-stats-badges — stats section showing clickable filter badges for errors, warnings, etc. -->
 
+- **Authenticated sources** - login/interstitial pages are identified without false metadata mismatches; in local single-user mode, **Sign in and retry** opens a reusable browser profile for EBSCO and other protected sources
+
+### Authenticated sources
+
+When a cited URL resolves to a sign-in page, RefChecker reports **Authentication required** instead of comparing the login screen's title and organization with the citation. In local single-user mode, select **Sign in and retry** on the reference card, complete the site's SSO/MFA flow in the visible Chrome window, then select **I've signed in - retry**. The browser stays available for later protected references and uses normal domain-scoped cookies.
+
+Passwords, MFA values, cookies, and authentication headers are not copied into RefChecker results, logs, exports, verification caches, or LLM prompts. The browser can be closed from **Settings > General > Authenticated sources**. This feature is intentionally unavailable on shared multi-user servers.
+
 #### Frontend Development
 
 ```bash
@@ -459,6 +467,9 @@ academic-refchecker --paper 1706.03762 --report-file report.json --report-format
 # Bulk: check a list of papers
 academic-refchecker --paper-list papers.txt --report-file report.json
 
+# Reuse the local authenticated browser profile previously established in the WebUI
+academic-refchecker --paper paper.pdf --authenticated-browser-profile local
+
 # OpenReview: fetch and scan an entire venue
 academic-refchecker --openreview iclr2024 --report-file report.json
 
@@ -480,6 +491,8 @@ Input (choose one):
   --openreview-list-only     Fetch the OpenReview paper list and exit without scanning
   --openreview-output-file PATH
                             Custom path for the generated OpenReview paper list
+  --authenticated-browser-profile NAME
+                            Reuse a local authenticated browser profile for protected cited pages
 
 LLM:
   --llm-provider PROVIDER    openai, anthropic, google, azure, vllm, or lmstudio

@@ -6,7 +6,11 @@ import {
   CITATION_STYLES,
   exportReferenceAsStyle,
 } from '../../utils/formatters'
-import { resolveDoi } from '../../utils/api'
+import {
+  beginAuthenticatedSourceSession,
+  completeAuthenticatedSourceSession,
+  resolveDoi,
+} from '../../utils/api'
 
 const databaseStatusLabel = (status) => ({
   matched: 'Match',
@@ -399,6 +403,25 @@ export function SuggestAltPanel({ suggestFor, onClose }) {
   )
 }
 
+function isAuthenticationIssue(issue) {
+  if (!issue) return false
+  if (
+    issue.requires_authentication
+    || issue.warning_type === 'authentication'
+    || issue.error_type === 'authentication'
+  ) return true
+
+  // Older saved results can contain a title mismatch produced from a login
+  // interstitial before the backend classified authentication explicitly.
+  // Infer only from the fetched "actual" title, never from a hostname.
+  if (issue.error_type !== 'title' && issue.warning_type !== 'title') return false
+  const details = String(issue.error_details || issue.warning_details || '')
+  const parsedActual = details.match(/\bactual\s*:\s*([^\r\n]+)/i)?.[1] || ''
+  const actualTitle = String(issue.actual_value || parsedActual).trim()
+  return /\b(?:sign[ -]?in|log[ -]?in|authentication required|loading|wird\s+geladen|chargement|cargando|caricamento|laden)\b/i.test(actualTitle)
+}
+
+
 export function ReferenceRowActions({
                                       reference,
                                       displayIndex,
@@ -446,6 +469,8 @@ export function ReferenceRowActions({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(makeDraft)
   const [saving, setSaving] = useState(false)
+  const [authStep, setAuthStep] = useState('idle')
+  const [authError, setAuthError] = useState(null)
   const fieldStyle = {
     borderColor: 'var(--color-border)',
     background: 'var(--color-bg-secondary)',
@@ -514,6 +539,39 @@ export function ReferenceRowActions({
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
   const savingEdit = reverifyBusy && reverifyAction === 'manual-edit'
   const restoringExtracted = reverifyBusy && reverifyAction === 'restore-extracted'
+  const verifyingAuthenticated = reverifyBusy && reverifyAction === 'authenticated'
+  const authIssue = [...(reference?.warnings || []), ...(reference?.errors || [])]
+    .find(isAuthenticationIssue)
+  const authenticationUrl = authIssue?.authentication_url || reference?.cited_url || reference?.url
+
+  const beginAuthentication = async () => {
+    if (!authenticationUrl) return
+    setAuthError(null)
+    setAuthStep('opening')
+    try {
+      await beginAuthenticatedSourceSession(authenticationUrl)
+      setAuthStep('waiting')
+    } catch (error) {
+      setAuthError(error?.response?.data?.detail || error?.message || 'Could not open the sign-in browser.')
+      setAuthStep('idle')
+    }
+  }
+
+  const finishAuthentication = async () => {
+    if (!authenticationUrl) return
+    setAuthError(null)
+    setAuthStep('checking')
+    try {
+      await completeAuthenticatedSourceSession(authenticationUrl)
+      const updated = await onReverify(reference, displayIndex, {
+        use_authenticated_browser: true,
+      })
+      setAuthStep(updated ? 'done' : 'waiting')
+    } catch (error) {
+      setAuthError(error?.response?.data?.detail || error?.message || 'The source still requires sign-in.')
+      setAuthStep('waiting')
+    }
+  }
   return (
       <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || activeSearch) || undefined}>
         <div className="flex flex-wrap gap-1.5">
@@ -527,6 +585,28 @@ export function ReferenceRowActions({
           >
             {reextracting ? 'Re-extracting…' : 'Re-extract & verify'}
           </button>
+          {authIssue && authenticationUrl && (
+              <button
+                  type="button"
+                  onClick={authStep === 'waiting' ? finishAuthentication : beginAuthentication}
+                  disabled={disableFor(reverifyBusy) || ['opening', 'checking'].includes(authStep)}
+                  className="px-2.5 py-1 rounded-md font-medium"
+                  style={{
+                    ...styleFor(reverifyBusy || ['opening', 'checking'].includes(authStep)),
+                    color: 'var(--color-accent)',
+                    borderColor: 'var(--color-accent)',
+                  }}
+                  title="Sign in through a local browser session and retry this cited URL"
+              >
+                {authStep === 'opening'
+                  ? 'Opening sign-in...'
+                  : authStep === 'waiting'
+                    ? "I've signed in - retry"
+                    : authStep === 'checking' || verifyingAuthenticated
+                      ? 'Checking access...'
+                      : 'Sign in and retry'}
+              </button>
+          )}
           <button
               type="button"
               onClick={() => activeSearch
@@ -590,6 +670,16 @@ export function ReferenceRowActions({
             {removeBusy ? '…' : 'Remove'}
           </button>
         </div>
+        {authStep === 'waiting' && !authError && (
+          <div className="mt-2" style={{ color: 'var(--color-text-muted)' }}>
+            Complete sign-in in the browser window, then click "I've signed in - retry".
+          </div>
+        )}
+        {authError && (
+          <div className="mt-2" style={{ color: 'var(--color-error, #ef4444)' }}>
+            {authError}
+          </div>
+        )}
         {searchOperation && (
           <div
             className="mt-2 rounded-md p-2"

@@ -265,6 +265,14 @@ def build_check_parser(subparsers=None):
     parser.add_argument("--acl-db", type=str, help="Path to local ACL Anthology DB file")
     parser.add_argument("--cache", type=str, metavar="DIR", default=None,
                         help="Cache PDFs / extracted bibliographies in DIR to speed up repeat runs")
+    parser.add_argument(
+        "--authenticated-browser-profile",
+        type=str,
+        help=(
+            "Use an already-open local authenticated browser profile for cited web pages "
+            "(the WebUI creates profile 'local')."
+        ),
+    )
 
     # --- hallucination check (R56) -----------------------------------------
     parser.add_argument("--check-hallucinations", action="store_true",
@@ -706,6 +714,8 @@ def _print_human_report(output):
 
 def run_check(args):
     """Handler for the ``check`` subcommand."""
+    if getattr(args, "authenticated_browser_profile", None):
+        os.environ["REFCHECKER_AUTH_BROWSER_PROFILE"] = args.authenticated_browser_profile
     # Registry-only query: no paper, no pipeline. Honors --json.
     if getattr(args, "list_detectors", False):
         return run_list_detectors(args)

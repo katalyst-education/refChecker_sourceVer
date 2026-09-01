@@ -55,6 +55,16 @@ export const health = () => api.get('/health', { timeout: 5000 })
 export const getAuthProviders = () => api.get('/auth/providers')
 export const getAuthMe = () => api.get('/auth/me', { timeout: 8000 })
 export const authLogout = () => api.post('/auth/logout')
+
+// Local, user-controlled browser session for sources behind institutional
+// login. Credentials stay in the browser; the API only receives source URLs.
+export const getAuthenticatedSourceSession = () => api.get('/authenticated-sources/session')
+export const beginAuthenticatedSourceSession = (url) =>
+  api.post('/authenticated-sources/session', { url }, { timeout: 60000 })
+export const completeAuthenticatedSourceSession = (url) =>
+  api.post('/authenticated-sources/session/complete', { url }, { timeout: 60000 })
+export const closeAuthenticatedSourceSession = () =>
+  api.delete('/authenticated-sources/session')
 // In-app multi-user / OAuth enablement (Settings → Enable accounts & Teams).
 // getAuthConfig returns presence/state only (never secret values); setAuthConfig
 // persists creds + the multiuser flag for the next backend start.
@@ -489,6 +499,10 @@ export default {
   getAuthProviders,
   getAuthMe,
   authLogout,
+  getAuthenticatedSourceSession,
+  beginAuthenticatedSourceSession,
+  completeAuthenticatedSourceSession,
+  closeAuthenticatedSourceSession,
   setAuthToken,
   getLLMConfigs,
   createLLMConfig,

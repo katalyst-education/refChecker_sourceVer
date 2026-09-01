@@ -3564,10 +3564,13 @@ class ArxivReferenceChecker:
             formatted_errors = []
             for error in errors:
                 if 'error_type' in error:
-                    formatted_errors.append({
-                        'error_type': error['error_type'],
-                        'error_details': error.get('error_details', ''),
-                    })
+                    formatted_errors.append(dict(error))
+                elif 'warning_type' in error:
+                    # Access interstitials are intentionally warnings rather
+                    # than fabricated title/author mismatches. Preserve their
+                    # action metadata so every presentation path can offer an
+                    # authenticated retry without duplicating detection logic.
+                    formatted_errors.append(dict(error))
             return (
                 formatted_errors or [{
                     'error_type': 'unverified',
@@ -8154,12 +8157,23 @@ def main():
                         help="Disable parallel processing and run sequentially")
     parser.add_argument("--max-workers", type=int, default=6,
                         help="Maximum number of worker threads for parallel processing (default: 6)")
+    parser.add_argument(
+        "--authenticated-browser-profile",
+        type=str,
+        help=(
+            "Use an already-open local authenticated browser profile for cited web pages. "
+            "The WebUI creates profile 'local'; credentials and cookies are never printed."
+        ),
+    )
     parser.add_argument("--ai-detection", action="store_true",
                         help="Also run advisory local AI-generated-text detection on each paper")
     parser.add_argument("--ai-detection-device", choices=["cpu", "cuda"], default="cpu",
                         help="Compute device for local AI detection (default: cpu)")
 
     args = parser.parse_args()
+
+    if args.authenticated_browser_profile:
+        os.environ["REFCHECKER_AUTH_BROWSER_PROFILE"] = args.authenticated_browser_profile
 
     report_format = args.report_format
 

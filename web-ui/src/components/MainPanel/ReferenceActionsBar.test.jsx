@@ -1,5 +1,17 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+
+const authApi = vi.hoisted(() => ({
+  begin: vi.fn(),
+  complete: vi.fn(),
+}))
+
+vi.mock('../../utils/api', async (importOriginal) => ({
+  ...(await importOriginal()),
+  beginAuthenticatedSourceSession: authApi.begin,
+  completeAuthenticatedSourceSession: authApi.complete,
+}))
+
 import { ReferenceRowActions } from './ReferenceActionsBar'
 
 const baseProps = {
@@ -15,6 +27,79 @@ const baseProps = {
 }
 
 describe('ReferenceRowActions progress feedback', () => {
+  it('opens an authenticated browser and retries with the shared verifier', async () => {
+    authApi.begin.mockResolvedValue({ data: { active: true } })
+    authApi.complete.mockResolvedValue({ data: { authenticated: true } })
+    const onReverify = vi.fn().mockResolvedValue({ status: 'verified' })
+    const url = 'https://search.ebscohost.com/login.aspx?direct=true&AN=979090'
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        reference={{
+          id: 'ref-1',
+          title: 'Protected reference',
+          cited_url: url,
+          warnings: [{
+            warning_type: 'authentication',
+            warning_details: 'Authentication required',
+            requires_authentication: true,
+            authentication_url: url,
+          }],
+        }}
+        onReverify={onReverify}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in and retry' }))
+    await waitFor(() => expect(authApi.begin).toHaveBeenCalledWith(url))
+    fireEvent.click(await screen.findByRole('button', { name: "I've signed in - retry" }))
+
+    await waitFor(() => expect(authApi.complete).toHaveBeenCalledWith(url))
+    expect(onReverify).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ref-1' }),
+      0,
+      { use_authenticated_browser: true },
+    )
+  })
+
+  it('offers authenticated retry for a legacy sign-in title mismatch on any domain', () => {
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        reference={{
+          id: 'ref-1',
+          title: 'Protected reference',
+          cited_url: 'https://catalogue.example.org/record/123',
+          warnings: [{
+            error_type: 'title',
+            error_details: 'Title mismatch:\n       cited: Protected reference\n       actual: Provider Sign In',
+          }],
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Sign in and retry' })).toBeInTheDocument()
+  })
+
+  it('offers browser retry when an older result captured a loading title', () => {
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        reference={{
+          id: 'ref-1',
+          title: 'Protected reference',
+          cited_url: 'https://catalogue.example.org/record/123',
+          warnings: [{
+            error_type: 'title',
+            error_details: 'Title mismatch:\n       cited: Protected reference\n       actual: Wird geladen ... - Research Databases',
+          }],
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Sign in and retry' })).toBeInTheDocument()
+  })
+
   it('shows document re-extraction progress inside the card', () => {
     render(
       <ReferenceRowActions

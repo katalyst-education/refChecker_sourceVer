@@ -81,6 +81,7 @@ webui = [
     "python-multipart>=0.0.27",  # For FastAPI form data handling
     "python-jose[cryptography]>=3.5.0",  # For JWT token creation and validation (multi-user auth)
     "itsdangerous>=2.2.0",  # For signed cookies / CSRF protection
+    "selenium>=4.43.0",  # Visible reusable browser sessions for authenticated sources
 ]
 
 [project.urls]

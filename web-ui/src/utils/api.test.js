@@ -98,6 +98,20 @@ describe('reference verification api helper', () => {
     )
   })
 
+  it('opens and completes a local authenticated source session', () => {
+    const url = 'https://search.ebscohost.com/login.aspx?direct=true&AN=979090'
+
+    api.beginAuthenticatedSourceSession(url)
+    expect(mocks.apiInstance.post).toHaveBeenLastCalledWith(
+      '/authenticated-sources/session', { url }, { timeout: 60000 },
+    )
+
+    api.completeAuthenticatedSourceSession(url)
+    expect(mocks.apiInstance.post).toHaveBeenLastCalledWith(
+      '/authenticated-sources/session/complete', { url }, { timeout: 60000 },
+    )
+  })
+
   it('starts a streamed all-database reference search', () => {
     const payload = { google_books_api_key: 'browser-key' }
     api.startReferenceSearch(17, 'id:ref-1', payload)

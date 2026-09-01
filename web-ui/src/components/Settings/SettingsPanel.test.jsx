@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   getAIDetectionModelStatus: vi.fn(),
   checkAIDetectionModelUpdate: vi.fn(),
   getDatabaseStatus: vi.fn(),
+  getAuthenticatedSourceSession: vi.fn(() => Promise.resolve({ data: { active: false } })),
+  closeAuthenticatedSourceSession: vi.fn(() => Promise.resolve({ data: { closed: true } })),
 }))
 
 vi.mock('../../stores/useSettingsStore', () => ({
@@ -84,6 +86,8 @@ vi.mock('../../utils/api', () => ({
   downloadAIDetectionModel: vi.fn(),
   deleteAIDetectionModel: vi.fn(),
   getDatabaseStatus: mocks.getDatabaseStatus,
+  getAuthenticatedSourceSession: mocks.getAuthenticatedSourceSession,
+  closeAuthenticatedSourceSession: mocks.closeAuthenticatedSourceSession,
 }))
 
 vi.mock('../../utils/logger', () => ({
@@ -155,6 +159,19 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
       modelStatus: null,
       modelError: null,
     })
+  })
+
+  it('shows and closes the reusable authenticated browser session', async () => {
+    mocks.getAuthenticatedSourceSession.mockResolvedValueOnce({
+      data: { active: true, domain: 'search.ebscohost.com' },
+    })
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    expect(await screen.findByText(/Browser session open for search\.ebscohost\.com/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close browser' }))
+
+    await waitFor(() => expect(mocks.closeAuthenticatedSourceSession).toHaveBeenCalled())
+    expect(screen.getByText('No authenticated source browser is currently open.')).toBeInTheDocument()
   })
 
   it('updates the Google Books magazine fallback option', async () => {

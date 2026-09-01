@@ -36,8 +36,11 @@ History:
         title-only matches for the underlying book.
     6 - Springer Nature title fallback uses Basic-plan-compatible general-text
         phrases instead of Premium-only title/name constraints.
+    7 - authentication interstitials are reported as access-required instead
+        of being compared with cited title/author metadata, and authenticated
+        browser retries use the same shared webpage verifier.
 """
 
-VERIFICATION_LOGIC_VERSION = 6
+VERIFICATION_LOGIC_VERSION = 7
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]
