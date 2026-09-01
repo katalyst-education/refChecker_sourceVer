@@ -67,6 +67,15 @@ const patchCompletedReference = (operation, reference) => {
   }
 }
 
+const sourcesByDatabase = (sources) => {
+  if (!Array.isArray(sources)) return sources || {}
+  return Object.fromEntries(
+    sources
+      .filter(source => source?.database)
+      .map(source => [source.database, source]),
+  )
+}
+
 export const useReferenceSearchStore = create((set, get) => ({
   operations: {},
 
@@ -113,14 +122,17 @@ export const useReferenceSearchStore = create((set, get) => ({
       } }
     } else if (message.type === 'reference_search_completed') {
       next = { ...base, status: 'completed', reference: message.reference,
-        duration_ms: message.duration_ms }
+        duration_ms: message.duration_ms,
+        sources: { ...(base.sources || {}), ...sourcesByDatabase(message.sources) } }
       patchCompletedReference(next, message.reference)
     } else if (message.type === 'reference_search_cancelled') {
       next = { ...base, status: 'cancelled', error_code: message.error_code,
-        error_message: message.message }
+        error_message: message.message,
+        sources: { ...(base.sources || {}), ...sourcesByDatabase(message.sources) } }
     } else if (message.type === 'reference_search_error') {
       next = { ...base, status: 'error', error_code: message.error_code,
-        error_message: message.message }
+        error_message: message.message,
+        sources: { ...(base.sources || {}), ...sourcesByDatabase(message.sources) } }
     }
     set(state => ({ operations: { ...state.operations, [key]: next } }))
   },

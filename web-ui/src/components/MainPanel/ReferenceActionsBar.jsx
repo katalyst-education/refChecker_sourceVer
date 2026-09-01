@@ -8,6 +8,42 @@ import {
 } from '../../utils/formatters'
 import { resolveDoi } from '../../utils/api'
 
+const databaseStatusLabel = (status) => ({
+  matched: 'Match',
+  verified_fulltext_evidence: 'Full-text match',
+  no_match: 'No match',
+  rejected_wrong_paper: 'Rejected wrong paper',
+  rate_limited: 'Rate limited',
+  timed_out: 'Timed out',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  searching: 'Searching',
+  waiting: 'Waiting',
+  not_searched: 'Not searched',
+}[status] || String(status || 'Waiting').replaceAll('_', ' '))
+
+const databaseStatusColor = (status) => {
+  if (status === 'matched' || status === 'verified_fulltext_evidence') return 'var(--color-success, #16a34a)'
+  if (status === 'searching') return 'var(--color-accent)'
+  if (['failed', 'timed_out', 'rate_limited'].includes(status)) return 'var(--color-error, #ef4444)'
+  return 'var(--color-text-muted)'
+}
+
+const safeResultUrl = (candidate) => {
+  const value = candidate?.url || candidate?.link
+  return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null
+}
+
+const candidateAuthorText = (candidate) => {
+  const values = Array.isArray(candidate?.authors)
+    ? candidate.authors
+    : candidate?.authors ? [candidate.authors] : []
+  return values.map(author => {
+    if (typeof author === 'string') return author
+    return author?.name || author?.display_name || ''
+  }).filter(Boolean).join(', ')
+}
+
 export function AddReferencePanel({ newRef, setNewRef, busyKey, onSave, onCancel }) {
   const disabled = busyKey === '__add__'
   // Two entry modes:
@@ -440,6 +476,22 @@ export function ReferenceRowActions({
   }
   const styleFor = (busy) => ({ ...baseStyle, opacity: (busy || !selectedCheckId || globalBusy) ? 0.55 : 1 })
   const activeSearch = ['queued', 'running', 'cancelling'].includes(searchOperation?.status)
+  const databaseSources = (() => {
+    const sourceMap = searchOperation?.sources || {}
+    const configured = Array.isArray(searchOperation?.configured_sources)
+      ? searchOperation.configured_sources
+      : []
+    const listed = configured.map(source => ({
+      ...source,
+      status: activeSearch ? 'waiting' : 'not_searched',
+      ...(sourceMap[source.database] || {}),
+    }))
+    const configuredNames = new Set(configured.map(source => source.database))
+    return [
+      ...listed,
+      ...Object.values(sourceMap).filter(source => !configuredNames.has(source.database)),
+    ]
+  })()
   const disableFor = (busy) => busy || activeSearch || !selectedCheckId || globalBusy || editing
   const reextracting = reverifyBusy && reverifyAction === 'reextract'
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
@@ -534,19 +586,59 @@ export function ReferenceRowActions({
                 <span style={{ color: 'var(--color-text-muted)' }}>{(searchOperation.duration_ms / 1000).toFixed(1)}s</span>
               )}
             </div>
-            {Object.values(searchOperation.sources || {}).length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {Object.values(searchOperation.sources || {}).map(source => (
-                  <span
-                    key={source.database}
-                    className="rounded px-1.5 py-0.5"
-                    style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-secondary)' }}
-                    title={source.candidate?.title || source.status}
-                  >
-                    {source.label || source.database}: {String(source.status || '').replaceAll('_', ' ')}
-                  </span>
-                ))}
-              </div>
+            {databaseSources.length > 0 && (
+              <details className="mt-2">
+                <summary
+                  className="cursor-pointer select-none font-medium"
+                  style={{ color: 'var(--color-text-secondary)' }}
+                >
+                  Database results ({databaseSources.length})
+                </summary>
+                <ul className="mt-2 space-y-1.5">
+                  {databaseSources.map(source => {
+                    const candidate = source.candidate || {}
+                    const authors = candidateAuthorText(candidate)
+                    const resultUrl = safeResultUrl(candidate)
+                    const hasOverview = candidate.title || authors || candidate.year || resultUrl
+                    return (
+                      <li
+                        key={source.database}
+                        className="rounded-md px-2 py-1.5"
+                        style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
+                            {source.label || source.database}
+                          </span>
+                          <span className="flex-shrink-0" style={{ color: databaseStatusColor(source.status) }}>
+                            {databaseStatusLabel(source.status)}
+                          </span>
+                        </div>
+                        {hasOverview && (
+                          <div className="mt-1 space-y-0.5" style={{ color: 'var(--color-text-muted)' }}>
+                            {candidate.title && (
+                              <div style={{ color: 'var(--color-text-secondary)' }}>{candidate.title}</div>
+                            )}
+                            {(authors || candidate.year) && (
+                              <div>{[authors, candidate.year].filter(Boolean).join(' · ')}</div>
+                            )}
+                            {resultUrl && (
+                              <a
+                                href={resultUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ color: 'var(--color-accent)', wordBreak: 'break-all' }}
+                              >
+                                Open database result ↗
+                              </a>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+              </details>
             )}
             {searchOperation.error_message && (
               <div className="mt-1.5" style={{ color: searchOperation.status === 'cancelled' ? 'var(--color-text-muted)' : 'var(--color-error)' }}>

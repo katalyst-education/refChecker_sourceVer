@@ -54,6 +54,30 @@ def test_database_progress_emits_timeout():
     assert [event['status'] for event in events] == ['searching', 'timed_out']
 
 
+def test_database_candidate_summary_includes_display_metadata_and_result_url():
+    summary = EnhancedHybridReferenceChecker._database_trace_summary(
+        {
+            'title': 'Matched work',
+            'authors': [
+                {'name': 'Ada Lovelace'},
+                {'given': 'Grace', 'family': 'Hopper'},
+            ],
+            'year': 2024,
+            'externalIds': {'DOI': '10.1000/example'},
+        },
+        'https://example.org/result',
+    )
+
+    assert summary == {
+        'title': 'Matched work',
+        'authors': ['Ada Lovelace', 'Grace Hopper'],
+        'year': 2024,
+        'url': 'https://example.org/result',
+        'doi': '10.1000/example',
+        'id': None,
+    }
+
+
 def test_cancelled_verification_does_not_call_provider():
     events = []
     cancel_event = threading.Event()

@@ -45,6 +45,44 @@ describe('ReferenceRowActions progress feedback', () => {
     )
     expect(screen.getByRole('button', { name: 'Searching all DBs…' })).toBeDisabled()
   })
+  it('shows a collapsible result row for every configured database', () => {
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        searchOperation={{
+          status: 'completed',
+          duration_ms: 1250,
+          configured_sources: [
+            { database: 'crossref', label: 'CrossRef' },
+            { database: 'openalex', label: 'OpenAlex' },
+            { database: 'semantic_scholar', label: 'Semantic Scholar' },
+          ],
+          sources: {
+            crossref: {
+              database: 'crossref', label: 'CrossRef', status: 'matched',
+              candidate: {
+                title: 'A database title', authors: ['Ada Lovelace', 'Grace Hopper'],
+                year: 2024, url: 'https://doi.org/10.1000/example',
+              },
+            },
+            openalex: { database: 'openalex', label: 'OpenAlex', status: 'no_match' },
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByText('Database results (3)')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Database results (3)'))
+    expect(screen.getByText('CrossRef')).toBeInTheDocument()
+    expect(screen.getByText('OpenAlex')).toBeInTheDocument()
+    expect(screen.getByText('Semantic Scholar')).toBeInTheDocument()
+    expect(screen.getByText('A database title')).toBeInTheDocument()
+    expect(screen.getByText('Ada Lovelace, Grace Hopper · 2024')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open database result ↗' }))
+      .toHaveAttribute('href', 'https://doi.org/10.1000/example')
+    expect(screen.getByText('No match')).toBeInTheDocument()
+    expect(screen.getByText('Not searched')).toBeInTheDocument()
+  })
 })
 
 describe('ReferenceRowActions metadata editor', () => {

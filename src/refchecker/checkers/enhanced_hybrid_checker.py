@@ -500,17 +500,58 @@ class EnhancedHybridReferenceChecker:
         return verified_data
 
     @staticmethod
-    def _database_trace_summary(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Return a compact, stable candidate summary for INFO traces."""
+    def _database_trace_summary(
+        data: Optional[Dict[str, Any]],
+        url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return compact, display-safe metadata for one database candidate."""
         if not isinstance(data, dict):
             return {}
         external_ids = data.get('externalIds') or data.get('ids') or {}
         if not isinstance(external_ids, dict):
             external_ids = {}
+        doi = data.get('doi') or data.get('DOI') or external_ids.get('DOI') or external_ids.get('doi')
+
+        raw_authors = data.get('authors') or data.get('author') or data.get('creators') or []
+        if isinstance(raw_authors, (str, dict)):
+            raw_authors = [raw_authors]
+        authors: List[str] = []
+        for author in raw_authors if isinstance(raw_authors, (list, tuple)) else []:
+            if isinstance(author, str):
+                name = author
+            elif isinstance(author, dict):
+                nested = author.get('author') if isinstance(author.get('author'), dict) else {}
+                name = (
+                    author.get('name') or author.get('display_name')
+                    or nested.get('name') or nested.get('display_name')
+                    or ' '.join(filter(None, (
+                        author.get('given') or author.get('givenName'),
+                        author.get('family') or author.get('familyName'),
+                    )))
+                )
+            else:
+                name = str(author)
+            if isinstance(name, str) and name.strip():
+                authors.append(name.strip())
+
+        result_url = (
+            url or data.get('url') or data.get('URL') or data.get('landing_page_url')
+            or data.get('landingPageUrl')
+        )
+        if not result_url and doi:
+            normalized_doi = str(doi).strip()
+            for prefix in ('https://doi.org/', 'http://doi.org/', 'doi:'):
+                if normalized_doi.lower().startswith(prefix):
+                    normalized_doi = normalized_doi[len(prefix):]
+                    break
+            if normalized_doi:
+                result_url = f'https://doi.org/{normalized_doi}'
         return {
             'title': data.get('title') or data.get('display_name'),
+            'authors': authors,
             'year': data.get('publication_year') or data.get('year'),
-            'doi': data.get('doi') or data.get('DOI') or external_ids.get('DOI') or external_ids.get('doi'),
+            'url': result_url,
+            'doi': doi,
             'id': (
                 data.get('paperId') or data.get('id') or data.get('ppn')
                 or data.get('idn') or data.get('zdb_id') or data.get('key')
@@ -753,7 +794,7 @@ class EnhancedHybridReferenceChecker:
                         "duration_ms=%d candidate=%r errors=%r",
                         api_name,
                         round(duration * 1000),
-                        self._database_trace_summary(verified_data),
+                        self._database_trace_summary(verified_data, url),
                         errors,
                     )
                     logger.debug(
@@ -764,7 +805,7 @@ class EnhancedHybridReferenceChecker:
                         database=api_name, label=self._format_api_name(api_name),
                         status='rejected_wrong_paper', attempt=2 if is_retry else 1,
                         duration_ms=round(duration * 1000),
-                        candidate=self._database_trace_summary(verified_data),
+                        candidate=self._database_trace_summary(verified_data, url),
                     )
                     return None, [], None, False, 'not_found', ''
                 verified_data = self._annotate_match_source(verified_data, api_name, api_instance)
@@ -784,7 +825,7 @@ class EnhancedHybridReferenceChecker:
                     api_name,
                     result_status,
                     round(duration * 1000),
-                    self._database_trace_summary(verified_data),
+                    self._database_trace_summary(verified_data, url),
                     len(errors or []),
                     url,
                 )
@@ -792,9 +833,9 @@ class EnhancedHybridReferenceChecker:
                 logger.debug(f"Enhanced Hybrid: {api_name} successful in {duration:.2f}s{retry_info}, URL: {url}")
                 self._emit_database_event(
                     database=api_name, label=self._format_api_name(api_name),
-                    status='matched', attempt=2 if is_retry else 1,
+                    status=result_status, attempt=2 if is_retry else 1,
                     duration_ms=round(duration * 1000),
-                    candidate=self._database_trace_summary(verified_data),
+                    candidate=self._database_trace_summary(verified_data, url),
                 )
                 return verified_data, errors, url, True, 'none', ''
             else:

@@ -42,6 +42,23 @@ describe('reference search operation state', () => {
     expect(useCheckStore.getState().status).not.toBe('completed')
   })
 
+  it('keeps the final source summaries delivered with completion', () => {
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'op-final', session_id: 's-final', check_id: 17,
+      reference_key: 'id:ref-1', status: 'running' })
+    store.handleMessage({ type: 'reference_search_completed', operation_id: 'op-final',
+      check_id: 17, reference_key: 'id:ref-1', sequence: 2,
+      reference: { id: 'ref-1', status: 'verified' },
+      sources: [{ database: 'crossref', label: 'CrossRef', status: 'matched',
+        candidate: { title: 'Matched title', authors: ['Ada Lovelace'], year: 2024,
+          url: 'https://doi.org/10.1000/example' } }],
+      duration_ms: 100 })
+
+    const operation = useReferenceSearchStore.getState().getForReference(17, 'id:ref-1')
+    expect(operation.sources.crossref.candidate.authors).toEqual(['Ada Lovelace'])
+    expect(operation.sources.crossref.candidate.url).toBe('https://doi.org/10.1000/example')
+  })
+
   it('keeps duplicate citation indexes bound to the resolved row position', () => {
     const references = [
       { index: 26, title: 'Management Services', status: 'warning' },
