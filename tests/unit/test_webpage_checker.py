@@ -182,6 +182,39 @@ def test_institutional_sign_in_is_access_required_not_metadata_mismatch(monkeypa
     assert "Author mismatch" not in issues[0]["warning_details"]
 
 
+def test_shibboleth_authentication_request_is_access_required(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = "https://proxy.example.org/record/978-3-7643-7421-1"
+    html = "<html><head><title>Shibboleth Authentication Request</title></head><body></body></html>"
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda requested: DummyResponse(html, url=url),
+    )
+
+    data, issues, checked_url = checker.verify_reference({
+        "title": "Grundlagen der allgemeinen und anorganischen Chemie",
+        "authors": ["Alfons Hädener", "Heinz Kaufmann"],
+        "year": 2006,
+        "url": url,
+    })
+
+    assert data is None
+    assert checked_url == url
+    assert len(issues) == 1
+    assert issues[0]["warning_type"] == "authentication"
+    assert issues[0]["requires_authentication"] is True
+
+
+def test_authentication_title_is_access_required():
+    from bs4 import BeautifulSoup
+
+    assert detect_authentication_interstitial(
+        BeautifulSoup("<html><head><title>Authentication</title></head><body></body></html>", "html.parser"),
+        "https://identity.example.org/login",
+    ) == "The source requires an authenticated browser session."
+
+
 def test_login_shaped_permalink_needs_page_evidence_before_classification():
     html = """
     <html><head><title>Big Data - Fluch oder Segen?</title></head>
@@ -266,6 +299,32 @@ def test_dynamic_catalogue_uses_record_heading_and_visible_author_line(monkeypat
     assert data["title"].startswith("Big Data - Fluch oder Segen?")
     assert data["authors"] == ["Ronald Bachmann", "Guido Kemper", "Thomas Gerzer"]
     assert not any(issue.get("warning_type") in {"title", "author"} for issue in issues)
+
+
+def test_footer_project_credit_is_used_as_webpage_author(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = "https://www.periodensystem.info/elemente/sauerstoff/"
+    html = """
+    <html><head><title>Sauerstoff</title></head><body>
+      <main><h1>Sauerstoff</h1><p>Kenndaten zu Sauerstoff.</p></main>
+      <footer>© 1995-2026 periodensystem.info. Ein Projekt von Andy Hoppe. Rendered in XHTML 1.0 Strict.</footer>
+    </body></html>
+    """
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda requested: DummyResponse(html, url=url),
+    )
+
+    data, issues, _ = checker.verify_reference({
+        "title": "Sauerstoff",
+        "authors": ["Andy Hoppe"],
+        "year": 2020,
+        "url": url,
+    })
+
+    assert data["authors"] == ["Andy Hoppe"]
+    assert not any(issue.get("warning_type") == "author" for issue in issues)
 
 
 def test_academic_url_with_academic_venue_still_requires_paper_verification(monkeypatch):

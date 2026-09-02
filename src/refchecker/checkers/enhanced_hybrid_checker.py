@@ -515,6 +515,45 @@ class EnhancedHybridReferenceChecker:
             external_ids = {}
         doi = data.get('doi') or data.get('DOI') or external_ids.get('DOI') or external_ids.get('doi')
 
+        links: List[Dict[str, str]] = []
+        seen_links = set()
+
+        def add_link(link_type: str, value: Any) -> None:
+            if not isinstance(value, str):
+                return
+            candidate = value.strip()
+            if not candidate.lower().startswith(('http://', 'https://')) or candidate in seen_links:
+                return
+            seen_links.add(candidate)
+            links.append({'type': link_type or 'other', 'url': candidate})
+
+        def add_link_value(link_type: str, value: Any) -> None:
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    add_link_value(link_type, item)
+            elif isinstance(value, dict):
+                direct = value.get('url') or value.get('URL') or value.get('href')
+                if direct:
+                    add_link(str(value.get('type') or link_type), direct)
+                else:
+                    for nested_type, nested_value in value.items():
+                        add_link_value(str(nested_type), nested_value)
+            else:
+                add_link(link_type, value)
+
+        add_link('result', url)
+        for field, link_type in (
+            ('url', 'result'), ('URL', 'result'), ('landing_page_url', 'result'),
+            ('landingPageUrl', 'result'), ('source_url', 'source'),
+            ('_source_url', 'source'), ('pdf_url', 'pdf'), ('oa_pdf_url', 'oa_pdf'),
+            ('link', 'other'), ('links', 'other'), ('urls', 'other'),
+        ):
+            add_link_value(link_type, data.get(field))
+        add_link_value('oa_pdf', data.get('openAccessPdf'))
+        for field, value in data.items():
+            if 'url' in str(field).lower() or 'link' in str(field).lower():
+                add_link_value(str(field), value)
+
         raw_authors = data.get('authors') or data.get('author') or data.get('creators') or []
         if isinstance(raw_authors, (str, dict)):
             raw_authors = [raw_authors]
@@ -551,24 +590,31 @@ class EnhancedHybridReferenceChecker:
             if str(name).strip():
                 corporate_contributors.append(str(name).strip())
 
-        result_url = (
-            url or data.get('url') or data.get('URL') or data.get('landing_page_url')
-            or data.get('landingPageUrl')
-        )
-        if not result_url and doi:
+        if doi:
             normalized_doi = str(doi).strip()
             for prefix in ('https://doi.org/', 'http://doi.org/', 'doi:'):
                 if normalized_doi.lower().startswith(prefix):
                     normalized_doi = normalized_doi[len(prefix):]
                     break
             if normalized_doi:
-                result_url = f'https://doi.org/{normalized_doi}'
+                add_link('doi', f'https://doi.org/{normalized_doi}')
+
+        arxiv_id = external_ids.get('ArXiv') or external_ids.get('arxiv') or data.get('arxiv_id')
+        if arxiv_id:
+            add_link('arxiv', f'https://arxiv.org/abs/{arxiv_id}')
+
+        s2_id = external_ids.get('S2PaperId') or data.get('paperId')
+        if s2_id:
+            add_link('semantic_scholar', f'https://www.semanticscholar.org/paper/{s2_id}')
+
+        result_url = links[0]['url'] if links else None
         return {
             'title': data.get('title') or data.get('display_name'),
             'authors': authors,
             'corporate_contributors': corporate_contributors,
             'year': data.get('publication_year') or data.get('year'),
             'url': result_url,
+            'links': links,
             'doi': doi,
             'id': (
                 data.get('paperId') or data.get('id') or data.get('ppn')

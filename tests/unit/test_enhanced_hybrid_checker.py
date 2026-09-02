@@ -74,9 +74,29 @@ def test_database_candidate_summary_includes_display_metadata_and_result_url():
         'corporate_contributors': [],
         'year': 2024,
         'url': 'https://example.org/result',
+        'links': [
+            {'type': 'result', 'url': 'https://example.org/result'},
+            {'type': 'doi', 'url': 'https://doi.org/10.1000/example'},
+        ],
         'doi': '10.1000/example',
         'id': None,
     }
+
+
+def test_database_candidate_summary_keeps_all_distinct_links():
+    summary = EnhancedHybridReferenceChecker._database_trace_summary({
+        'url': 'https://example.org/landing',
+        'urls': ['https://example.org/landing', 'https://example.org/alternate'],
+        'openAccessPdf': {'url': 'https://example.org/paper.pdf'},
+        'externalIds': {'ArXiv': '2401.01234'},
+    })
+
+    assert [item['url'] for item in summary['links']] == [
+        'https://example.org/landing',
+        'https://example.org/alternate',
+        'https://example.org/paper.pdf',
+        'https://arxiv.org/abs/2401.01234',
+    ]
 
 
 def test_cancelled_verification_does_not_call_provider():

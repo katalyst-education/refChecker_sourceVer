@@ -29,7 +29,9 @@ import {
 } from '../../utils/venueAbbreviations'
 import ReferenceEnrichmentStrip from './ReferenceEnrichmentStrip'
 import AdditionalInfoBar from './AdditionalInfoBar'
+import ReferenceLinksList from './ReferenceLinksList'
 import ArticleAssistant from '../MainPanel/ArticleAssistant'
+import { collectReferenceLinks } from '../../utils/referenceLinks'
 
 // Click handler that routes link clicks through Tauri's shell plugin when
 // running inside the desktop app. Belt-and-braces alongside the global
@@ -575,20 +577,6 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     )
   }
 
-  // Format URL type for display
-  const formatUrlType = (type) => {
-    switch (type) {
-      case 'llm_verified': return 'Verified URL'
-      case 'verified_url': return 'Verified URL'
-      case 'semantic_scholar': return 'Verified URL'
-      case 'arxiv': return 'ArXiv URL'
-      case 'doi': return 'DOI URL'
-      case 'openalex': return 'OpenAlex URL'
-      case 'openreview': return 'OpenReview URL'
-      default: return 'URL'
-    }
-  }
-
   const formatWarningType = (type) => {
     switch (type) {
       case 'author': return 'Author'
@@ -611,17 +599,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
           : null
       )
 
-  const displayUrls = hasLlmVerifiedUrl
-    ? (reference.authoritative_urls || []).filter(urlObj => urlObj.type === 'llm_verified').concat(
-      foundMetadataMatchesCitation && !(reference.authoritative_urls || []).some(urlObj => urlObj.type === 'llm_verified')
-        ? [{ type: 'llm_verified', url: assessment.link }]
-        : []
-    )
-    : reference.authoritative_urls?.length
-      ? reference.authoritative_urls
-    : reference.status === 'verified' && reference.cited_url
-      ? [{ type: 'verified_url', url: reference.cited_url }]
-      : []
+  const displayUrls = collectReferenceLinks(reference, assessment)
 
   const recheckWarnings = (reference.errors || [])
       .filter(issue => issue.warning_type && !issue.error_type)
@@ -1125,56 +1103,12 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
             </div>
           )}
 
-          {/* Authoritative URLs - deduplicate arxiv URLs (prefer abs over pdf) */}
-          {(() => {
-            const urls = displayUrls
-            // Group by type and deduplicate arxiv
-            const seenTypes = new Set()
-            const filteredUrls = urls.filter(urlObj => {
-              // For arxiv, only show abs URL (skip pdf if we already have abs)
-              if (urlObj.type === 'arxiv') {
-                if (seenTypes.has('arxiv')) return false
-                // Prefer abs URL over pdf
-                const hasAbsUrl = urls.some(u => u.type === 'arxiv' && u.url?.includes('/abs/'))
-                if (hasAbsUrl && urlObj.url?.includes('/pdf/')) return false
-                seenTypes.add('arxiv')
-                return true
-              }
-              // For other types, show all
-              return true
-            })
-
-            return filteredUrls.map((urlObj, i) => (
-              <div
-                key={i}
-                className="flex mb-1"
-                style={{ minWidth: 0 }}
-              >
-                <span
-                  className="flex-shrink-0"
-                  style={{ color: 'var(--color-text-secondary)', width: '120px' }}
-                >
-                  {formatUrlType(urlObj.type)}:
-                </span>
-                <a
-                  href={urlObj.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={handleExternalClick(urlObj.url)}
-                  className="hover:underline"
-                  style={{
-                    color: 'var(--color-link)',
-                    overflowWrap: 'anywhere',
-                    wordBreak: 'break-all',
-                    minWidth: 0,
-                    flex: '1 1 auto',
-                  }}
-                >
-                  {urlObj.url}
-                </a>
-              </div>
-            ))
-          })()}
+          <ReferenceLinksList
+            links={displayUrls}
+            summary="Links"
+            className="mb-2"
+            onLinkClick={handleExternalClick}
+          />
 
           {/* Display-ready enrichment from OpenAlex / Crossref / S2 —
               cited-by count, refs count, OA, external IDs, FoS chips,
@@ -1441,7 +1375,13 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     prev.infos === next.infos &&
     prev.suggestions === next.suggestions &&
     (prev.matched_database ?? null) === (next.matched_database ?? null) &&
-    prev.authoritative_urls === next.authoritative_urls
+    prev.authoritative_urls === next.authoritative_urls &&
+    prev.cited_url === next.cited_url &&
+    prev.url === next.url &&
+    prev.verified_url === next.verified_url &&
+    prev.ref_verified_url === next.ref_verified_url &&
+    prev.oa_pdf_url === next.oa_pdf_url &&
+    prev.enrichment === next.enrichment
   )
 })
 

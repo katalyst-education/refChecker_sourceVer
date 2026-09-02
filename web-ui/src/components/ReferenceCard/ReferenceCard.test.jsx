@@ -142,6 +142,36 @@ describe('ReferenceCard', () => {
     expect(screen.getByTitle('Verified from website')).toBeTruthy()
     expect(screen.getByText('Web page')).toBeTruthy()
   })
+
+  it('shows every distinct result link in a collapsible list', () => {
+    const reference = {
+      status: 'verified',
+      title: 'Linked paper',
+      authors: ['A. Author'],
+      cited_url: 'https://publisher.example/paper',
+      authoritative_urls: [
+        { type: 'doi', url: 'https://doi.org/10.1000/example' },
+        { type: 'arxiv', url: 'https://arxiv.org/abs/2401.01234' },
+        { type: 'doi', url: 'https://doi.org/10.1000/example' },
+      ],
+      hallucination_assessment: {
+        link: 'https://search.example/match',
+        found_title: 'Linked paper',
+        found_authors: 'A. Author',
+      },
+      errors: [],
+      warnings: [],
+      suggestions: [],
+    }
+
+    render(<ReferenceCard reference={reference} index={0} />)
+
+    fireEvent.click(screen.getByText('Links (4)'))
+    expect(screen.getByRole('link', { name: 'https://doi.org/10.1000/example' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'https://arxiv.org/abs/2401.01234' })).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: 'https://publisher.example/paper' })).toHaveLength(2)
+    expect(screen.getByRole('link', { name: 'https://search.example/match' })).toBeInTheDocument()
+  })
 })
 
 describe('ReferenceCard — R04 hallucination-pending safety net', () => {

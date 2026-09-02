@@ -11,6 +11,8 @@ import {
   completeAuthenticatedSourceSession,
   resolveDoi,
 } from '../../utils/api'
+import ReferenceLinksList from '../ReferenceCard/ReferenceLinksList'
+import { collectCandidateLinks } from '../../utils/referenceLinks'
 
 const databaseStatusLabel = (status) => ({
   matched: 'Match',
@@ -35,11 +37,6 @@ const databaseStatusColor = (status) => {
   if (status === 'metadata_conflict') return 'var(--color-warning, #d97706)'
   if (['failed', 'timed_out', 'rate_limited', 'excluded_wrong_match'].includes(status)) return 'var(--color-error, #ef4444)'
   return 'var(--color-text-muted)'
-}
-
-const safeResultUrl = (candidate) => {
-  const value = candidate?.url || candidate?.link
-  return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null
 }
 
 const candidateAuthorText = (candidate) => {
@@ -418,7 +415,7 @@ function isAuthenticationIssue(issue) {
   const details = String(issue.error_details || issue.warning_details || '')
   const parsedActual = details.match(/\bactual\s*:\s*([^\r\n]+)/i)?.[1] || ''
   const actualTitle = String(issue.actual_value || parsedActual).trim()
-  return /\b(?:sign[ -]?in|log[ -]?in|authentication required|loading|wird\s+geladen|chargement|cargando|caricamento|laden)\b/i.test(actualTitle)
+  return /\b(?:sign[ -]?in|log[ -]?in|shibboleth|authentication(?:\s+request)?|loading|wird\s+geladen|chargement|cargando|caricamento|laden)\b/i.test(actualTitle)
 }
 
 
@@ -723,8 +720,10 @@ export function ReferenceRowActions({
                     const corporateContributors = Array.isArray(candidate.corporate_contributors)
                       ? candidate.corporate_contributors.filter(Boolean).join(', ')
                       : ''
-                    const resultUrl = safeResultUrl(candidate)
-                    const hasOverview = candidate.title || authors || corporateContributors || candidate.year || resultUrl
+                    const candidateLinks = collectCandidateLinks(candidate)
+                    const hasOverview = Boolean(
+                      candidate.title || authors || corporateContributors || candidate.year || candidateLinks.length,
+                    )
                     return (
                       <li
                         key={source.database}
@@ -754,16 +753,7 @@ export function ReferenceRowActions({
                             {corporateContributors && (
                               <div>Corporate contributor: {corporateContributors}</div>
                             )}
-                            {resultUrl && (
-                              <a
-                                href={resultUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                style={{ color: 'var(--color-accent)', wordBreak: 'break-all' }}
-                              >
-                                Open database result ↗
-                              </a>
-                            )}
+                            <ReferenceLinksList links={candidateLinks} summary="Links" className="mt-1" />
                           </div>
                         )}
                         {source.reason && (

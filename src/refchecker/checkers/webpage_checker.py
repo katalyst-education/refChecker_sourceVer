@@ -42,6 +42,12 @@ def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '')
         )
     )
 
+    # Identity providers commonly return a minimal redirect page with no
+    # password form or visible sign-in controls. These page titles are an
+    # explicit authentication protocol signal, independent of the host.
+    if 'shibboleth' in title or re.search(r'\bauthentication\b', title):
+        return 'The source requires an authenticated browser session.'
+
     if has_password and (has_auth_title or has_auth_content):
         return 'The source returned a sign-in page instead of the cited content.'
     if has_auth_title and has_auth_content:
@@ -587,6 +593,34 @@ class WebPageChecker:
             authors = unique_clean_names(values)
             if authors:
                 return authors
+
+        # Static reference sites often identify their creator only in the
+        # footer (for example, "Ein Projekt von Andy Hoppe").  This is still
+        # an explicit authorship credit, unlike a copyright notice or the
+        # site's domain name.  Restrict the fallback to conventional creator
+        # phrases so ordinary footer prose is not mistaken for an author.
+        credit_pattern = re.compile(
+            r'\b(?i:(?:'
+            r'(?:a|the)\s+project\s+(?:by|from)|'
+            r'(?:website|site)\s+(?:by|created\s+by)|'
+            r'(?:created|developed|maintained)\s+by|'
+            r'ein\s+projekt\s+von|projekt\s+von|'
+            r'(?:un\s+)?proyecto\s+de|'
+            r'(?:un\s+)?projet\s+(?:de|par)'
+            r'))\s+([A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ’\'’-]*(?:\s+[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ’\'’-]*){1,4})',
+        )
+        footer_elements = soup.find_all('footer')
+        # Older pages commonly use a footer-like div rather than a semantic
+        # footer element. Searching the visible text remains safe because the
+        # credit phrase itself is required above.
+        credit_text = ' '.join(
+            element.get_text(' ', strip=True)
+            for element in footer_elements
+        ) or soup.get_text(' ', strip=True)
+        credited_names = [match.group(1) for match in credit_pattern.finditer(credit_text)]
+        authors = unique_clean_names(credited_names)
+        if authors:
+            return authors
 
         return []
     

@@ -100,6 +100,25 @@ describe('ReferenceRowActions progress feedback', () => {
     expect(screen.getByRole('button', { name: 'Sign in and retry' })).toBeInTheDocument()
   })
 
+  it('offers browser retry for a legacy Shibboleth authentication request', () => {
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        reference={{
+          id: 'ref-1',
+          title: 'Protected reference',
+          cited_url: 'https://proxy.example.org/record/123',
+          warnings: [{
+            error_type: 'title',
+            error_details: 'Title mismatch:\n       cited: Protected reference\n       actual: Shibboleth Authentication Request',
+          }],
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Sign in and retry' })).toBeInTheDocument()
+  })
+
   it('shows document re-extraction progress inside the card', () => {
     render(
       <ReferenceRowActions
@@ -177,6 +196,10 @@ describe('ReferenceRowActions progress feedback', () => {
                 title: 'A database title', authors: ['Ada Lovelace', 'Grace Hopper'],
                 corporate_contributors: ['Example Research Institute'],
                 year: 2024, url: 'https://doi.org/10.1000/example',
+                links: [
+                  { type: 'doi', url: 'https://doi.org/10.1000/example' },
+                  { type: 'pdf', url: 'https://example.org/paper.pdf' },
+                ],
               },
             },
             openalex: {
@@ -201,13 +224,17 @@ describe('ReferenceRowActions progress feedback', () => {
     expect(screen.getByText('A database title')).toBeInTheDocument()
     expect(screen.getByText('Ada Lovelace, Grace Hopper · 2024')).toBeInTheDocument()
     expect(screen.getByText('Corporate contributor: Example Research Institute')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Open database result ↗' }))
+    fireEvent.click(screen.getByText('Links (2)'))
+    expect(screen.getByRole('link', { name: 'https://doi.org/10.1000/example' }))
       .toHaveAttribute('href', 'https://doi.org/10.1000/example')
+    expect(screen.getByRole('link', { name: 'https://example.org/paper.pdf' }))
+      .toHaveAttribute('href', 'https://example.org/paper.pdf')
     expect(screen.getByText('Confirmed')).toBeInTheDocument()
     expect(screen.getByText('Excluded: likely wrong match')).toBeInTheDocument()
     expect(screen.getByText('Metadata conflict')).toBeInTheDocument()
     expect(screen.getByText('title similarity is only 0.31')).toBeInTheDocument()
     expect(screen.getByText('Not searched')).toBeInTheDocument()
+    expect(screen.queryByText('0')).not.toBeInTheDocument()
   })
 })
 
