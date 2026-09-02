@@ -98,6 +98,16 @@ describe('reference verification api helper', () => {
     )
   })
 
+  it('queues ordinary re-verification with a short request for job acceptance', () => {
+    const payload = { expected_title: 'Queued result' }
+
+    api.startReferenceVerification(17, 'index:4', payload)
+
+    expect(mocks.apiInstance.post).toHaveBeenCalledWith(
+      '/history/17/references/index%3A4/verify-async', payload,
+    )
+  })
+
   it('opens and completes a local authenticated source session', () => {
     const url = 'https://search.ebscohost.com/login.aspx?direct=true&AN=979090'
 

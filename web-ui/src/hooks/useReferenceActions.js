@@ -4,8 +4,8 @@ import {
   removeReferenceFromCheck,
   suggestAlternativeReference,
   startReferenceSearch,
+  startReferenceVerification,
   cancelReferenceSearch,
-  verifyReferenceInCheck,
 } from '../utils/api'
 import { useHistoryStore } from '../stores/useHistoryStore'
 import { useCheckStore } from '../stores/useCheckStore'
@@ -130,7 +130,8 @@ export default function useReferenceActions() {
       // sit on a permanent 'pending'.
       if (addedId != null) {
         try {
-          await verifyReferenceInCheck(selectedCheckId, String(addedId))
+          const verification = await startReferenceVerification(selectedCheckId, String(addedId))
+          registerReferenceSearch(verification.data)
         } catch {
           /* server may not support it yet; reload still surfaces the row */
         }
@@ -252,7 +253,9 @@ export default function useReferenceActions() {
       // Re-verify runs in the background — don't await. The reload
       // below will pick up its result on the next progress tick.
       if (addedId != null) {
-        verifyReferenceInCheck(selectedCheckId, String(addedId)).catch(() => {})
+        startReferenceVerification(selectedCheckId, String(addedId)).then(response => {
+          registerReferenceSearch(response.data)
+        }).catch(() => {})
       }
       // reload picks up the real persisted row (with the server-assigned
       // manual-XXX id) and replaces our placeholder.
@@ -310,38 +313,14 @@ export default function useReferenceActions() {
       return next
     })
     try {
-      const response = await verifyReferenceInCheck(selectedCheckId, apiRefId, {
+      const response = await startReferenceVerification(selectedCheckId, apiRefId, {
         ...opts,
         expected_id: ref?.id ?? null,
         expected_index: ref?.index ?? null,
         expected_title: ref?.title ?? null,
       })
-      const updated = response?.data?.reference
-      if (!updated) {
-        throw new Error('The verification finished without returning the updated reference.')
-      }
-
-      // The endpoint returns the complete persisted row, so update that row
-      // directly instead of force-reloading the whole check. This preserves
-      // the list's scroll position and keeps the user's card in view.
-      const historyStore = useHistoryStore.getState()
-      const historyPosition = findReferencePosition(
-          historyStore.selectedCheck?.results,
-          // Completed history views remap citation indices to local 0-based
-          // display positions. The response carries the original persisted
-          // index, so use it to replace the saved row instead of its neighbor.
-          updated,
-          i,
-      )
-      if (historyPosition >= 0) {
-        historyStore.updateHistoryReference?.(selectedCheckId, historyPosition, updated)
-      }
-      const checkStore = useCheckStore.getState()
-      if (checkStore.currentCheckId === selectedCheckId) {
-        const checkPosition = findReferencePosition(checkStore.references, ref, i)
-        if (checkPosition >= 0) checkStore.updateReference?.(checkPosition, updated)
-      }
-      return updated
+      registerReferenceSearch(response.data)
+      return response.data
     } catch (e) {
       alert(e?.response?.data?.detail || e?.message || 'Re-verify failed')
       return null

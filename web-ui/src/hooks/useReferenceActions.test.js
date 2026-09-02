@@ -6,12 +6,12 @@ vi.mock('../utils/api', () => ({
   removeReferenceFromCheck: vi.fn(),
   suggestAlternativeReference: vi.fn(),
   startReferenceSearch: vi.fn(),
+  startReferenceVerification: vi.fn(),
   cancelReferenceSearch: vi.fn(),
-  verifyReferenceInCheck: vi.fn(),
 }))
 
 import useReferenceActions from './useReferenceActions'
-import { startReferenceSearch, suggestAlternativeReference, verifyReferenceInCheck } from '../utils/api'
+import { startReferenceSearch, startReferenceVerification, suggestAlternativeReference } from '../utils/api'
 import { referenceRowIdentity } from '../utils/referenceIdentity'
 import { useCheckStore } from '../stores/useCheckStore'
 import { useHistoryStore } from '../stores/useHistoryStore'
@@ -52,43 +52,26 @@ describe('useReferenceActions re-verification', () => {
     vi.stubGlobal('alert', vi.fn())
   })
 
-  it('updates only the returned row without reloading the whole check', async () => {
-    let finishRequest
-    verifyReferenceInCheck.mockImplementation(() => new Promise(resolve => {
-      finishRequest = resolve
-    }))
-    const updated = {
-      ...reference,
-      title: 'Freshly extracted title',
-      status: 'verified',
-      warnings: [],
-    }
+  it('queues re-verification without waiting for the verifier response', async () => {
+    startReferenceVerification.mockResolvedValue({ data: {
+      operation_id: 'op-verify-1', session_id: 'reference-verify-1', check_id: 17,
+      reference_key: 'uid:row-ref-1', operation_type: 'verify', status: 'queued',
+    } })
     const { result } = renderHook(() => useReferenceActions())
 
-    let request
     await act(async () => {
-      request = result.current.handleReverify(reference, 0)
-      await Promise.resolve()
+      await result.current.handleReverify(reference, 0)
     })
 
-    expect(result.current.getReverifyAction('uid:row-ref-1')).toBe('reextract')
-    expect(result.current.isReverifying('uid:row-ref-1')).toBe(true)
-
-    await act(async () => {
-      finishRequest({ data: { reference: updated } })
-      await request
-    })
-
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'uid:row-ref-1', {
+    expect(startReferenceVerification).toHaveBeenCalledWith(17, 'uid:row-ref-1', {
       expected_id: 'ref-1',
       expected_index: 0,
       expected_title: 'Original title',
     })
-    expect(useHistoryStore.getState().selectedCheck.results[0]).toMatchObject(updated)
-    expect(useCheckStore.getState().references[0]).toMatchObject(updated)
-    expect(useHistoryStore.getState().detailCache[17]).toBeUndefined()
+    expect(result.current.getReferenceSearchOperation(reference, 0)).toMatchObject({
+      operation_id: 'op-verify-1', operation_type: 'verify', status: 'queued',
+    })
     expect(useHistoryStore.getState().selectCheck).not.toHaveBeenCalled()
-    expect(useHistoryStore.getState().isLoadingDetail).toBe(false)
     expect(result.current.isReverifying('uid:row-ref-1')).toBe(false)
   })
 
@@ -114,7 +97,7 @@ describe('useReferenceActions re-verification', () => {
       operation_id: 'op-1',
       status: 'queued',
     })
-    expect(verifyReferenceInCheck).not.toHaveBeenCalled()
+    expect(startReferenceVerification).not.toHaveBeenCalled()
   })
 
   it('keeps duplicate citation indexes on separate action identities', async () => {
@@ -149,9 +132,10 @@ describe('useReferenceActions re-verification', () => {
   })
 
   it('sends manual metadata edits as fresh verification overrides', async () => {
-    verifyReferenceInCheck.mockResolvedValue({
-      data: { reference: { ...reference, title: 'Edited title', status: 'verified' } },
-    })
+    startReferenceVerification.mockResolvedValue({ data: {
+      operation_id: 'op-edit', session_id: 'reference-verify-edit', check_id: 17,
+      reference_key: 'uid:row-ref-1', operation_type: 'verify', status: 'queued',
+    } })
     const { result } = renderHook(() => useReferenceActions())
 
     await act(async () => {
@@ -162,7 +146,7 @@ describe('useReferenceActions re-verification', () => {
       })
     })
 
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
+    expect(startReferenceVerification).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
       manual_edit: true,
       force_all_databases: true,
       overrides: {
@@ -174,20 +158,23 @@ describe('useReferenceActions re-verification', () => {
   })
 
   it('restores the server-side extracted metadata snapshot', async () => {
-    verifyReferenceInCheck.mockResolvedValue({ data: { reference } })
+    startReferenceVerification.mockResolvedValue({ data: {
+      operation_id: 'op-restore', session_id: 'reference-verify-restore', check_id: 17,
+      reference_key: 'uid:row-ref-1', operation_type: 'verify', status: 'queued',
+    } })
     const { result } = renderHook(() => useReferenceActions())
 
     await act(async () => {
       await result.current.handleRestoreExtractedMetadata(reference, 0)
     })
 
-    expect(verifyReferenceInCheck).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
+    expect(startReferenceVerification).toHaveBeenCalledWith(17, 'uid:row-ref-1', expect.objectContaining({
       restore_extracted: true,
       force_all_databases: true,
     }))
   })
 
-  it('updates the persisted history row when the view remapped it to a zero-based index', async () => {
+  it('queues an edit against the clicked persisted identity when the view remapped it', async () => {
     const persistedRows = [
       { index: 17, title: 'Previous reference', status: 'verified' },
       { index: 18, title: 'Bad extracted title', status: 'unverified' },
@@ -208,16 +195,10 @@ describe('useReferenceActions re-verification', () => {
       history: [selectedCheck],
     })
     useCheckStore.setState({ currentCheckId: null, references: [] })
-    verifyReferenceInCheck.mockResolvedValue({
-      data: {
-        reference: {
-          ...persistedRows[1],
-          title: 'Corrected title',
-          status: 'verified',
-          manual_edit: { original: { title: 'Bad extracted title' } },
-        },
-      },
-    })
+    startReferenceVerification.mockResolvedValue({ data: {
+      operation_id: 'op-remapped', session_id: 'reference-verify-remapped', check_id: 17,
+      reference_key: 'uid:row-remapped', operation_type: 'verify', status: 'queued',
+    } })
     const { result } = renderHook(() => useReferenceActions())
 
     await act(async () => {
@@ -226,13 +207,11 @@ describe('useReferenceActions re-verification', () => {
       })
     })
 
-    const rows = useHistoryStore.getState().selectedCheck.results
-    expect(rows[0]).toMatchObject({ index: 17, title: 'Previous reference' })
-    expect(rows[1]).toMatchObject({
-      index: 18,
-      title: 'Corrected title',
-      status: 'verified',
-    })
+    expect(startReferenceVerification).toHaveBeenCalledWith(17, 'index:1', expect.objectContaining({
+      expected_index: 1,
+      expected_title: 'Bad extracted title',
+      manual_edit: true,
+    }))
   })
 })
 

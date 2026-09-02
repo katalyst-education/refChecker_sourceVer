@@ -367,6 +367,10 @@ export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
     // database-level timeouts govern this explicit long-running operation.
     opts.force_all_databases ? { timeout: 0 } : undefined,
   )
+// Long-running re-verification is an accepted background operation. The POST
+// only waits for the job record; ReferenceSearchManager receives completion.
+export const startReferenceVerification = (checkId, refId, opts = {}) =>
+  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/verify-async`, opts)
 export const startReferenceSearch = (checkId, refId, payload = {}) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/search-all`, payload)
 export const getReferenceSearch = (operationId) =>

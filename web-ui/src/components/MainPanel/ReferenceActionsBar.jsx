@@ -512,9 +512,17 @@ export function ReferenceRowActions({
     color: 'var(--color-text-secondary)',
     transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
   }
-  const styleFor = (busy) => ({ ...baseStyle, opacity: (busy || !selectedCheckId || globalBusy) ? 0.55 : 1 })
-  const activeSearch = ['queued', 'running', 'cancelling'].includes(searchOperation?.status)
-  const databaseSearchWaiting = ['queued', 'running'].includes(searchOperation?.status)
+  const activeOperation = ['queued', 'running', 'cancelling'].includes(searchOperation?.status)
+  // Disabled controls need a visible state too: ordinary re-verification is a
+  // background operation, so it does not leave a local `reverifyBusy` flag
+  // set while it runs.
+  const styleFor = (busy) => ({
+    ...baseStyle,
+    opacity: (busy || activeOperation || !selectedCheckId || globalBusy) ? 0.55 : 1,
+  })
+  const activeSearch = activeOperation && searchOperation?.operation_type === 'search-all'
+  const activeVerification = activeOperation && searchOperation?.operation_type !== 'search-all'
+  const databaseSearchWaiting = activeSearch && ['queued', 'running'].includes(searchOperation?.status)
   const databaseSources = (() => {
     const sourceMap = searchOperation?.sources || {}
     const configured = Array.isArray(searchOperation?.configured_sources)
@@ -531,8 +539,8 @@ export function ReferenceRowActions({
       ...Object.values(sourceMap).filter(source => !configuredNames.has(source.database)),
     ]
   })()
-  const disableFor = (busy) => busy || activeSearch || !selectedCheckId || globalBusy || editing
-  const reextracting = reverifyBusy && reverifyAction === 'reextract'
+  const disableFor = (busy) => busy || activeOperation || !selectedCheckId || globalBusy || editing
+  const reextracting = (reverifyBusy && reverifyAction === 'reextract') || activeVerification
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
   const savingEdit = reverifyBusy && reverifyAction === 'manual-edit'
   const restoringExtracted = reverifyBusy && reverifyAction === 'restore-extracted'
@@ -570,7 +578,7 @@ export function ReferenceRowActions({
     }
   }
   return (
-      <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || activeSearch) || undefined}>
+      <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || activeOperation) || undefined}>
         <div className="flex flex-wrap gap-1.5">
           <button
               type="button"
@@ -609,7 +617,7 @@ export function ReferenceRowActions({
               onClick={() => activeSearch
                 ? onCancelReferenceSearch?.(searchOperation)
                 : onReverifyAllDatabases?.(reference, displayIndex)}
-              disabled={searchOperation?.status === 'cancelling' || reverifyBusy || !selectedCheckId || globalBusy || editing}
+              disabled={activeVerification || searchOperation?.status === 'cancelling' || reverifyBusy || !selectedCheckId || globalBusy || editing}
               className="px-2.5 py-1 rounded-md font-medium"
               style={styleFor(reverifyBusy)}
               title={activeSearch ? 'Cancel this database search' : 'Keep the saved citation fields and search every configured database'}
@@ -667,6 +675,17 @@ export function ReferenceRowActions({
             {removeBusy ? '…' : 'Remove'}
           </button>
         </div>
+        {activeVerification && (
+          <div
+            className="mt-2 flex items-center gap-1.5"
+            role="status"
+            aria-live="polite"
+            style={{ color: 'var(--color-text-muted)' }}
+          >
+            <LoadingSpinner className="h-3.5 w-3.5" />
+            {searchOperation?.status === 'queued' ? 'Verification queued…' : 'Re-verifying…'}
+          </div>
+        )}
         {authStep === 'waiting' && !authError && (
           <div className="mt-2" style={{ color: 'var(--color-text-muted)' }}>
             Complete sign-in in the browser window, then click "I've signed in - retry".
@@ -677,7 +696,7 @@ export function ReferenceRowActions({
             {authError}
           </div>
         )}
-        {searchOperation && (
+        {searchOperation?.operation_type === 'search-all' && (
           <div
             className="mt-2 rounded-md p-2"
             style={{ border: '1px solid var(--color-border)', background: 'var(--color-bg-tertiary)' }}

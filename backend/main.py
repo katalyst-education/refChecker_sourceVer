@@ -1651,8 +1651,21 @@ active_checks = {}
 active_reference_searches: Dict[str, Dict[str, Any]] = {}
 # A reference search rewrites the check's result set when it completes. Keep
 # this strictly serial per user until result persistence is row-atomic.
+# Verification updates still replace a check's result document, so run one
+# operation per user at a time. Extra requests are persisted *queued* jobs,
+# rather than browser requests that wait behind the worker and eventually hit
+# a client timeout.
 MAX_REFERENCE_SEARCHES_PER_USER = 1
-REFERENCE_SEARCH_DEADLINE_SECONDS = int(os.environ.get("REFERENCE_SEARCH_DEADLINE_SECONDS", "300"))
+MAX_REFERENCE_JOBS_PER_USER = int(os.environ.get("MAX_REFERENCE_JOBS_PER_USER", "20"))
+MAX_REFERENCE_SEARCHES_GLOBAL = int(os.environ.get("MAX_REFERENCE_SEARCHES_GLOBAL", "3"))
+# Optional operator safety ceiling; unset by default. Provider-level request
+# timeouts/retries remain the protection against a stalled dependency.
+REFERENCE_SEARCH_DEADLINE_SECONDS = (
+    int(os.environ["REFERENCE_SEARCH_DEADLINE_SECONDS"])
+    if os.environ.get("REFERENCE_SEARCH_DEADLINE_SECONDS") else None
+)
+_reference_search_lanes: Dict[int, asyncio.Semaphore] = {}
+_reference_search_global_lane = asyncio.Semaphore(MAX_REFERENCE_SEARCHES_GLOBAL)
 
 # Per-user concurrent check tracking
 _user_active_checks: Dict[int, int] = {}
@@ -8345,6 +8358,95 @@ class _ReferenceSearchRequest(BaseModel):
     paperclip_api_key: Optional[str] = None
 
 
+def _reference_search_lane(owner_id: Optional[int]) -> asyncio.Semaphore:
+    """Return the in-process worker lane for one user's reference jobs."""
+    owner_key = -1 if owner_id is None else int(owner_id)
+    lane = _reference_search_lanes.get(owner_key)
+    if lane is None:
+        lane = asyncio.Semaphore(MAX_REFERENCE_SEARCHES_PER_USER)
+        _reference_search_lanes[owner_key] = lane
+    return lane
+
+
+async def _run_queued_reference_search_job(**kwargs: Any) -> None:
+    """Hold a queued operation until its user's serialized worker is free."""
+    async with _reference_search_global_lane:
+        async with _reference_search_lane(kwargs.get("owner_id")):
+            await _run_reference_search_job(**kwargs)
+
+
+async def _run_single_reference_verify_job(
+    *, operation_id: str, session_id: str, check_id: int, ref_id: str,
+    reference_key: str, owner_id: Optional[int], body: _VerifySingleRequest,
+    current_user: UserInfo, cancel_event: threading.Event,
+) -> None:
+    """Run the existing shared re-verifier as a persisted background operation."""
+    started = time.perf_counter()
+    progress: Dict[str, Any] = {
+        "status": "queued", "sequence": 0, "sources": {},
+        "operation_type": "verify",
+    }
+
+    async def emit(message_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        progress["sequence"] = int(progress.get("sequence") or 0) + 1
+        await manager.send_message(session_id, message_type, {
+            "operation_id": operation_id, "check_id": check_id,
+            "reference_key": reference_key, "sequence": progress["sequence"],
+            "operation_type": "verify", **(payload or {}),
+        })
+
+    try:
+        async with _reference_search_global_lane:
+            async with _reference_search_lane(owner_id):
+                if cancel_event.is_set():
+                    from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
+                    raise VerificationCancelled("Reference verification cancelled")
+                progress["status"] = "running"
+                await db.update_reference_search_operation(
+                    operation_id, status="running", progress=progress,
+                )
+                await emit("reference_search_started", {"configured_sources": []})
+                # This deliberately calls the established endpoint implementation:
+                # re-extraction, cache handling, verifier choice, and result
+                # projection remain identical to CLI/bulk/WebUI's prior path.
+                result = await verify_single_reference(check_id, ref_id, body, current_user)
+                if cancel_event.is_set():
+                    from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
+                    raise VerificationCancelled("Reference verification cancelled")
+
+        reference = result.get("reference") if isinstance(result, dict) else None
+        if not isinstance(reference, dict):
+            raise RuntimeError("The verification finished without an updated reference")
+        progress["status"] = "completed"
+        await db.update_reference_search_operation(
+            operation_id, status="completed", progress=progress,
+            reference=reference, terminal=True,
+        )
+        await emit("reference_search_completed", {
+            "reference": reference,
+            "sources": [],
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+        })
+    except Exception as exc:
+        cancelled = exc.__class__.__name__ == "VerificationCancelled"
+        if not cancelled:
+            logger.exception("Background reference verification failed: operation_id=%s", operation_id)
+        status = "cancelled" if cancelled else "error"
+        message = "Reference verification cancelled" if cancelled else str(exc)
+        progress["status"] = status
+        await db.update_reference_search_operation(
+            operation_id, status=status, progress=progress,
+            error_code="cancelled" if cancelled else "verify_failed",
+            error_message=message, terminal=True,
+        )
+        await emit("reference_search_cancelled" if cancelled else "reference_search_error", {
+            "error_code": "cancelled" if cancelled else "verify_failed",
+            "message": message, "sources": [],
+        })
+    finally:
+        active_reference_searches.pop(session_id, None)
+
+
 def _reference_search_fingerprint(reference: Dict[str, Any]) -> str:
     fields = {
         key: reference.get(key)
@@ -8392,7 +8494,7 @@ async def _run_reference_search_job(
     started = time.perf_counter()
     progress: Dict[str, Any] = {
         "status": "running", "sequence": 0, "sources": {},
-        "configured_sources": [],
+        "configured_sources": [], "operation_type": "search-all",
     }
 
     async def emit(message_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
@@ -8470,13 +8572,16 @@ async def _run_reference_search_job(
                 return verified_data, errors, url
 
         try:
-            verified_data, findings, url = await asyncio.wait_for(
-                asyncio.to_thread(run_verify),
-                timeout=REFERENCE_SEARCH_DEADLINE_SECONDS,
-            )
+            verification = asyncio.to_thread(run_verify)
+            if REFERENCE_SEARCH_DEADLINE_SECONDS is None:
+                verified_data, findings, url = await verification
+            else:
+                verified_data, findings, url = await asyncio.wait_for(
+                    verification, timeout=REFERENCE_SEARCH_DEADLINE_SECONDS,
+                )
         except asyncio.TimeoutError as exc:
             cancel_event.set()
-            raise TimeoutError("The all-database search exceeded its deadline") from exc
+            raise TimeoutError("The all-database search exceeded its operator-configured deadline") from exc
 
         if cancel_event.is_set():
             raise VerificationCancelled("Reference search cancelled")
@@ -8575,11 +8680,6 @@ async def start_reference_search(
     # edits cannot move its progress panel to a neighboring card.
     reference_key = f"uid:{refs[idx]['ref_uid']}"
 
-    owner_key = -1 if owner_id is None else owner_id
-    active_for_owner = sum(
-        1 for meta in active_reference_searches.values()
-        if (-1 if meta.get("user_id") is None else meta.get("user_id")) == owner_key
-    )
     # An existing operation is recovered below and should not consume a new slot.
     existing_ops = await db.list_active_reference_search_operations(owner_id)
     existing = next(
@@ -8589,6 +8689,7 @@ async def start_reference_search(
     if existing and existing["session_id"] in active_reference_searches:
         return {
             "operation_id": existing["operation_id"], "session_id": existing["session_id"],
+            "operation_type": existing.get("progress", {}).get("operation_type", "search-all"),
             "check_id": check_id, "reference_key": reference_key, "status": existing["status"],
         }
     if existing:
@@ -8598,21 +8699,19 @@ async def start_reference_search(
             existing["operation_id"], status="error", error_code="server_restarted",
             error_message="The server restarted before the search completed.", terminal=True,
         )
-    if active_for_owner >= MAX_REFERENCE_SEARCHES_PER_USER:
-        raise HTTPException(status_code=429, detail="Too many active reference searches")
-
     operation_id = str(uuid.uuid4())
     session_id = f"reference-search-{uuid.uuid4()}"
     try:
         operation, created = await db.create_reference_search_operation(
             operation_id, session_id, check_id, reference_key, user_id=owner_id,
-            max_active_per_user=MAX_REFERENCE_SEARCHES_PER_USER,
+            max_active_per_user=MAX_REFERENCE_JOBS_PER_USER,
         )
     except ReferenceSearchLimitReached:
         raise HTTPException(status_code=429, detail="Too many active reference searches")
     if not created:
         return {
             "operation_id": operation["operation_id"], "session_id": operation["session_id"],
+            "operation_type": operation.get("progress", {}).get("operation_type", "search-all"),
             "check_id": check_id, "reference_key": reference_key, "status": operation["status"],
         }
 
@@ -8620,7 +8719,7 @@ async def start_reference_search(
     ss_key = await _resolve_semantic_scholar_api_key(body.semantic_scholar_api_key)
     books_key = await _resolve_google_books_api_key(body.google_books_api_key)
     paperclip_key = await _resolve_paperclip_api_key(body.paperclip_api_key)
-    task = asyncio.create_task(_run_reference_search_job(
+    task = asyncio.create_task(_run_queued_reference_search_job(
         operation_id=operation_id, session_id=session_id, check_id=check_id,
         ref_id=ref_id, reference_key=reference_key, owner_id=owner_id,
         expected_id=body.expected_id, expected_index=body.expected_index,
@@ -8633,7 +8732,74 @@ async def start_reference_search(
         "user_id": owner_id, "operation_id": operation_id,
     }
     return {
-        "operation_id": operation_id, "session_id": session_id,
+        "operation_id": operation_id, "session_id": session_id, "operation_type": "search-all",
+        "check_id": check_id, "reference_key": reference_key, "status": "queued",
+    }
+
+
+@app.post("/api/history/{check_id}/references/{ref_id}/verify-async", status_code=202)
+async def start_single_reference_verification(
+    check_id: int, ref_id: str, body: _VerifySingleRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Queue ordinary re-verification and return before expensive work starts."""
+    owner_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=owner_id)
+    if refs is None:
+        raise HTTPException(status_code=404, detail="Check not found")
+    idx = _find_ref_index_precise(
+        refs, ref_id, expected_id=body.expected_id,
+        expected_index=body.expected_index, expected_title=body.expected_title,
+    )
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+    reference_key = f"uid:{refs[idx]['ref_uid']}"
+
+    existing_ops = await db.list_active_reference_search_operations(owner_id)
+    existing = next(
+        (op for op in existing_ops if op["check_id"] == check_id and op["reference_key"] == reference_key),
+        None,
+    )
+    if existing and existing["session_id"] in active_reference_searches:
+        return {
+            "operation_id": existing["operation_id"], "session_id": existing["session_id"],
+            "operation_type": existing.get("progress", {}).get("operation_type", "verify"),
+            "check_id": check_id, "reference_key": reference_key, "status": existing["status"],
+        }
+    if existing:
+        await db.update_reference_search_operation(
+            existing["operation_id"], status="error", error_code="server_restarted",
+            error_message="The server restarted before the verification completed.", terminal=True,
+        )
+
+    operation_id = str(uuid.uuid4())
+    session_id = f"reference-verify-{uuid.uuid4()}"
+    try:
+        operation, created = await db.create_reference_search_operation(
+            operation_id, session_id, check_id, reference_key, user_id=owner_id,
+            max_active_per_user=MAX_REFERENCE_JOBS_PER_USER,
+        )
+    except ReferenceSearchLimitReached:
+        raise HTTPException(status_code=429, detail="Too many queued reference verifications")
+    if not created:
+        return {
+            "operation_id": operation["operation_id"], "session_id": operation["session_id"],
+            "operation_type": operation.get("progress", {}).get("operation_type", "verify"),
+            "check_id": check_id, "reference_key": reference_key, "status": operation["status"],
+        }
+
+    cancel_event = threading.Event()
+    task = asyncio.create_task(_run_single_reference_verify_job(
+        operation_id=operation_id, session_id=session_id, check_id=check_id,
+        ref_id=ref_id, reference_key=reference_key, owner_id=owner_id,
+        body=body, current_user=current_user, cancel_event=cancel_event,
+    ))
+    active_reference_searches[session_id] = {
+        "task": task, "cancel_event": cancel_event, "check_id": check_id,
+        "user_id": owner_id, "operation_id": operation_id,
+    }
+    return {
+        "operation_id": operation_id, "session_id": session_id, "operation_type": "verify",
         "check_id": check_id, "reference_key": reference_key, "status": "queued",
     }
 

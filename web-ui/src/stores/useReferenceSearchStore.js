@@ -90,6 +90,8 @@ export const useReferenceSearchStore = create((set, get) => ({
         [key]: {
           ...(sameOperation ? previous : {}),
           ...payload,
+          operation_type: payload.operation_type || payload.progress?.operation_type
+            || (sameOperation ? previous?.operation_type : undefined),
           sources: payload.sources || payload.progress?.sources || (sameOperation ? previous?.sources : {}) || {},
         },
       } }
@@ -108,6 +110,7 @@ export const useReferenceSearchStore = create((set, get) => ({
     if (message.sequence && operation.sequence && message.sequence <= operation.sequence) return
 
     const base = { ...operation, check_id: checkId, reference_key: referenceKey,
+      operation_type: message.operation_type || operation.operation_type,
       operation_id: operationId, sequence: message.sequence || operation.sequence || 0 }
     let next = base
     if (message.type === 'reference_search_started') {
@@ -144,6 +147,7 @@ export const useReferenceSearchStore = create((set, get) => ({
     const current = get().operations[key] || {}
     const next = {
       ...current, ...snapshot,
+      operation_type: snapshot.operation_type || snapshot.progress?.operation_type || current.operation_type,
       sources: snapshot.progress?.sources || current.sources || {},
       configured_sources: snapshot.progress?.configured_sources || current.configured_sources || [],
       sequence: snapshot.progress?.sequence || current.sequence || 0,
