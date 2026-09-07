@@ -4,7 +4,7 @@ DBLP API Client for Reference Verification
 
 DBLP is a curated computer science bibliography with excellent coverage of
 conference papers (NeurIPS, ICML, ICLR, ACL, CVPR, etc.) — exactly the venues
-most commonly hallucinated by LLMs.
+that are commonly difficult to resolve from incomplete metadata.
 
 The API is free, requires no key, and has generous rate limits.
 See: https://dblp.org/faq/How+to+use+the+dblp+search+API

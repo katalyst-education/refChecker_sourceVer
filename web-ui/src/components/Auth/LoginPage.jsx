@@ -82,7 +82,7 @@ export default function LoginPage() {
             style={{ color: 'var(--color-text-secondary)' }}
           >
             RefChecker helps researchers inspect paper references, compare citations with
-            authoritative sources, and spot missing, broken, or potentially hallucinated
+            authoritative sources, and spot missing or broken
             references before publication or review.
           </p>
           <p

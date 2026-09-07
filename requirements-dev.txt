@@ -33,7 +33,4 @@ pytest-cov>=7.1.0
 # - black, isort, flake8, mypy (linting - not needed for tests)
 # - lxml, pikepdf, selenium (optional parsing features)
 # - huggingface_hub (HuggingFace API)
-# Anthropic is included because the live hallucination fixture test exercises
-# the provider path when ANTHROPIC_API_KEY is present.
-#
 # Install full requirements.txt if you need these features

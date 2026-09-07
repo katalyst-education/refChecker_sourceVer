@@ -211,7 +211,6 @@ export default function LiveWebSocketManager() {
                     warnings_count: detail.warnings_count || 0,
                     suggestions_count: detail.suggestions_count || 0,
                     unverified_count: detail.unverified_count || 0,
-                    hallucination_count: detail.hallucination_count || 0,
                     refs_with_errors: detail.refs_with_errors || 0,
                     refs_with_warnings_only: detail.refs_with_warnings_only || 0,
                     refs_verified: detail.refs_verified || verifiedCount,
@@ -248,7 +247,6 @@ export default function LiveWebSocketManager() {
                     warnings_count: detail.warnings_count || 0,
                     suggestions_count: detail.suggestions_count || 0,
                     unverified_count: detail.unverified_count || 0,
-                    hallucination_count: detail.hallucination_count || 0,
                     refs_with_errors: detail.refs_with_errors || 0,
                     refs_with_warnings_only: detail.refs_with_warnings_only || 0,
                     refs_verified: detail.refs_verified || verifiedCount,
@@ -294,7 +292,6 @@ export default function LiveWebSocketManager() {
               warnings_count: detail.warnings_count || 0,
               suggestions_count: detail.suggestions_count || 0,
               unverified_count: detail.unverified_count || 0,
-              hallucination_count: detail.hallucination_count || 0,
               refs_with_errors: detail.refs_with_errors || 0,
               refs_with_warnings_only: detail.refs_with_warnings_only || 0,
               refs_verified: detail.refs_verified || 0,
@@ -318,7 +315,6 @@ export default function LiveWebSocketManager() {
                 warnings_count: detail.warnings_count || 0,
                 suggestions_count: detail.suggestions_count || 0,
                 unverified_count: detail.unverified_count || 0,
-                hallucination_count: detail.hallucination_count || 0,
               })
             }
           }

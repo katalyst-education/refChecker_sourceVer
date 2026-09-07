@@ -63,11 +63,8 @@ function buildCitationViewerSpans(citationTarget) {
   return spans
 }
 
-// The raster page-image overlay used for the full-page thumbnail/preview modal.
-// It locates and highlights AI-flagged passages on the native pages and supports
-// Find. The inline-citation → reference-list jump (R28/R29/R30) lives in the
-// native pdf.js stack (DocumentViewer → NativePdfViewer), NOT here.
-function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, aiDetection, initialPageCount, onClose }) {
+// Raster page-image overlay for preview and search.
+function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount, onClose }) {
   // Seeded from the parent's prefetched probe when available so the overlay
   // opens directly in its final layout instead of rendering the fit-to-height
   // single image first and then jumping to the full-width multi-page column.
@@ -125,35 +122,6 @@ function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, aiDetection, init
     })()
     return () => { cancelled = true }
   }, [checkId, initialPageCount])
-
-  // Locate AI-flagged passages on the native pages (PyMuPDF search -> rects),
-  // so we can overlay real highlights on the page images with hover AI data.
-  useEffect(() => {
-    let alive = true
-    setHighlights({})
-    const spans = Array.isArray(aiDetection?.spans) ? aiDetection.spans : []
-    if (!checkId || checkId === -1 || !pageCount || spans.length === 0) return undefined
-    const band = aiDetection?.band
-    const targets = spans
-      .filter((s) => s && s.quote)
-      .map((s, i) => ({ text: s.quote, span_index: i, span_type: 'ai', band, model_score: s.model_score, reason: s.reason }))
-    if (!targets.length) return undefined
-    api.locatePdfSpans(checkId, targets)
-      .then((res) => {
-        if (!alive) return
-        const byPage = {}
-        for (const r of (res.data?.results || [])) {
-          if (!r.found) continue
-          ;(byPage[r.page] = byPage[r.page] || []).push({
-            rects: r.rects, band: r.band, score: r.model_score, reason: r.reason,
-            key: `ai-${r.span_index}`,
-          })
-        }
-        setHighlights(byPage)
-      })
-      .catch(() => {})
-    return () => { alive = false }
-  }, [checkId, pageCount, aiDetection])
 
   // Fetch the extracted body text once so Find can locate words. The pages are
   // rasterized images (no text layer), so we search the extracted text and jump
@@ -733,7 +701,6 @@ export default function StatusSection() {
     currentCheckId,
     sessionId,
     stats: checkStoreStats,
-    aiDetection: checkStoreAiDetection,
     cancelCheck: storeCancelCheck,
     setError,
   } = useCheckStore(useShallow(s => ({
@@ -746,7 +713,6 @@ export default function StatusSection() {
     currentCheckId: s.currentCheckId,
     sessionId: s.sessionId,
     stats: s.stats,
-    aiDetection: s.aiDetection,
     cancelCheck: s.cancelCheck,
     setError: s.setError,
   })))
@@ -779,8 +745,6 @@ export default function StatusSection() {
   let displayProcessedRefs
   let displayLlmProvider = null
   let displayLlmModel = null
-  let displayHallucinationProvider = null
-  let displayHallucinationModel = null
   let displayExtractionMethod = null
   let displayBibliographySourceKind = null
   let displayOriginalFilename = null
@@ -800,8 +764,6 @@ export default function StatusSection() {
     // Get LLM info and extraction method from selectedCheck (history) since it's not in checkStore
     displayLlmProvider = selectedCheck?.llm_provider
     displayLlmModel = selectedCheck?.llm_model
-    displayHallucinationProvider = selectedCheck?.hallucination_provider
-    displayHallucinationModel = selectedCheck?.hallucination_model
     displayExtractionMethod = selectedCheck?.extraction_method || checkStoreStats?.extraction_method
     displayBibliographySourceKind = selectedCheck?.bibliography_source_kind
     displayOriginalFilename = historyItem?.original_filename || selectedCheck?.original_filename
@@ -825,8 +787,6 @@ export default function StatusSection() {
       : 0
     displayLlmProvider = selectedCheck.llm_provider
     displayLlmModel = selectedCheck.llm_model
-    displayHallucinationProvider = selectedCheck.hallucination_provider
-    displayHallucinationModel = selectedCheck.hallucination_model
     displayExtractionMethod = selectedCheck.extraction_method
     displayBibliographySourceKind = selectedCheck.bibliography_source_kind
     displayOriginalFilename = selectedCheck.original_filename
@@ -834,7 +794,7 @@ export default function StatusSection() {
     // Build status message based on state
     if (displayStatus === 'in_progress') {
       if (displayProcessedRefs > 0 && displayProcessedRefs >= displayTotalRefs && displayTotalRefs > 0) {
-        displayMessage = 'Finishing hallucination check...'
+        displayMessage = 'Finalizing check...'
       } else if (displayProcessedRefs > 0) {
         displayMessage = `Processed ${displayProcessedRefs} of ${countLabel(displayTotalRefs, 'reference')}...`
       } else if (displayTotalRefs > 0) {
@@ -861,9 +821,6 @@ export default function StatusSection() {
   const displaySourceType = selectedCheck?.source_type || (isCurrentSessionCheck ? checkStoreSourceType : null)
   const displayLlmLabel = displayLlmModel 
     ? `${displayLlmProvider ? `${displayLlmProvider} / ` : ''}${displayLlmModel}`
-    : null
-  const displayHallucinationLabel = displayHallucinationModel
-    ? `${displayHallucinationProvider ? `${displayHallucinationProvider} / ` : ''}${displayHallucinationModel}`
     : null
   
   const sourceInfo = formatSource(displaySource, displayTitle, displaySourceType, selectedCheckId, displayOriginalFilename)
@@ -1503,17 +1460,6 @@ export default function StatusSection() {
               </span>
             </p>
           )}
-          {displayHallucinationLabel && (
-            <p
-              className="text-sm"
-              style={{ color: 'var(--color-text-muted)' }}
-            >
-              Hallucination Model:{' '}
-              <span style={{ color: 'var(--color-text-secondary)', fontWeight: 600 }}>
-                {displayHallucinationLabel}
-              </span>
-            </p>
-          )}
           <p 
             className="text-sm"
             style={{ 
@@ -1603,7 +1549,6 @@ export default function StatusSection() {
           initialPageCount={previewPageCount}
           previewUrl={previewUrl}
           thumbnailUrl={thumbnailUrl}
-          aiDetection={selectedCheck?.ai_detection || (isCurrentSessionCheck ? checkStoreAiDetection : null)}
           onClose={() => { setShowThumbnailOverlay(false) }}
         />
       )}

@@ -3,7 +3,7 @@
 Renders a verification result into one of four self-contained formats:
 
   * HTML  — standalone, all CSS inlined, no external assets / no JS to view.
-  * Markdown — plain, LLM-ingestible, GPTZero-style structured summary.
+  * Markdown — plain, structured summary suitable for downstream processing.
   * PDF   — rendered via the already-bundled PyMuPDF (fitz.Story); no new dep.
   * DOCX  — minimal valid OOXML written with the stdlib `zipfile` only.
 
@@ -14,7 +14,7 @@ Design rules:
   * One source of truth: every serializer consumes the same `_model()` so the
     four formats can never drift apart.
   * Honesty: minor Semantic-Scholar year-mismatch warnings are downweighted
-    (grouped as "minor notes"), real errors / hallucinations are elevated. No
+    (grouped as "minor notes"), while real errors are elevated. No
     fabricated data — corrections come only from the stored `corrected_reference`.
 """
 
@@ -32,28 +32,24 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 #   accent (teal-green)  #10a37f   verified / success
 #   warning (amber)      #f59e0b
 #   error (red)          #ef4146
-#   hallucination        #dc6b1d   (the app's real orange, not a stock purple)
 #   muted text           #8e8ea0
 _STATUS_COLOR = {
     "verified": "#10a37f",
     "warning": "#f59e0b",
     "error": "#ef4146",
     "unverified": "#8e8ea0",
-    "hallucinated": "#dc6b1d",
     "suggestion": "#8b5cf6",
 }
 _BAND_COLOR = {"high": "#ef4146", "medium": "#f59e0b", "low": "#10a37f"}
-_SEG = {"AI": "#ef4146", "Mixed": "#f59e0b", "Human": "#10a37f"}
 
-# Status glyphs mirror the in-app traffic-light language (green/amber/red plus a
-# distinct hallucination mark). Used in the plain-text formats (Markdown / DOCX)
+# Status glyphs mirror the in-app traffic-light language. Used in the
+# plain-text formats (Markdown / DOCX)
 # that cannot carry the HTML status chip, so every format speaks the same legend.
 _STATUS_EMOJI = {
     "verified": "🟢",
     "warning": "🟡",
     "error": "🔴",
     "unverified": "⚪",
-    "hallucinated": "🟠",
     "suggestion": "🟣",
 }
 _STATUS_LABEL = {
@@ -61,7 +57,6 @@ _STATUS_LABEL = {
     "warning": "Warning",
     "error": "Error",
     "unverified": "Unverified",
-    "hallucinated": "Likely hallucinated",
     "suggestion": "Suggestion",
 }
 # Geometric status markers that render CLEANLY in the PyMuPDF (fitz.Story) PDF
@@ -74,12 +69,11 @@ _STATUS_MARK = {
     "warning": "▲",
     "error": "●",
     "unverified": "○",
-    "hallucinated": "◆",
     "suggestion": "●",
 }
 
 # Sections a caller may include/exclude (the export "checkboxes").
-ALL_SECTIONS: Tuple[str, ...] = ("summary", "ai", "issues", "references")
+ALL_SECTIONS: Tuple[str, ...] = ("summary", "issues", "references")
 DEFAULT_SECTIONS: Set[str] = set(ALL_SECTIONS)
 
 
@@ -108,8 +102,6 @@ _ISSUE_TYPE_LABELS = {
     "url": "URL problem",
     "url_inaccessible": "URL could not be reached",
     "unverified": "Could not be verified",
-    "hallucination": "Reference appears to be fabricated",
-    "hallucinated": "Reference appears to be fabricated",
 }
 
 
@@ -339,6 +331,74 @@ def _diff_html(cited: Optional[str], corrected: Optional[str]) -> str:
     return "".join(out).strip()
 
 
+def _numbered(reference: Dict[str, Any]) -> str:
+    """Prefix a reference title with its number when one is available."""
+    number = reference.get("num")
+    return f"{number}. {reference['title']}" if number else str(reference["title"])
+
+
+def _problem_rows(model: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return references with errors or major warnings for report issue sections."""
+    return [row for row in model["rows"] if row["errors"] or row["major"]]
+
+
+def _issues_section_html(model: Dict[str, Any]) -> str:
+    problems = _problem_rows(model)
+    if not problems:
+        return ('<section class="card"><h2>Issues to address (0)</h2>'
+                '<div class="muted small">No errors or major warnings.</div></section>')
+
+    items = ""
+    for row in problems:
+        color = _STATUS_COLOR.get(row["status"], "#8e8ea0")
+        details = ""
+        for detail in row["errors"]:
+            details += f'<div class="issue err">&#x2717; {_e(detail)}</div>'
+        for detail in row["major"]:
+            details += f'<div class="issue warn">! {_e(detail)}</div>'
+        if row.get("corrected"):
+            details += (f'<div class="fix"><span class="fix-lbl">was &rarr; should be:</span> '
+                        f'{_diff_html(row.get("cited"), row["corrected"])}</div>')
+        items += f"""
+      <li class="ref">
+        <span class="chip" style="background:{color}">{_e(row["status"])}</span>
+        <div class="ref-body">
+          <div class="ref-title">{_e(_numbered(row))}</div>
+          {details}
+        </div>
+      </li>"""
+    return (f'<section class="card"><h2>Issues to address ({len(problems)})</h2>'
+            f'<ul class="refs">{items}</ul></section>')
+
+
+def _ref_row_html(row: Dict[str, Any]) -> str:
+    color = _STATUS_COLOR.get(row["status"], "#8e8ea0")
+    issues = ""
+    for detail in row["errors"]:
+        issues += f'<div class="issue err">&#x2717; {_e(detail)}</div>'
+    for detail in row["major"]:
+        issues += f'<div class="issue warn">! {_e(detail)}</div>'
+    for detail in row["minor"]:
+        issues += f'<div class="issue minor">&middot; {_e(detail)} <span class="tag">minor</span></div>'
+    if row.get("corrected"):
+        issues += (f'<div class="fix"><span class="fix-lbl">was &rarr; should be:</span> '
+                   f'{_diff_html(row.get("cited"), row["corrected"])}</div>')
+    link = (f'<a href="{_e(row["url"])}" target="_blank" rel="noopener">source &nearr;</a>'
+            if row.get("url") else "")
+    cited = (' <span class="cited" title="Cited inline in the paper">&#x2713; cited</span>'
+             if row["inline"] else "")
+    return f"""
+      <li class="ref">
+        <span class="chip" style="background:{color}">{_e(row["status"])}</span>
+        <div class="ref-body">
+          <div class="ref-title">{_e(_numbered(row))}{cited}</div>
+          <div class="muted small">{_e(row["meta"])}</div>
+          {issues}
+          {link}
+        </div>
+      </li>"""
+
+
 def _diff_markdown(cited: Optional[str], corrected: Optional[str]) -> str:
     """Plain-text tracked change for Markdown/DOCX: ``~~was~~ **should-be**``.
     Deletions wrap in ~~strikethrough~~, insertions in **bold** — the closest
@@ -547,12 +607,6 @@ def serialize_reference_list(refs: List[Dict[str, Any]], style: str = "plaintext
     return out
 
 
-def _norm_meta(value: Any) -> str:
-    """Lowercase + collapse to alnum-words — mirrors the web-ui's
-    normalizeForMetadataComparison (web-ui/src/utils/referenceStatus.js)."""
-    import re
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
-
 
 def _authors_list(authors: Any) -> List[str]:
     """The cited-author names as a flat list of strings (dicts -> name)."""
@@ -569,98 +623,27 @@ def _authors_list(authors: Any) -> List[str]:
     return [o for o in out if o]
 
 
-def _author_matches(cited: str, found: str) -> bool:
-    ct = _norm_meta(cited).split()
-    ft = _norm_meta(found).split()
-    if not ct or not ft:
-        return False
-    if ct[-1] != ft[-1]:
-        return False
-    cj, fj = " ".join(ct), " ".join(ft)
-    if cj == fj or cj in fj or fj in cj:
-        return True
-    fg = {t for t in ft[:-1] if len(t) > 1}
-    return any(t in fg for t in ct[:-1] if len(t) > 1)
-
-
-def _authors_substantially_match(cited_authors: Any, found_text: Any) -> bool:
-    cited = _authors_list(cited_authors)
-    text = str(found_text or "").strip()
-    if not cited or not text or text.upper() == "NONE":
-        return False
-    found = ([p.strip() for p in text.split(";")] if ";" in text
-             else [p.strip() for p in text.split(",")])
-    found = [f for f in found if f]
-    if not found:
-        return False
-    matched = sum(1 for c in cited if any(_author_matches(c, f) for f in found))
-    required = (len(cited) - 1) if len(cited) >= 3 else len(cited)
-    return matched >= required
-
-
-def _llm_found_matches_citation(ref: Dict[str, Any]) -> bool:
-    """Mirror of llmFoundMetadataMatchesCitation (web-ui): the cheap LLM
-    hallucination pre-screen flagged this ref LIKELY, but the LLM-found record
-    actually matches the citation — a FALSE positive we must treat as verified,
-    exactly as the live Summary does."""
-    a = ref.get("hallucination_assessment")
-    if not isinstance(a, dict):
-        return False
-    if a.get("verdict") != "LIKELY" or not a.get("link"):
-        return False
-    if _norm_meta(a.get("found_title")) != _norm_meta(ref.get("title")):
-        return False
-    if not _authors_substantially_match(ref.get("authors"), a.get("found_authors")):
-        return False
-    yr = ref.get("year")
-    return (not yr) or (str(yr) in str(a.get("found_year") or ""))
 
 
 def _effective_status(ref: Dict[str, Any]) -> str:
-    """Authoritative per-reference status — the SAME precedence the in-app
-    Summary bar uses (web-ui/src/utils/referenceStatus.js getEffectiveReferenceStatus):
-    hallucination > error > warning > suggestion > verified, with the
-    false-hallucination LLM-match override and suggestion-only handling. Reports
-    are export snapshots of completed checks, so transient pending/checking
-    states collapse to their finalized value. Returns one of
-    verified | error | warning | suggestion | unverified | hallucinated.
-    """
+    """Return the observable final status used by the in-app summary."""
     base = (ref.get("status") or "").strip().lower()
-    llm_match = _llm_found_matches_citation(ref)
-
-    # False-hallucination override: clearly-matching LLM metadata wins.
-    if base == "hallucination" and llm_match:
-        return "verified"
-    if base == "hallucination":
-        return "hallucinated"
-
-    has_suggestions = bool(ref.get("suggestions"))
-    if llm_match:
-        return "suggestion" if has_suggestions else "verified"
-
-    # Real (non-"unverified") error entries elevate the ref to error.
     has_errors = any(
-        isinstance(e, dict) and (e.get("error_type") or "").lower() != "unverified"
-        for e in (ref.get("errors") or [])
+        isinstance(issue, dict) and (issue.get("error_type") or "").lower() != "unverified"
+        for issue in (ref.get("errors") or [])
     )
-    has_warnings = bool(ref.get("warnings"))
-
     if has_errors:
         return "error"
-    if has_warnings:
+    if ref.get("warnings"):
         return "warning"
-    if has_suggestions:
+    if ref.get("suggestions"):
         return "suggestion"
-
-    if base in ("error", "warning", "suggestion"):
-        # Backend labelled it but no concrete issues survive -> verified.
+    if base in {"error", "warning", "suggestion"}:
         return "verified"
     if base == "unverified":
         return "unverified"
-    if base in _STATUS_COLOR:  # verified / hallucinated / unverified
+    if base in _STATUS_COLOR:
         return base
-    # pending / checking / queued / unknown on a completed report -> verified
-    # (the check is done; an item with no surviving issue is clean).
     return "verified"
 
 
@@ -700,16 +683,14 @@ def _coerce_canonical_summary(summary: Any) -> Optional[Dict[str, int]]:
     warning = _int(refs.get("warnings"))
     error = _int(refs.get("errors"))
     unverified = _int(refs.get("unverified"))
-    hallucinated = _int(refs.get("hallucinated"))
     suggestion = _int(refs.get("suggestions"))
     total = _int(summary.get("totalRefs"),
-                 verified + warning + error + unverified + hallucinated + suggestion)
+                 verified + warning + error + unverified + suggestion)
     return {
         "verified": verified,      # already folds suggestions in on the FE
         "warning": warning,
         "error": error,
         "unverified": unverified,
-        "hallucinated": hallucinated,
         "suggestion": suggestion,
         "total": total,
     }
@@ -720,7 +701,6 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
     sections = sections if sections else set(ALL_SECTIONS)
     title = check.get("paper_title") or check.get("custom_label") or "RefChecker results"
     refs = _as_list(check.get("results")) or _as_list(check.get("references"))
-    ai = _as_dict(check.get("ai_detection"))
     ts = check.get("timestamp") or ""
     canonical = _coerce_canonical_summary(summary)
 
@@ -730,8 +710,7 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
     # as the live "Verified" chip does), while the row keeps its suggestion
     # status for display. This is what makes the exported references/warnings/
     # errors numbers identical to what the user saw in the app.
-    counts = {"verified": 0, "warning": 0, "error": 0, "unverified": 0,
-              "hallucinated": 0, "suggestion": 0}
+    counts = {"verified": 0, "warning": 0, "error": 0, "unverified": 0, "suggestion": 0}
     warning_major = 0  # refs whose warnings include a non-trivial (non-year) type
     refs_err = 0       # refs carrying any error (for the health score)
     refs_warn = 0      # refs carrying any warning (major or minor)
@@ -743,9 +722,7 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
         if status == "warning" and major:
             warning_major += 1
         # Health inputs follow the app: a ref only counts as error-carrying /
-        # warning-carrying when that is its EFFECTIVE status (so a false
-        # hallucination resolved to verified, or an error ref, isn't double
-        # counted as a warning, etc.).
+        # warning-carrying when that is its effective status.
         if status == "error":
             refs_err += 1
         if status == "warning":
@@ -788,7 +765,6 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
         verified_display = canonical["verified"]
         health_err = canonical["error"]
         health_warn = canonical["warning"]
-        health_halluc = canonical["hallucinated"]
         stats = {
             "total": total_refs, "warning_major": warning_major,
             "orphans": len(orphans),
@@ -796,20 +772,18 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
             "warning": canonical["warning"],
             "error": canonical["error"],
             "unverified": canonical["unverified"],
-            "hallucinated": canonical["hallucinated"],
             "suggestion": canonical["suggestion"],
         }
     else:
         total_refs = len(refs)
         health_err = refs_err
         health_warn = refs_warn
-        health_halluc = counts["hallucinated"]
         stats = {"total": total_refs, "warning_major": warning_major,
                  "orphans": len(orphans), **counts, "verified": verified_display}
-    headline, severity = _verdict(stats, ai)
-    health = compute_health(total_refs, verified_display, health_err, health_warn, health_halluc)
+    headline, severity = _verdict(stats)
+    health = compute_health(total_refs, verified_display, health_err, health_warn)
     return {
-        "title": title, "ts": ts, "ai": ai, "rows": rows, "stats": stats,
+        "title": title, "ts": ts, "rows": rows, "stats": stats,
         "sections": sections, "corrections": corrections,
         "headline": headline, "severity": severity, "health": health,
         "orphans": orphans,
@@ -819,24 +793,21 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
 # Citation-health score — the SAME formula as the in-app HealthBadge
 # (web-ui/src/components/MainPanel/HealthBadge.jsx) so the shareable badge and
 # the live chip never disagree. Verified contributes 70, clean 30; warnings
-# shave up to 5; hallucinations get a steeper penalty.
-def compute_health(total: int, verified: int, refs_err: int, refs_warn: int, halluc: int) -> Dict[str, Any]:
+# shave up to 5.
+
+def compute_health(total: int, verified: int, refs_err: int, refs_warn: int) -> Dict[str, Any]:
     if total <= 0:
-        # Mirrors the in-app HealthBadge n/a state (--color-text-secondary).
         return {"score": None, "grade": "n/a", "color": "#676767"}
     verify_ratio = verified / total
-    # A ref can be both hallucinated and error-carrying; clamp so clean_ratio
-    # never goes negative and double-penalizes the score below 0.
-    clean_ratio = max(0.0, (total - refs_err - halluc) / total)
-    raw = verify_ratio * 70 + clean_ratio * 30 - (refs_warn / total) * 5
-    penalty = min(20, 8 + halluc * 4) if halluc > 0 else 0
-    score = max(0, min(100, round(raw - penalty)))
+    clean_ratio = max(0.0, (total - refs_err) / total)
+    score = max(0, min(100, round(
+        verify_ratio * 70 + clean_ratio * 30 - (refs_warn / total) * 5
+    )))
     color = ("#22c55e" if score >= 90 else "#84cc16" if score >= 70
              else "#f59e0b" if score >= 50 else "#f97316" if score >= 30 else "#ef4444")
     grade = ("Excellent" if score >= 90 else "Good" if score >= 70
              else "Fair" if score >= 50 else "Poor" if score >= 30 else "Critical")
     return {"score": score, "grade": grade, "color": color}
-
 
 def render_badge_svg(score: Optional[int], grade: str, color: str, label: str = "citation health") -> str:
     """A self-contained shields.io-style SVG badge (no external assets)."""
@@ -857,188 +828,29 @@ def render_badge_svg(score: Optional[int], grade: str, color: str, label: str = 
     )
 
 
-def _verdict(stats: Dict[str, int], ai: Optional[Dict[str, Any]]) -> Tuple[str, str]:
-    t = stats.get("total", 0)
-    e = stats.get("error", 0)
-    h = stats.get("hallucinated", 0)
-    w = stats.get("warning", 0)
-    if t == 0:
+
+def _verdict(stats: Dict[str, int]) -> Tuple[str, str]:
+    total = stats.get("total", 0)
+    errors = stats.get("error", 0)
+    warnings = stats.get("warning", 0)
+    if total == 0:
         return ("No references were extracted from this document.", "neutral")
-    if h:
-        return (f"{h} reference{'s' if h != 1 else ''} likely hallucinated"
-                + (f" and {e} with errors" if e else "") + f" out of {t}.", "high")
-    if e:
-        return (f"{e} of {t} references have errors that need attention.", "high")
-    if w:
-        wm = stats.get("warning_major", 0)
-        ver = stats.get("verified", 0)
-        if wm:
-            return (f"{wm} of {t} references have warnings to review; {ver} verified.", "medium")
-        return (f"{w} of {t} references have only minor warnings; {ver} verified.", "low")
-    if stats.get("verified", 0) == t:
-        return (f"All {t} references verified against external sources.", "low")
-    return (f"{stats.get('verified', 0)} of {t} references verified.", "low")
+    if errors:
+        return (f"{errors} of {total} references have errors that need attention.", "high")
+    if warnings:
+        major = stats.get("warning_major", 0)
+        verified = stats.get("verified", 0)
+        if major:
+            return (f"{major} of {total} references have warnings to review; {verified} verified.", "medium")
+        return (f"{warnings} of {total} references have only minor warnings; {verified} verified.", "low")
+    if stats.get("verified", 0) == total:
+        return (f"All {total} references verified against external sources.", "low")
+    return (f"{stats.get('verified', 0)} of {total} references verified.", "low")
 
 
 # --------------------------------------------------------------------------- #
 # HTML (rich, screen-oriented)
 # --------------------------------------------------------------------------- #
-
-def _donut_svg(dist: Dict[str, float], score_pct: Optional[int]) -> str:
-    import math
-    R, C = 34, 2 * math.pi * 34
-    offset = 0.0
-    arcs = []
-    for k in ("AI", "Mixed", "Human"):
-        frac = max(0.0, min(1.0, float(dist.get(k) or 0)))
-        ln = frac * C
-        arcs.append(
-            f'<circle cx="46" cy="46" r="34" fill="none" stroke="{_SEG[k]}" '
-            f'stroke-width="9" stroke-dasharray="{ln:.2f} {C - ln:.2f}" '
-            f'stroke-dashoffset="{-offset:.2f}" transform="rotate(-90 46 46)"/>'
-        )
-        offset += ln
-    center = str(score_pct) if score_pct is not None else "—"
-    # Use theme variables so the donut reads in both light and dark exports
-    # (the track follows --track, the centre label follows the body --fg).
-    return (
-        '<svg width="92" height="92" viewBox="0 0 92 92" style="color:var(--fg)">'
-        '<circle cx="46" cy="46" r="34" fill="none" stroke="var(--track)" stroke-width="9"/>'
-        + "".join(arcs)
-        + f'<text x="46" y="44" text-anchor="middle" font-size="17" font-weight="700" fill="currentColor">{center}</text>'
-        '<text x="46" y="58" text-anchor="middle" font-size="9" fill="var(--muted)">score</text>'
-        "</svg>"
-    )
-
-
-def _ai_disclaimer(ai: Dict[str, Any]) -> str:
-    """The permanent advisory disclaimer — must appear on EVERY AI-section render
-    path, in every format and band (incl. unavailable/inconclusive)."""
-    return ai.get("disclaimer") or (
-        "Advisory signal only — not proof of AI authorship; unreliable on "
-        "academic and non-native-English writing, and never a basis for accusation."
-    )
-
-
-def _ai_section_html(ai: Dict[str, Any]) -> str:
-    if not ai:
-        return ""
-    band = ai.get("band") or "unavailable"
-    if band in ("unavailable", "inconclusive"):
-        return ('<section class="card"><h2>AI-text detection</h2>'
-                f'<p class="muted">{_e(ai.get("summary") or "Not analyzed.")}</p>'
-                f'<p class="disclaimer">⚠ {_e(_ai_disclaimer(ai))}</p></section>')
-    score_pct = round(ai["overall_score"] * 100) if isinstance(ai.get("overall_score"), (int, float)) else None
-    # Defensive coercion (mirrors the references path): stored ai_detection_json
-    # whose shape drifted across versions must degrade gracefully, never 500.
-    dist = ai.get("probability_distribution")
-    dist = dist if isinstance(dist, dict) else {}
-    pills = "".join(
-        f'<span class="pill" style="border-color:{_SEG[k]}">'
-        f'<span class="dot" style="background:{_SEG[k]}"></span>{k} {round((dist.get(k) or 0) * 100)}%</span>'
-        for k in ("AI", "Mixed", "Human")
-    ) if dist else ""
-    pages = ai.get("per_page_scores")
-    pages = [p for p in pages if isinstance(p, dict)] if isinstance(pages, list) else []
-    page_rows = "".join(
-        f'<div class="pagebar"><span class="pglbl">Page {p.get("page")}</span>'
-        f'<span class="track"><span class="fill" style="width:{round((p.get("score") or 0) * 100)}%;'
-        f'background:{_BAND_COLOR.get(p.get("band"), "#888")}"></span></span>'
-        f'<span class="pgval" style="color:{_BAND_COLOR.get(p.get("band"), "#888")}">{round((p.get("score") or 0) * 100)}</span></div>'
-        for p in pages
-    )
-    spans = ai.get("spans")
-    spans = [s for s in spans if isinstance(s, dict)] if isinstance(spans, list) else []
-    span_html = "".join(
-        f'<li><span class="q">“{_e(s.get("quote"))}”</span>'
-        + (f'<span class="sc">{round(s["model_score"] * 100)}</span>' if isinstance(s.get("model_score"), (int, float)) else "")
-        + (f'<div class="muted small">{_e(s.get("reason"))}</div>' if s.get("reason") else "")
-        + "</li>"
-        for s in spans
-    )
-    bc = _BAND_COLOR.get(band, "#888")
-    return f"""
-    <section class="card">
-      <h2>AI-text detection</h2>
-      <div class="ai-head">
-        {_donut_svg(dist, score_pct) if dist else ""}
-        <div>
-          <div class="band" style="color:{bc}">AI-likelihood: {_e(band.capitalize())}</div>
-          <div class="muted small">{_e(ai.get("summary"))}</div>
-          <div class="pills">{pills}</div>
-        </div>
-      </div>
-      {f'<div class="pages">{page_rows}</div>' if page_rows else ""}
-      {f'<h3>Flagged passages</h3><ul class="spans">{span_html}</ul>' if span_html else ""}
-      <p class="disclaimer">⚠ {_e(_ai_disclaimer(ai))}</p>
-    </section>"""
-
-
-def _numbered(r: Dict[str, Any]) -> str:
-    """"12. Title" — or just "Title" when the reference carries no number.
-    Without the guard an un-numbered reference renders as a stray ". Title"."""
-    num = r.get("num")
-    return f"{num}. {r['title']}" if num else str(r["title"])
-
-
-def _problem_rows(m: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """References carrying an error or a major warning — the "Issues to address"
-    set. Shared by every format so they agree on what counts as a problem."""
-    return [r for r in m["rows"] if r["errors"] or r["major"]]
-
-
-def _issues_section_html(m: Dict[str, Any]) -> str:
-    problems = _problem_rows(m)
-    if not problems:
-        return ('<section class="card"><h2>Issues to address (0)</h2>'
-                '<div class="muted small">No errors or major warnings.</div></section>')
-    items = ""
-    for r in problems:
-        color = _STATUS_COLOR.get(r["status"], "#8e8ea0")
-        detail = ""
-        for d in r["errors"]:
-            detail += f'<div class="issue err">⛔ {_e(d)}</div>'
-        for d in r["major"]:
-            detail += f'<div class="issue warn">⚠ {_e(d)}</div>'
-        if r.get("corrected"):
-            detail += (f'<div class="fix"><span class="fix-lbl">was → should be:</span> '
-                       f'{_diff_html(r.get("cited"), r["corrected"])}</div>')
-        items += f"""
-      <li class="ref">
-        <span class="chip" style="background:{color}">{_e(r["status"])}</span>
-        <div class="ref-body">
-          <div class="ref-title">{_e(_numbered(r))}</div>
-          {detail}
-        </div>
-      </li>"""
-    return (f'<section class="card"><h2>Issues to address ({len(problems)})</h2>'
-            f'<ul class="refs">{items}</ul></section>')
-
-
-def _ref_row_html(r: Dict[str, Any]) -> str:
-    color = _STATUS_COLOR.get(r["status"], "#8e8ea0")
-    issues = ""
-    for d in r["errors"]:
-        issues += f'<div class="issue err">⛔ {_e(d)}</div>'
-    for d in r["major"]:
-        issues += f'<div class="issue warn">⚠ {_e(d)}</div>'
-    for d in r["minor"]:
-        issues += f'<div class="issue minor">· {_e(d)} <span class="tag">minor</span></div>'
-    if r.get("corrected"):
-        diff = _diff_html(r.get("cited"), r["corrected"])
-        issues += (f'<div class="fix"><span class="fix-lbl">was → should be:</span> '
-                   f'{diff}</div>')
-    link = f'<a href="{_e(r["url"])}" target="_blank" rel="noopener">source ↗</a>' if r.get("url") else ""
-    cited = ' <span class="cited" title="Cited inline in the paper">✓ cited</span>' if r["inline"] else ""
-    return f"""
-      <li class="ref">
-        <span class="chip" style="background:{color}">{_e(r["status"])}</span>
-        <div class="ref-body">
-          <div class="ref-title">{_e(_numbered(r))}{cited}</div>
-          <div class="muted small">{_e(r["meta"])} {link}</div>
-          {issues}
-        </div>
-      </li>"""
 
 
 def serialize_check_to_html(check: Dict[str, Any], *, corrections: bool = False,
@@ -1074,8 +886,6 @@ def serialize_check_to_html(check: Dict[str, Any], *, corrections: bool = False,
             n_orph = len(m["orphans"])
             body.append(f'<div class="muted small" style="margin:-14px 0 18px">⚠ {n_orph} '
                         f'reference{"s" if n_orph != 1 else ""} not cited inline in the body text.</div>')
-    if "ai" in sec and m["ai"]:
-        body.append(_ai_section_html(m["ai"]))
     if "issues" in sec:
         body.append(_issues_section_html(m))
     if "references" in sec:
@@ -1130,8 +940,8 @@ def _html_doc(title: str, inner: str) -> str:
     --bg:#f7f7f8; --card:#ffffff; --border:#e5e5e5; --track:#ececf1;
     --accent:#10a37f; --accent-soft:rgba(16,163,127,0.12);
     --verified:#10a37f; --warning:#f59e0b; --error:#ef4146;
-    --halluc:#dc6b1d; --link:#2563eb;
-    --error-bg:#fef2f2; --warning-bg:#fffbeb; --success-bg:#ecfdf5; --halluc-bg:#fff7ed;
+    --link:#2563eb;
+    --error-bg:#fef2f2; --warning-bg:#fffbeb; --success-bg:#ecfdf5;
     --radius-sm:6px; --radius-md:10px; --radius-lg:14px;
     --shadow:0 1px 2px rgba(0,0,0,0.04), 0 2px 10px rgba(0,0,0,0.06);
     --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -1143,8 +953,8 @@ def _html_doc(title: str, inner: str) -> str:
       --bg:#212121; --card:#2f2f2f; --border:#444444; --track:#424242;
       --accent:#10a37f; --accent-soft:rgba(16,163,127,0.18);
       --verified:#10a37f; --warning:#fbbf24; --error:#f87171;
-      --halluc:#fb923c; --link:#60a5fa;
-      --error-bg:#3b1818; --warning-bg:#3b2f05; --success-bg:#052e22; --halluc-bg:#431c07;
+      --link:#60a5fa;
+      --error-bg:#3b1818; --warning-bg:#3b2f05; --success-bg:#052e22;
       --shadow:0 1px 2px rgba(0,0,0,0.3), 0 2px 12px rgba(0,0,0,0.4);
     }}
   }}
@@ -1255,15 +1065,13 @@ def _md_for_model(m: Dict[str, Any], *, level: int = 1) -> str:
         out.append("| --- | --- |")
         for label, key in [("References", "total"), ("Verified", "verified"),
                            ("Warnings", "warning"), ("Errors", "error"),
-                           ("Hallucinated", "hallucinated"), ("Unverified", "unverified")]:
+                           ("Unverified", "unverified")]:
             out.append(f"| {label} | {s.get(key, 0)} |")
         out.append("")
         if m.get("orphans"):
             shown = ", ".join(str(x) for x in m["orphans"][:20])
             out.append(f"_{len(m['orphans'])} reference(s) appear uncited in the body text: {shown}_")
             out.append("")
-    if "ai" in sec and m["ai"]:
-        out.append(_ai_markdown(m["ai"], level + 1))
     if "issues" in sec:
         problems = _problem_rows(m)
         out.append(f"{h}# Issues to address ({len(problems)})")
@@ -1287,7 +1095,7 @@ def _md_for_model(m: Dict[str, Any], *, level: int = 1) -> str:
         out.append("")
         out.append("Legend: " + "  ·  ".join(
             f"{_STATUS_EMOJI[k]} {_STATUS_LABEL[k]}"
-            for k in ("verified", "warning", "error", "hallucinated", "unverified")))
+            for k in ("verified", "warning", "error", "unverified")))
         out.append("")
         for r in m["rows"]:
             emoji = _STATUS_EMOJI.get(r["status"], "⚪")
@@ -1310,179 +1118,6 @@ def _md_for_model(m: Dict[str, Any], *, level: int = 1) -> str:
     out.append("---")
     out.append("_Generated by RefChecker. A verification aid, not a determination of misconduct._")
     return "\n".join(out)
-
-
-def _ai_markdown(ai: Dict[str, Any], level: int) -> str:
-    h = "#" * level
-    band = ai.get("band") or "unavailable"
-    out = [f"{h} AI-text detection", ""]
-    if band in ("unavailable", "inconclusive"):
-        out.append(ai.get("summary") or "Not analyzed.")
-        out.append("")
-        out.append(f"> {_ai_disclaimer(ai)}")
-        out.append("")
-        return "\n".join(out)
-    score = ai.get("overall_score")
-    out.append(f"**AI-likelihood band:** {band.capitalize()}"
-               + (f" (score {round(score * 100)})" if isinstance(score, (int, float)) else ""))
-    if ai.get("summary"):
-        out.append("")
-        out.append(ai["summary"])
-    dist = ai.get("probability_distribution")
-    dist = dist if isinstance(dist, dict) else {}
-    if dist:
-        out.append("")
-        out.append("Distribution: " + ", ".join(f"{k} {round((dist.get(k) or 0) * 100)}%" for k in ("AI", "Mixed", "Human")))
-    spans = ai.get("spans")
-    spans = [s for s in spans if isinstance(s, dict)] if isinstance(spans, list) else []
-    if spans:
-        out.append("")
-        out.append("Flagged passages:")
-        for sp in spans:
-            q = (sp.get("quote") or "").strip()
-            sc = f" [{round(sp['model_score'] * 100)}]" if isinstance(sp.get("model_score"), (int, float)) else ""
-            out.append(f"- \"{q}\"{sc}")
-    out.append("")
-    out.append(f"> {_ai_disclaimer(ai)}")
-    out.append("")
-    return "\n".join(out)
-
-
-# --------------------------------------------------------------------------- #
-# PDF (PyMuPDF Story — already bundled)
-# --------------------------------------------------------------------------- #
-
-def _pdf_html_for_model(m: Dict[str, Any], *, header: bool = True) -> str:
-    """A print-simplified HTML (no flex/grid/svg) that fitz.Story renders well.
-
-    The palette is the RefChecker light theme (docs/design.md) — the PDF always
-    renders on white paper, so we use the light tokens: accent #10a37f for the
-    wordmark rule, amber/red/orange for status, muted #8e8ea0 for metadata.
-    Section headings carry an accent underline to echo the app's card headers.
-    """
-    sec = m["sections"]
-    s = m["stats"]
-    sev = _BAND_COLOR.get(m["severity"], "#8e8ea0")
-    # Accent-tinted, underlined section heading — keeps PDF in the app's voice.
-    _h2 = ('<h2 style="font-size:12pt;margin:14pt 0 4pt;color:#0d0d0d;'
-           'border-bottom:1px solid #e5e5e5;padding-bottom:3pt">')
-    rows_html = []
-    for r in m["rows"]:
-        color = _STATUS_COLOR.get(r["status"], "#8e8ea0")
-        mark = _STATUS_MARK.get(r["status"], "●")
-        label = _STATUS_LABEL.get(r["status"], r["status"].capitalize())
-        issues = ""
-        # Markers below are geometric glyphs (✗ ! · ✓) that fitz renders cleanly,
-        # NOT colour-emoji (which fitz garbles). Colour carries the meaning.
-        for d in r["errors"]:
-            issues += f'<p style="margin:2px 0;color:#ef4146;font-size:9pt">✗ {_e(d)}</p>'
-        for d in r["major"]:
-            issues += f'<p style="margin:2px 0;color:#f59e0b;font-size:9pt">! {_e(d)}</p>'
-        for d in r["minor"]:
-            issues += f'<p style="margin:2px 0;color:#8e8ea0;font-size:8.5pt">· {_e(d)} (minor)</p>'
-        if r.get("corrected"):
-            diff = _diff_html(r.get("cited"), r["corrected"])
-            issues += (f'<p style="margin:2px 0;font-size:9pt">'
-                       f'<font color="#8e8ea0">was → should be: </font>{diff}</p>')
-        rows_html.append(
-            f'<tr><td style="padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;color:{color}">'
-            f'<b>{mark} {_e(label)}</b></td>'
-            f'<td style="padding:6px 0;border-bottom:1px solid #f0f0f0"><b>{_e(_numbered(r))}</b>'
-            f'<br/><font color="#8e8ea0" style="font-size:9pt">{_e(r["meta"])}</font>{issues}</td></tr>'
-        )
-    parts = []
-    if header:
-        # Wordmark: a clean accent check-mark logo (✓ renders crisply in fitz)
-        # followed by Ref+Checker in the brand split. No emoji, no SVG.
-        parts.append('<p style="font-size:10pt;margin:0 0 6pt;border-bottom:2px solid #10a37f;padding-bottom:5pt">'
-                     '<b><font color="#10a37f">✓ </font><font color="#0d0d0d">Ref</font><font color="#10a37f">Checker</font></b>'
-                     '<font color="#8e8ea0" style="font-size:8pt">  ·  reference verification report</font></p>')
-    parts.append(f'<h1 style="font-size:16pt;margin:6pt 0 4pt;color:#0d0d0d">{_e(m["title"])}</h1>')
-    if m["ts"]:
-        parts.append(f'<p style="color:#8e8ea0;font-size:9pt;margin:0 0 8pt">{_e(m["ts"])}</p>')
-    parts.append(f'<p style="border-left:3px solid {sev};padding:6pt 10pt;background:#f7f7f8;font-weight:bold;color:#0d0d0d">{_e(m["headline"])}</p>')
-    _hh = m["health"]
-    if _hh.get("score") is not None:
-        parts.append(f'<p style="font-size:10pt;margin:2pt 0 6pt"><b><font color="{_hh["color"]}">'
-                     f'Citation health: {_hh["score"]}/100 — {_e(_hh["grade"])}</font></b></p>')
-    if "summary" in sec:
-        cells = "".join(
-            f'<td style="text-align:center;border:1px solid #e5e5e5;padding:6pt">'
-            f'<b style="font-size:14pt"><font color="{_STATUS_COLOR.get(k, "#0d0d0d")}">{s.get(k, 0)}</font></b>'
-            f'<br/><font color="#8e8ea0" style="font-size:8pt">{l}</font></td>'
-            for k, l in [("total", "refs"), ("verified", "verified"), ("warning", "warnings"),
-                         ("error", "errors"), ("unverified", "unverified")])
-        parts.append(f'<table style="width:100%;border-collapse:collapse;margin:6pt 0"><tr>{cells}</tr></table>')
-    if "ai" in sec and m["ai"]:
-        ai = m["ai"]
-        band = ai.get("band") or "unavailable"
-        bc = _BAND_COLOR.get(band, "#8e8ea0")
-        parts.append(f'{_h2}AI-text detection</h2>')
-        parts.append(f'<p><b><font color="{bc}">AI-likelihood: {_e(band.capitalize())}</font></b><br/>'
-                     f'<font color="#8e8ea0" style="font-size:9pt">{_e(ai.get("summary"))}</font></p>')
-        parts.append(f'<p style="color:#8e8ea0;font-size:8pt;margin:4pt 0">! {_e(_ai_disclaimer(ai))}</p>')
-    if "issues" in sec:
-        problems = _problem_rows(m)
-        parts.append(f'{_h2}Issues to address ({len(problems)})</h2>')
-        if not problems:
-            parts.append('<p style="color:#8e8ea0;font-size:9pt">No errors or major warnings.</p>')
-        for r in problems:
-            parts.append(f'<p style="margin:6pt 0 0;font-size:10pt"><b>{_e(_numbered(r))}</b></p>')
-            for d in r["errors"]:
-                parts.append(f'<p style="margin:2px 0 2px 10pt;color:#ef4146;font-size:9pt">✗ {_e(d)}</p>')
-            for d in r["major"]:
-                parts.append(f'<p style="margin:2px 0 2px 10pt;color:#f59e0b;font-size:9pt">! {_e(d)}</p>')
-            if r.get("corrected"):
-                parts.append(f'<p style="margin:2px 0 2px 10pt;font-size:9pt">'
-                             f'<font color="#8e8ea0">was → should be: </font>'
-                             f'{_diff_html(r.get("cited"), r["corrected"])}</p>')
-    if "references" in sec:
-        parts.append(f'{_h2}References</h2>')
-        parts.append(f'<table style="width:100%;border-collapse:collapse">{"".join(rows_html)}</table>')
-    parts.append('<p style="color:#9aa0ad;font-size:8pt;margin-top:14pt;border-top:1px solid #e5e5e5;padding-top:6pt">'
-                 'Generated by RefChecker · a verification aid, not a determination of misconduct.</p>')
-    body = "".join(parts)
-    return f'<html><head><meta charset="utf-8"/></head><body style="font-family:sans-serif;color:#0d0d0d">{body}</body></html>'
-
-
-def _render_pdf_from_html(html_str: str) -> bytes:
-    # PyMuPDF (fitz) ships in the backend / signed PyInstaller sidecar, but a
-    # desktop bundle could be built without it (or with a pre-Story version).
-    # Surface that as a typed PdfEngineUnavailableError so the HTTP layer can
-    # return a clean 422/501 ("choose HTML/MD") rather than leaking a raw 500.
-    try:
-        import fitz  # PyMuPDF, already a backend dependency
-    except Exception as e:  # ImportError or a broken/partial install
-        raise PdfEngineUnavailableError(
-            "PDF engine (PyMuPDF) is unavailable — choose HTML or Markdown."
-        ) from e
-    # fitz.Story / DocumentWriter landed in PyMuPDF 1.21; an older wheel slipped
-    # into the bundle would lack them. Treat that as "engine unavailable" too.
-    if not hasattr(fitz, "Story") or not hasattr(fitz, "DocumentWriter"):
-        raise PdfEngineUnavailableError(
-            "PDF engine (PyMuPDF) is too old to render reports — choose HTML or Markdown."
-        )
-    mediabox = fitz.paper_rect("a4")
-    where = mediabox + (40, 40, -40, -50)
-    buf = io.BytesIO()
-    writer = fitz.DocumentWriter(buf)
-    story = fitz.Story(html=html_str)
-    more = 1
-    guard = 0
-    while more and guard < 200:
-        dev = writer.begin_page(mediabox)
-        more, _ = story.place(where)
-        story.draw(dev)
-        writer.end_page()
-        guard += 1
-    writer.close()
-    return buf.getvalue()
-
-
-def render_check_to_pdf(check: Dict[str, Any], *, corrections: bool = False,
-                        sections: Optional[Set[str]] = None, summary: Any = None) -> bytes:
-    m = _model(check, corrections=corrections, sections=sections, summary=summary)
-    return _render_pdf_from_html(_pdf_html_for_model(m))
 
 
 # --------------------------------------------------------------------------- #
@@ -1525,18 +1160,10 @@ def _docx_blocks_for_model(m: Dict[str, Any]) -> List[str]:
     if "summary" in sec:
         blocks.append(_docx_para("Summary", size=28, bold=True, color="10A37F"))
         for label, key in [("References", "total"), ("Verified", "verified"), ("Warnings", "warning"),
-                           ("Errors", "error"), ("Hallucinated", "hallucinated"), ("Unverified", "unverified")]:
+                           ("Errors", "error"), ("Unverified", "unverified")]:
             tint = _STATUS_COLOR.get(key, "").lstrip("#").upper() or None
             blocks.append(_docx_para(f"{label}: {s.get(key, 0)}", size=22, space_after=20, color=tint))
-    if "ai" in sec and m["ai"]:
-        ai = m["ai"]
-        band = ai.get("band") or "unavailable"
-        blocks.append(_docx_para("AI-text detection", size=28, bold=True, color="10A37F"))
-        blocks.append(_docx_para(f"AI-likelihood: {band.capitalize()}", size=22, bold=True,
-                                 color=_BAND_COLOR.get(band, "#8e8ea0").lstrip("#").upper()))
-        if ai.get("summary"):
-            blocks.append(_docx_para(str(ai["summary"]), size=20, color="8E8EA0"))
-        blocks.append(_docx_para(f"Note: {_ai_disclaimer(ai)}", size=18, color="8E8EA0", italic=True))
+
     if "issues" in sec:
         problems = _problem_rows(m)
         blocks.append(_docx_para(f"Issues to address ({len(problems)})", size=28, bold=True, color="10A37F"))
@@ -1559,7 +1186,7 @@ def _docx_blocks_for_model(m: Dict[str, Any]) -> List[str]:
         # Status legend — same traffic-light language as the HTML chips / Markdown,
         # but with clean geometric markers (the colour-emoji garble in Word).
         legend = "   ".join(f"{_STATUS_MARK[k]} {_STATUS_LABEL[k]}"
-                            for k in ("verified", "warning", "error", "hallucinated", "unverified"))
+                            for k in ("verified", "warning", "error", "unverified"))
         blocks.append(_docx_para(legend, size=18, color="8E8EA0", space_after=60))
         for r in m["rows"]:
             mark = _STATUS_MARK.get(r["status"], "●")
@@ -1629,9 +1256,9 @@ def _batch_models(checks: Sequence[Dict[str, Any]], *, corrections: bool,
                   sections: Optional[Set[str]]) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
     models = [_model(c, corrections=corrections, sections=sections) for c in checks]
     overall = {"papers": len(models), "total": 0, "verified": 0, "warning": 0,
-               "error": 0, "unverified": 0, "hallucinated": 0}
+               "error": 0, "unverified": 0}
     for m in models:
-        for k in ("total", "verified", "warning", "error", "unverified", "hallucinated"):
+        for k in ("total", "verified", "warning", "error", "unverified"):
             overall[k] += m["stats"].get(k, 0)
     return overall, models
 
@@ -1683,8 +1310,6 @@ def serialize_batch_to_html(checks: Sequence[Dict[str, Any]], *, corrections: bo
                 f'<span class="vdot" style="background:{_sev}"></span>{_e(m["headline"])}</div>']
         if "summary" in m["sections"]:
             body.append(f'<div class="stats">{cards}</div>')
-        if "ai" in m["sections"] and m["ai"]:
-            body.append(_ai_section_html(m["ai"]))
         if "issues" in m["sections"]:
             body.append(_issues_section_html(m))
         if "references" in m["sections"]:
@@ -1695,6 +1320,114 @@ def serialize_batch_to_html(checks: Sequence[Dict[str, Any]], *, corrections: bo
              + "".join(per_paper)
              + '<footer>Generated by RefChecker · a verification aid, not a determination of misconduct.</footer>')
     return _html_doc(label, inner)
+
+
+def _pdf_html_for_model(m: Dict[str, Any], *, header: bool = True) -> str:
+    """Return print-oriented HTML for PyMuPDF's Story renderer."""
+    sec = m["sections"]
+    stats = m["stats"]
+    severity_color = _BAND_COLOR.get(m["severity"], "#8e8ea0")
+    heading = ('<h2 style="font-size:12pt;margin:14pt 0 4pt;color:#0d0d0d;'
+               'border-bottom:1px solid #e5e5e5;padding-bottom:3pt">')
+    rows = []
+    for row in m["rows"]:
+        color = _STATUS_COLOR.get(row["status"], "#8e8ea0")
+        mark = _STATUS_MARK.get(row["status"], "●")
+        label = _STATUS_LABEL.get(row["status"], row["status"].capitalize())
+        issues = ""
+        for detail in row["errors"]:
+            issues += f'<p style="margin:2px 0;color:#ef4146;font-size:9pt">✗ {_e(detail)}</p>'
+        for detail in row["major"]:
+            issues += f'<p style="margin:2px 0;color:#f59e0b;font-size:9pt">! {_e(detail)}</p>'
+        for detail in row["minor"]:
+            issues += f'<p style="margin:2px 0;color:#8e8ea0;font-size:8.5pt">· {_e(detail)} (minor)</p>'
+        if row.get("corrected"):
+            issues += (f'<p style="margin:2px 0;font-size:9pt"><font color="#8e8ea0">'
+                       f'was → should be: </font>{_diff_html(row.get("cited"), row["corrected"])}</p>')
+        rows.append(
+            f'<tr><td style="padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;color:{color}">'
+            f'<b>{mark} {_e(label)}</b></td><td style="padding:6px 0;border-bottom:1px solid #f0f0f0">'
+            f'<b>{_e(_numbered(row))}</b><br/><font color="#8e8ea0" style="font-size:9pt">'
+            f'{_e(row["meta"])}</font>{issues}</td></tr>'
+        )
+
+    parts = []
+    if header:
+        parts.append('<p style="font-size:10pt;margin:0 0 6pt;border-bottom:2px solid #10a37f;padding-bottom:5pt">'
+                     '<b><font color="#10a37f">✓ </font><font color="#0d0d0d">Ref</font>'
+                     '<font color="#10a37f">Checker</font></b><font color="#8e8ea0" style="font-size:8pt">'
+                     '  ·  reference verification report</font></p>')
+    parts.append(f'<h1 style="font-size:16pt;margin:6pt 0 4pt;color:#0d0d0d">{_e(m["title"])}</h1>')
+    if m["ts"]:
+        parts.append(f'<p style="color:#8e8ea0;font-size:9pt;margin:0 0 8pt">{_e(m["ts"])}</p>')
+    parts.append(f'<p style="border-left:3px solid {severity_color};padding:6pt 10pt;background:#f7f7f8;'
+                 f'font-weight:bold;color:#0d0d0d">{_e(m["headline"])}</p>')
+    health = m["health"]
+    if health.get("score") is not None:
+        parts.append(f'<p style="font-size:10pt;margin:2pt 0 6pt"><b><font color="{health["color"]}">'
+                     f'Citation health: {health["score"]}/100 — {_e(health["grade"])}</font></b></p>')
+    if "summary" in sec:
+        cells = "".join(
+            f'<td style="text-align:center;border:1px solid #e5e5e5;padding:6pt">'
+            f'<b style="font-size:14pt"><font color="{_STATUS_COLOR.get(key, "#0d0d0d")}">'
+            f'{stats.get(key, 0)}</font></b><br/><font color="#8e8ea0" style="font-size:8pt">'
+            f'{label}</font></td>'
+            for key, label in (("total", "refs"), ("verified", "verified"), ("warning", "warnings"),
+                               ("error", "errors"), ("unverified", "unverified"))
+        )
+        parts.append(f'<table style="width:100%;border-collapse:collapse;margin:6pt 0"><tr>{cells}</tr></table>')
+    if "issues" in sec:
+        problems = _problem_rows(m)
+        parts.append(f'{heading}Issues to address ({len(problems)})</h2>')
+        if not problems:
+            parts.append('<p style="color:#8e8ea0;font-size:9pt">No errors or major warnings.</p>')
+        for row in problems:
+            parts.append(f'<p style="margin:6pt 0 0;font-size:10pt"><b>{_e(_numbered(row))}</b></p>')
+            for detail in row["errors"]:
+                parts.append(f'<p style="margin:2px 0 2px 10pt;color:#ef4146;font-size:9pt">✗ {_e(detail)}</p>')
+            for detail in row["major"]:
+                parts.append(f'<p style="margin:2px 0 2px 10pt;color:#f59e0b;font-size:9pt">! {_e(detail)}</p>')
+    if "references" in sec:
+        parts.append(f'{heading}References</h2>')
+        parts.append(f'<table style="width:100%;border-collapse:collapse">{"".join(rows)}</table>')
+    parts.append('<p style="color:#9aa0ad;font-size:8pt;margin-top:14pt;border-top:1px solid #e5e5e5;'
+                 'padding-top:6pt">Generated by RefChecker · a verification aid, not a determination of misconduct.</p>')
+    return ('<html><head><meta charset="utf-8"/></head><body style="font-family:sans-serif;color:#0d0d0d">'
+            + "".join(parts) + '</body></html>')
+
+
+def _render_pdf_from_html(html_str: str) -> bytes:
+    try:
+        import fitz
+    except Exception as exc:
+        raise PdfEngineUnavailableError(
+            "PDF engine (PyMuPDF) is unavailable — choose HTML or Markdown."
+        ) from exc
+    if not hasattr(fitz, "Story") or not hasattr(fitz, "DocumentWriter"):
+        raise PdfEngineUnavailableError(
+            "PDF engine (PyMuPDF) is too old to render reports — choose HTML or Markdown."
+        )
+    mediabox = fitz.paper_rect("a4")
+    where = mediabox + (40, 40, -40, -50)
+    buffer = io.BytesIO()
+    writer = fitz.DocumentWriter(buffer)
+    story = fitz.Story(html=html_str)
+    more = 1
+    guard = 0
+    while more and guard < 200:
+        device = writer.begin_page(mediabox)
+        more, _ = story.place(where)
+        story.draw(device)
+        writer.end_page()
+        guard += 1
+    writer.close()
+    return buffer.getvalue()
+
+
+def render_check_to_pdf(check: Dict[str, Any], *, corrections: bool = False,
+                        sections: Optional[Set[str]] = None, summary: Any = None) -> bytes:
+    model = _model(check, corrections=corrections, sections=sections, summary=summary)
+    return _render_pdf_from_html(_pdf_html_for_model(model))
 
 
 def render_batch_to_pdf(checks: Sequence[Dict[str, Any]], *, corrections: bool = False,

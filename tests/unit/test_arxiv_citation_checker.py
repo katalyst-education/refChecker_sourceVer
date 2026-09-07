@@ -458,7 +458,7 @@ class TestVersionMatchScore:
     def test_title_match_no_author_overlap_returns_zero(self, checker):
         """Same title but completely different authors must return 0.0.
 
-        This is the key regression test: a hallucinated reference that uses
+        This is the key regression test: an unresolved reference that uses
         a real paper title with fabricated authors should NOT be treated as
         an ArXiv version update.
         """
@@ -556,7 +556,7 @@ class TestVersionMatchEndToEnd:
     def test_no_version_match_with_zero_author_overlap(self, mock_fetch, mock_version_html, mock_latest, checker):
         """Same title but completely different authors across versions must NOT produce version warnings.
 
-        This tests the regression where a hallucinated ref (real title, fake authors)
+        This tests the regression where an unresolved ref (real title, wrong authors)
         was incorrectly treated as a version update.
         """
         mock_fetch.return_value = """@misc{test2020,

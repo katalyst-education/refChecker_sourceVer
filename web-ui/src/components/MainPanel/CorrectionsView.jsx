@@ -35,7 +35,6 @@ const CATEGORY_META = {
   error:         { label: 'Errors',        color: 'var(--color-error, #ef4444)' },
   warning:       { label: 'Warnings',      color: 'var(--color-warning, #f59e0b)' },
   unverified:    { label: 'Unverified',    color: 'var(--color-text-secondary)' },
-  hallucination: { label: 'Hallucinated',  color: 'var(--color-hallucination, #a855f7)' },
   suggestion:    { label: 'Suggestions',   color: 'var(--color-suggestion, #3b82f6)' },
 }
 
@@ -208,16 +207,12 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     setShowAdd,
     newRef,
     setNewRef,
-    suggestFor,
-    setSuggestFor,
     handleAddRef,
     handleRemoveRef,
-    handleSuggestAlt,
     removedRefs,
     handleRestoreRef,
     clearRemovedRefs,
     isRemoving,
-    isSuggesting,
   } = useReferenceActions()
 
   const statusFilter = useCheckStore(s => s.statusFilter)
@@ -771,46 +766,6 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         </div>
       </div>
 
-      {suggestFor && (
-        <div className="p-3 rounded-lg border space-y-2"
-          style={{ borderColor: 'var(--color-hallucination, #a855f7)', backgroundColor: 'rgba(168,85,247,0.06)' }}>
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="text-xs font-medium" style={{ color: 'var(--color-text-primary)' }}>
-              Real-paper candidates for the flagged reference
-              <span style={{ color: 'var(--color-text-secondary)' }}> (top {suggestFor.candidates.length} from Semantic Scholar)</span>
-            </div>
-            <button onClick={() => setSuggestFor(null)} className="text-xs px-2 py-0.5 rounded border"
-              style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }} type="button">×</button>
-          </div>
-          {suggestFor.candidates.length === 0 ? (
-            <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-              No candidates found — the cited title may be too generic or genuinely fabricated.
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {suggestFor.candidates.map((c, j) => (
-                <div key={j} className="flex items-start justify-between gap-2 p-2 rounded border"
-                  style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-primary)' }}>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium" style={{ color: 'var(--color-text-primary)' }}>{c.title}</div>
-                    <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-                      {(c.authors || []).slice(0, 4).join(', ')}{(c.authors || []).length > 4 ? ', et al.' : ''}
-                      {c.year ? ` · ${c.year}` : ''}{c.doi ? ` · ${c.doi}` : ''}
-                    </div>
-                  </div>
-                  {c.url && (
-                    <a href={c.url} target="_blank" rel="noreferrer"
-                      className="text-xs px-2 py-0.5 rounded flex-shrink-0"
-                      style={{ backgroundColor: 'var(--color-accent, #3b82f6)', color: 'white' }}>
-                      Open
-                    </a>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {showAdd && (
         <div className="p-3 rounded-lg border space-y-2"
@@ -1007,19 +962,6 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                         : 'No snapshot available for this row — pressing Restore just clears the local decision; the stored ref keeps the fix.'}
                     >↺ Restore</button>
                   )}
-                  {tags.has('hallucination') && (() => {
-                    const ident = referenceRowIdentity(ref, i)
-                    const suggesting = isSuggesting(ident)
-                    const disabled = suggesting || !!globalBusy || !selectedCheckId
-                    return (
-                      <button onClick={() => handleSuggestAlt(ref, i)} disabled={disabled}
-                        className="px-2 py-0.5 rounded text-xs"
-                        style={{ backgroundColor: 'var(--color-hallucination, #a855f7)', color: 'white', opacity: disabled ? 0.5 : 1 }}
-                        type="button"
-                        title="Search Semantic Scholar for real papers matching this title"
-                      >{suggesting ? '…' : 'Suggest alternative'}</button>
-                    )
-                  })()}
                   {(() => {
                     const ident = referenceRowIdentity(ref, i)
                     const removing = isRemoving(ident)
@@ -1120,3 +1062,5 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     </div>
   )
 }
+
+

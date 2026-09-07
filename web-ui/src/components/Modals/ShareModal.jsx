@@ -28,8 +28,7 @@ const FORMATS = [
  * "Share this document" — multi-format export (HTML / PDF / Markdown / DOCX)
  * with include/exclude section checkboxes and an optional "suggested
  * corrections" pass, plus opt-in publish-to-web (GitHub Gist → htmlpreview).
- * GPTZero-style: minor year warnings are downweighted server-side, errors and
- * hallucinations elevated. Every option maps to real report content.
+ * Every option maps to real report content.
  */
 export default function ShareModal({ checkId, batchId, title, onClose }) {
   const isBatch = !!batchId
@@ -63,9 +62,7 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
   // The animation's reference / warning / error counts MUST equal the numbers
   // the app's Summary bar shows, so they are derived from the very same source
   // of truth (buildReferenceSummary → getEffectiveReferenceStatus), not a
-  // separate, looser recompute. `errors` groups errors + hallucinations so the
-  // gauge/chips line up with the "problem" references the user sees — identical
-  // to the in-app walkthrough (StatsSection).
+  // separate, looser recompute.
   //
   // R48: the canonical summary is STYLE-AWARE (matching StatsSection/HealthBadge):
   // the active citation style can suppress style-conforming warnings, which moves
@@ -76,7 +73,6 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
   const styleFormat = useStyleStore((s) => s.format)
   const summary = useMemo(() => {
     const rawRefs = selectedCheck?.references || checkStore.references || []
-    const ai = selectedCheck?.ai_detection || checkStore.aiDetection || null
     // The share dialog only opens on a finished check, so treat it as complete
     // (respect an explicit status if one is present on the selected check).
     const rawStatus = (selectedCheck?.status || '').toLowerCase()
@@ -97,28 +93,22 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
       total: s.processedRefs || refs.length,
       verified: s.references.verified,
       warnings: s.references.warnings,
-      // Mirror the StatsSection results bar EXACTLY: its "errors" chip is
-      // references.errors only — hallucinated refs are a SEPARATE bucket, NOT
-      // folded into errors. Grouping them here made the share card read 9
-      // errors while the bar showed 7 (the user-reported "video doesn't match
-      // the results"). The share video must equal what the bar displays.
+      // Mirror the StatsSection results bar exactly.
       errors: s.references.errors,
     }
-    const aiOn = isBatch || (!!ai && ai.band !== 'unavailable' && ai.band !== 'inconclusive')
     // `canonical` is the full style-aware buildReferenceSummary result handed to
     // the export so the file shows the SAME counts + citation-health % the user
     // sees in the badge / report card.
-    return { refs, ai, stats, aiOn, canonical: s }
-  }, [selectedCheck, checkStore.references, checkStore.aiDetection, checkStore.stats, isBatch, styleFormat])
+    return { refs, stats, canonical: s }
+  }, [selectedCheck, checkStore.references, checkStore.stats, styleFormat])
 
   // Section include/exclude checkboxes (the export "what to include" controls).
-  const [sections, setSections] = useState({ summary: true, ai: true, issues: true, references: true })
+  const [sections, setSections] = useState({ summary: true, issues: true, references: true })
   const toggleSection = (k) => setSections((s) => ({ ...s, [k]: !s[k] }))
   const includeList = Object.entries(sections).filter(([, v]) => v).map(([k]) => k)
 
   const SECTION_DEFS = [
     { id: 'summary', label: 'Summary & verdict', always: false },
-    { id: 'ai', label: 'AI-text detection', disabled: !summary.aiOn },
     { id: 'issues', label: 'Issues to address', always: false },
     { id: 'references', label: 'Full reference list', always: false },
   ]
@@ -222,8 +212,6 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
               key={animKey}
               title={title}
               stats={summary.stats}
-              aiBand={summary.ai?.band}
-              aiScore={summary.ai?.overall_score}
               height={248}
             />
           )}
@@ -253,7 +241,6 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
                     checked={!s.disabled && sections[s.id]}
                     onChange={() => toggleSection(s.id)} />
                   {s.label}
-                  {s.id === 'ai' && !summary.aiOn && <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>(none)</span>}
                 </label>
               ))}
             </div>
@@ -348,3 +335,5 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
     </div>
   )
 }
+
+

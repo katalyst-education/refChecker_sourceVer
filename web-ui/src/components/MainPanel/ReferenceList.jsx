@@ -1,14 +1,13 @@
 import { useMemo } from 'react'
 import ReferenceCard from '../ReferenceCard/ReferenceCard'
 import { useCheckStore } from '../../stores/useCheckStore'
-import { getEffectiveReferenceStatus, llmFoundMetadataMatchesCitation } from '../../utils/referenceStatus'
+import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import useReferenceActions from '../../hooks/useReferenceActions'
 import { useStyleStore } from '../../stores/useStyleStore'
-import { CITATION_STYLES, listCustomCitationStyles, filterIssuesForStyle } from '../../utils/formatters'
+import { filterIssuesForStyle } from '../../utils/formatters'
 import { referenceRowIdentity } from '../../utils/referenceIdentity'
 import {
   AddReferencePanel,
-  SuggestAltPanel,
   ReferenceRowActions,
 } from './ReferenceActionsBar'
 
@@ -34,11 +33,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     setShowAdd,
     newRef,
     setNewRef,
-    suggestFor,
-    setSuggestFor,
     handleAddRef,
     handleRemoveRef,
-    handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
     getReferenceSearchOperation,
@@ -50,7 +46,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     clearRemovedRefs,
     getReverifyAction,
     isReverifying,
-    isSuggesting,
     isRemoving,
   } = useReferenceActions()
 
@@ -105,34 +100,15 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             // (suggestions are for verified papers that could be improved)
             return status === 'verified' || status === 'suggestion'
           case 'error':
-            // Has any error (non-unverified), but exclude refs already
-            // classified as hallucinated — those errors are evidence of
-            // the hallucination, displayed under the hallucinated card.
-            if (status === 'hallucination') return false
-            if (llmFoundMetadataMatchesCitation(ref)) return false
             return ref.errors?.some(e => e.error_type !== 'unverified')
           case 'warning':
-            // Has any warning, excluding hallucinated refs.
-            if (status === 'hallucination') return false
-            if (llmFoundMetadataMatchesCitation(ref)) return false
             return ref.warnings?.length > 0
           case 'suggestion':
             // Has any suggestion
             return ref.suggestions?.length > 0
           case 'unverified':
-            // Don't match refs currently showing as 'checking' (awaiting LLM check)
             if (status === 'checking') return false
-            if (status === 'unverified' || status === 'hallucination') return true
-            if (ref.errors?.some(e => e.error_type === 'unverified')) return true
-            // Also include refs flagged LIKELY by the hallucination LLM, even when
-            // error precedence would otherwise hide them, but skip cases where the
-            // LLM-found metadata actually matches the citation.
-            return ref.hallucination_assessment?.verdict === 'LIKELY' &&
-                !llmFoundMetadataMatchesCitation(ref)
-          case 'hallucination':
-            if (status === 'hallucination') return true
-            return ref.hallucination_assessment?.verdict === 'LIKELY' &&
-                !llmFoundMetadataMatchesCitation(ref)
+            return status === 'unverified' || ref.errors?.some(e => e.error_type === 'unverified')
           default:
             // For other statuses (pending, checking, unchecked), match exactly
             return status === filter
@@ -240,9 +216,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             </span>
             )}
             {selectedCheckId && (
-                <SuggestionStylePicker />
-            )}
-            {selectedCheckId && (
                 <button
                     onClick={() => setShowAdd(v => !v)}
                     className="text-xs px-2 py-1 rounded"
@@ -268,8 +241,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                 onCancel={() => setShowAdd(false)}
             />
         )}
-
-        <SuggestAltPanel suggestFor={suggestFor} onClose={() => setSuggestFor(null)} />
 
         <RemovedRefsStrip
             removedRefs={removedRefs}
@@ -298,7 +269,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           reference={ref}
                           displayIndex={displayIndex}
                           selectedCheckId={selectedCheckId}
-                          onSuggest={handleSuggestAlt}
                           onRemove={handleRemoveRef}
                           onReverify={handleReverify}
                           onReverifyAllDatabases={handleReverifyAllDatabases}
@@ -308,7 +278,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           onRestoreExtractedMetadata={handleRestoreExtractedMetadata}
                           reverifyBusy={isReverifying(ident)}
                           reverifyAction={getReverifyAction(ident)}
-                          suggestBusy={isSuggesting(ident)}
                           removeBusy={isRemoving(ident)}
                           globalBusy={!!globalBusy}
                       />
@@ -331,7 +300,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
 function RemovedRefsStrip({ removedRefs, busyKey, onRestore, onClear }) {
   if (!removedRefs || removedRefs.length === 0) return null
   // Block Undo only while another global action (Add / Restore) is in
-  // flight. Per-row actions (Re-verify / Suggest / Remove) live in
+  // flight. Per-row actions (Re-verify / Remove) live in
   // their own sets and don't conflict with the global busy slot, so
   // Undo can run in parallel with them. Clear stays enabled — it's
   // purely local.
@@ -392,37 +361,5 @@ function RemovedRefsStrip({ removedRefs, busyKey, onRestore, onClear }) {
           </button>
         </div>
       </div>
-  )
-}
-
-/**
- * Tiny inline style picker that lives in the References-tab header.
- * Writes to the shared useStyleStore so the Suggest-alternative panel
- * (and anything else that reads from the store) renders candidates in
- * whatever format the user picked here.
- */
-function SuggestionStylePicker() {
-  const format = useStyleStore(s => s.format)
-  const setFormat = useStyleStore(s => s.setFormat)
-  const customs = listCustomCitationStyles()
-  return (
-      <select
-          value={format}
-          onChange={(e) => setFormat(e.target.value, { userSelected: true })}
-          className="text-xs px-2 py-1 rounded border"
-          style={{
-            background: 'var(--color-bg-tertiary)',
-            borderColor: 'var(--color-border)',
-            color: 'var(--color-text-secondary)',
-          }}
-          title="Citation style used to render Suggest-alternative results"
-      >
-        {CITATION_STYLES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-        {customs.length > 0 && (
-            <optgroup label="Custom">
-              {customs.map(s => <option key={s.id} value={`custom:${s.id}`}>{s.label || s.id}</option>)}
-            </optgroup>
-        )}
-      </select>
   )
 }

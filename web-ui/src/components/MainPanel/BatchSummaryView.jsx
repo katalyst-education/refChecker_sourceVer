@@ -12,11 +12,10 @@ import PresenceAvatars from '../Presence/PresenceAvatars'
  *
  * Surfaces:
  *  - Aggregate counters across every child paper (errors, warnings,
- *    hallucinations, fabrications, unverified, verified-clean)
+ *    unverified, verified-clean)
  *  - Total LLM budget + token spend across the batch (from the
  *    `/batch/{batch_id}/llm-usage` aggregator that v0.7.45 added)
- *  - Per-paper row list with status badge, ref count, error/halluc
- *    counts, and an Open button that drills into the standard
+ *  - Per-paper row list with status badge and reference issue counts, and an Open button that drills into the standard
  *    check view (preserves selectedBatchId so the per-paper view
  *    shows "← Back to batch")
  *  - Cancel All button for in-progress batches
@@ -77,7 +76,7 @@ export default function BatchSummaryView() {
   const openBatchChild = useHistoryStore(s => s.openBatchChild)
   const [usage, setUsage] = useState({ input_tokens: 0, output_tokens: 0, cost_usd: 0, by_flow: {}, per_check: {} })
   const [isCancelling, setIsCancelling] = useState(false)
-  const [filter, setFilter] = useState('all') // all | error | hallucinated | in_progress | completed
+  const [filter, setFilter] = useState('all') // all | error | warning | unverified | in_progress | completed
   const [showShare, setShowShare] = useState(false)
   // R26: teams the current user can share this batch with, and the team the
   // batch is currently shared with (from the summary). Empty when not in
@@ -89,13 +88,10 @@ export default function BatchSummaryView() {
   const batchId = selectedBatch?.batch_id
   const checks = selectedBatch?.checks || []
 
-  // Per-status aggregates. Walks every child once and tallies into
-  // the buckets the user asked about, including hallucination /
-  // fabrication counts (refs with hallucination_assessment LIKELY).
+  // Per-status aggregates. Walks every child once.
   const agg = useMemo(() => {
     let total = 0, completed = 0, inProgress = 0, errored = 0, cancelled = 0
-    let totalRefs = 0, errorsRefs = 0, warningsRefs = 0, hallucRefs = 0, unverifiedRefs = 0, verifiedRefs = 0
-    let aiHigh = 0, aiMedium = 0
+    let totalRefs = 0, errorsRefs = 0, warningsRefs = 0, unverifiedRefs = 0, verifiedRefs = 0
     for (const c of checks) {
       total += 1
       if (c.status === 'in_progress') inProgress += 1
@@ -105,13 +101,10 @@ export default function BatchSummaryView() {
       totalRefs += c.total_refs || 0
       errorsRefs += c.errors_count || 0
       warningsRefs += c.warnings_count || 0
-      hallucRefs += c.hallucination_count || 0
       unverifiedRefs += c.unverified_count || 0
-      verifiedRefs += Math.max(0, (c.total_refs || 0) - (c.errors_count || 0) - (c.warnings_count || 0) - (c.unverified_count || 0) - (c.hallucination_count || 0))
-      if (c.ai_detection_band === 'high') aiHigh += 1
-      else if (c.ai_detection_band === 'medium') aiMedium += 1
+      verifiedRefs += Math.max(0, (c.total_refs || 0) - (c.errors_count || 0) - (c.warnings_count || 0) - (c.unverified_count || 0))
     }
-    return { total, completed, inProgress, errored, cancelled, totalRefs, errorsRefs, warningsRefs, hallucRefs, unverifiedRefs, verifiedRefs, aiHigh, aiMedium }
+    return { total, completed, inProgress, errored, cancelled, totalRefs, errorsRefs, warningsRefs, unverifiedRefs, verifiedRefs }
   }, [checks])
 
   // Fetch aggregated LLM usage. Re-runs whenever the batch's progress
@@ -249,8 +242,6 @@ export default function BatchSummaryView() {
       if (filter === 'error') return (c.errors_count || 0) > 0 || c.status === 'error'
       if (filter === 'warning') return (c.warnings_count || 0) > 0
       if (filter === 'unverified') return (c.unverified_count || 0) > 0
-      if (filter === 'hallucinated') return (c.hallucination_count || 0) > 0
-      if (filter === 'ai_flagged') return c.ai_detection_band === 'high' || c.ai_detection_band === 'medium'
       return true
     })
   }, [checks, filter])
@@ -402,7 +393,7 @@ export default function BatchSummaryView() {
             color="#ef4444"
             active={filter === 'error'}
             onClick={() => setFilter(f => f === 'error' ? 'all' : 'error')}
-            title="Click to filter to papers with errors / fabricated refs"
+            title="Click to filter to papers with verification errors"
           />
           <Chip
             label="Warnings"
@@ -413,31 +404,13 @@ export default function BatchSummaryView() {
             title="Click to filter to papers with style-aware warnings (NLM venue abbreviations, author-order diffs, etc.)"
           />
           <Chip
-            label="Hallucinated"
-            value={agg.hallucRefs}
-            color="#a855f7"
-            active={filter === 'hallucinated'}
-            onClick={() => setFilter(f => f === 'hallucinated' ? 'all' : 'hallucinated')}
-            title="Click to filter to papers with LIKELY-hallucinated refs"
-          />
-          <Chip
             label="Unverified"
             value={agg.unverifiedRefs}
             color="#94a3b8"
             active={filter === 'unverified'}
             onClick={() => setFilter(f => f === 'unverified' ? 'all' : 'unverified')}
-            title="Click to filter to papers with refs the verifier couldn't resolve (no S2/Crossref/PMC hit + LLM didn't flag as hallucination)"
+            title="Click to filter to papers with references the verifier could not resolve"
           />
-          {(agg.aiHigh + agg.aiMedium) > 0 && (
-            <Chip
-              label="AI-flagged"
-              value={agg.aiHigh + agg.aiMedium}
-              color="#ef4444"
-              active={filter === 'ai_flagged'}
-              onClick={() => setFilter(f => f === 'ai_flagged' ? 'all' : 'ai_flagged')}
-              title="Click to filter to papers whose body text scored medium/high AI-likelihood (advisory only — not proof of AI authorship)"
-            />
-          )}
         </div>
 
         {/* Budget chip + per-flow breakdown.
@@ -457,7 +430,7 @@ export default function BatchSummaryView() {
               style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' }}
               title={explainsCheap
                 ? `${crossrefShortCircuits}/${totalPapers} papers resolved via Crossref by DOI — no LLM tokens needed. Only the ${llmCalls} paper(s) without a usable DOI required LLM extraction.`
-                : `LLM cost broken down by flow: extract = bibliography parsing; verify = per-ref disambiguation; hallucination = LLM-flagged refs; suggest = Similar Papers / Suggest Alternative; reverify = Apply Fix re-runs.`}
+                : `LLM cost broken down by processing stage.`}
             >
               <span style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>
                 💰 {fmtUsd(usage.cost_usd)}
@@ -511,8 +484,7 @@ export default function BatchSummaryView() {
         </div>
         <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
           {filteredChecks.map(c => {
-            const isVerifiedClean = (c.errors_count || 0) === 0 && (c.warnings_count || 0) === 0 && (c.hallucination_count || 0) === 0 && (c.unverified_count || 0) === 0 && c.status === 'completed'
-            const hasHallu = (c.hallucination_count || 0) > 0
+            const isVerifiedClean = (c.errors_count || 0) === 0 && (c.warnings_count || 0) === 0 && (c.unverified_count || 0) === 0 && c.status === 'completed'
             const checkCost = usage.per_check?.[c.id]?.cost_usd
             return (
               <div
@@ -525,9 +497,9 @@ export default function BatchSummaryView() {
                   className="inline-block rounded-full flex-shrink-0"
                   style={{
                     width: 8, height: 8,
-                    background: hasHallu ? '#a855f7' : (STATUS_COLOR[c.status] || '#94a3b8'),
+                    background: STATUS_COLOR[c.status] || '#94a3b8',
                   }}
-                  title={hasHallu ? 'Has likely-hallucinated refs' : c.status}
+                  title={c.status}
                 />
                 {/* Title */}
                 <div className="flex-1 min-w-0">
@@ -543,14 +515,7 @@ export default function BatchSummaryView() {
                     {(c.total_refs || 0) > 0 && <span>{c.total_refs} ref{c.total_refs === 1 ? '' : 's'}</span>}
                     {(c.errors_count || 0) > 0 && <span style={{ color: '#ef4444' }}>{c.errors_count} err</span>}
                     {(c.warnings_count || 0) > 0 && <span style={{ color: '#f59e0b' }}>{c.warnings_count} warn</span>}
-                    {hasHallu && <span style={{ color: '#a855f7' }}>{c.hallucination_count} halluc</span>}
                     {(c.unverified_count || 0) > 0 && <span style={{ color: '#94a3b8' }}>{c.unverified_count} unv</span>}
-                    {(c.ai_detection_band === 'high' || c.ai_detection_band === 'medium') && (
-                      <span style={{ color: c.ai_detection_band === 'high' ? '#ef4444' : '#f59e0b' }}
-                        title="AI-generated-text likelihood (advisory, not proof)">
-                        AI {c.ai_detection_band}
-                      </span>
-                    )}
                     {isVerifiedClean && <span style={{ color: '#22c55e' }}>✓ clean</span>}
                     {checkCost ? <span style={{ color: 'var(--color-text-muted)' }}>· {fmtUsd(checkCost)}</span> : null}
                   </div>
@@ -606,3 +571,5 @@ export default function BatchSummaryView() {
     </div>
   )
 }
+
+

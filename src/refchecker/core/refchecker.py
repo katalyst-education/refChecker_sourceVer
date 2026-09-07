@@ -45,7 +45,6 @@ import json
 import random
 import csv
 import subprocess
-from refchecker.core.hallucination_policy import should_check_hallucination, assess_hallucination
 from refchecker.core.report_builder import ReportBuilder
 from refchecker.checkers.local_semantic_scholar import LocalNonArxivReferenceChecker
 from refchecker.utils.text_utils import (clean_author_name, clean_title, clean_title_basic,
@@ -281,10 +280,7 @@ class ArxivReferenceChecker:
                  llm_config=None, debug_mode=False, enable_parallel=True, max_workers=6,
                  report_file=None, report_format='json', cache_dir=None,
                  db_paths=None, database_directory=None,
-                 ai_detection_enabled=False, ai_detection_device='cpu',
                  extraction_mode=None,
-                 # Deprecated parameters kept for backward compatibility
-                 scan_mode='standard', only_flagged=False,
                  springer_nature_api_key=None):
         # Initialize the reference checker for non-arXiv references
         self.fatal_error = False
@@ -310,102 +306,11 @@ class ArxivReferenceChecker:
         self.extraction_mode = normalize_extraction_mode(
             extraction_mode or (llm_config or {}).get('extraction_mode')
         )
-        self.ai_detection_enabled = bool(ai_detection_enabled)
-        self.ai_detection_device = (ai_detection_device or 'cpu').lower()
-        self.ai_detection_results = []
         self.last_paper_text = ''
-
-        # Initialize optional LLM hallucination verifier
-        # If a separate hallucination provider is specified, use it; otherwise
-        # fall back to the main LLM provider (if it supports hallucination).
-        llm_verifier = None
-        llm_disabled = (llm_config or {}).get('disabled', False)
-        if not llm_disabled:
-            from refchecker.config.settings import HALLUCINATION_CAPABLE_PROVIDERS
-            try:
-                from refchecker.llm.hallucination_verifier import LLMHallucinationVerifier
-
-                # Determine hallucination provider/model/api_key/endpoint
-                explicit_h_provider = (llm_config or {}).get('hallucination_provider')
-                main_provider = (llm_config or {}).get('provider')
-
-                if explicit_h_provider:
-                    # User explicitly set --hallucination-provider
-                    h_provider = explicit_h_provider
-                    h_model = (llm_config or {}).get('hallucination_model')
-                    h_api_key = (llm_config or {}).get('hallucination_api_key')
-                    h_endpoint = (llm_config or {}).get('hallucination_endpoint')
-                elif main_provider and main_provider in HALLUCINATION_CAPABLE_PROVIDERS:
-                    # Main provider supports hallucination checking — use it
-                    h_provider = main_provider
-                    h_model = (llm_config or {}).get('model')
-                    h_api_key = None   # let verifier resolve from env
-                    h_endpoint = (llm_config or {}).get('endpoint')
-                else:
-                    # Main provider (e.g. vllm) does not support hallucination;
-                    # skip unless cache is available.
-                    h_provider = None
-                    h_model = None
-                    h_api_key = None
-                    h_endpoint = None
-                    if main_provider:
-                        logger.info(
-                            'Provider %s does not support hallucination checking. '
-                            'Use --hallucination-provider to enable it with a capable provider.',
-                            main_provider,
-                        )
-
-                if h_provider or self.cache_dir:
-                    verifier = LLMHallucinationVerifier(
-                        provider=h_provider,
-                        api_key=h_api_key,
-                        model=h_model,
-                        endpoint=h_endpoint,
-                    )
-                    verifier.cache_dir = self.cache_dir
-                    llm_verifier = verifier
-                    if verifier.available:
-                        logger.debug('LLM hallucination verifier enabled (provider=%s)', verifier.provider)
-                    else:
-                        logger.debug('LLM hallucination verifier: no API key, will use cache only')
-            except Exception as exc:
-                logger.debug(f'LLM hallucination verifier init failed: {exc}')
-
-        # Initialize optional web search — prefer the hallucination provider
-        # (which is a full API provider) over the main extraction provider.
-        web_searcher = None
-        web_search_provider = (
-            (llm_config or {}).get('hallucination_provider')
-            or (llm_config or {}).get('provider')
-        )
-        web_search_api_key = (
-            (llm_config or {}).get('hallucination_api_key')
-            or (llm_config or {}).get('api_key')
-        )
-        web_search_endpoint = (
-            (llm_config or {}).get('hallucination_endpoint')
-            or (llm_config or {}).get('endpoint')
-        )
-        try:
-            from refchecker.checkers.web_search import create_web_search_checker
-            searcher = create_web_search_checker(
-                preferred_provider=web_search_provider,
-                api_key=web_search_api_key,
-                endpoint=web_search_endpoint,
-            )
-            if searcher.available:
-                web_searcher = searcher
-                logger.debug(f'Web search verification enabled (provider: {searcher._provider_name})')
-            else:
-                logger.debug('Web search not available (no API key)')
-        except Exception as exc:
-            logger.debug(f'Web search init failed: {exc}')
 
         self.report_builder = ReportBuilder(
             report_file=report_file,
             report_format=report_format,
-            llm_verifier=llm_verifier,
-            web_searcher=web_searcher,
         )
         
         if self.db_paths:
@@ -617,63 +522,9 @@ class ArxivReferenceChecker:
 
     def _build_structured_report_payload(self):
         """Build the structured summary, paper rollups, and records payload."""
-        payload = self.report_builder.build_structured_report_payload(
+        return self.report_builder.build_structured_report_payload(
             self.errors, self._get_report_stats()
         )
-        if getattr(self, 'ai_detection_enabled', False):
-            payload['ai_detection'] = list(getattr(self, 'ai_detection_results', []))
-        return payload
-
-    def _paper_text_for_ai_detection(self, paper):
-        """Reuse extraction output, fetching text only after a bibliography-cache hit."""
-        if self.last_paper_text:
-            return self.last_paper_text
-        if getattr(paper, 'is_text_refs', False) or getattr(paper, 'is_bibtex', False):
-            return ''
-        try:
-            if getattr(paper, 'is_latex', False):
-                return self.extract_text_from_latex(paper.file_path) or ''
-            pdf_content = self.download_pdf(paper)
-            return self.extract_text_from_pdf(pdf_content) if pdf_content else ''
-        except Exception as exc:
-            logger.warning("Could not extract manuscript text for AI detection: %s", exc)
-            return ''
-
-    def _run_ai_detection_for_paper(self, paper):
-        """Run the same shared local detector used by WebUI and bulk requests."""
-        from refchecker.ai_detection import run_detection
-
-        result = run_detection(
-            self._paper_text_for_ai_detection(paper),
-            title=getattr(paper, 'title', None),
-            backend='local',
-            device=self.ai_detection_device,
-        )
-        entry = {
-            'paper': self._build_current_paper_info(paper),
-            **result.to_dict(),
-        }
-        self.ai_detection_results.append(entry)
-        score = (
-            f" · score {result.overall_score:.3f}"
-            if result.overall_score is not None else ''
-        )
-        reason = f" · {result.abstain_reason}" if result.abstain_reason else ''
-        print(
-            f"   AI text check: {result.band} · {result.device_used or self.ai_detection_device}"
-            f"{score}{reason}"
-        )
-        return result
-
-    def _build_hallucination_console_lines(self, payload=None, max_papers=5):
-        """Build a compact bulk triage summary for hallucination scans."""
-        payload = payload or self._build_structured_report_payload()
-        return self.report_builder.build_hallucination_console_lines(payload, max_papers=max_papers)
-
-    def _print_hallucination_console_summary(self, payload=None):
-        """Print a compact bulk triage summary for hallucination scans."""
-        payload = payload or self._build_structured_report_payload()
-        self.report_builder.print_hallucination_console_summary(payload)
 
     def write_structured_report(self, payload=None):
         """Write structured output for downstream triage workflows."""
@@ -3387,8 +3238,8 @@ class ArxivReferenceChecker:
         if not cited_authors or not correct_authors:
             return None, None, None
 
-        from refchecker.core.hallucination_policy import _compute_author_overlap
-        overlap = _compute_author_overlap(cited_authors, correct_authors)
+        from refchecker.core.issue_policy import compute_author_overlap
+        overlap = compute_author_overlap(cited_authors, correct_authors)
         # overlap is None for very short author lists — skip those
         if overlap is None or overlap > 0.1:
             return None, None, None
@@ -3642,8 +3493,8 @@ class ArxivReferenceChecker:
         checker so CLI, WebUI, and bulk paths get identical results.
         """
         # Post-parse fixups live here rather than in verify_reference because
-        # the hallucination recheck and seen-refs paths call this method
-        # directly; running them once here keeps every path identical.
+        # other verification and seen-reference paths call this method
+        # directly; running fixups once here keeps every path identical.
         self._fixup_reference_fields(reference)
 
         # Direct sources short-circuit normal scans. Explicit Search-all keeps
@@ -4044,7 +3895,7 @@ class ArxivReferenceChecker:
             elif error_type == 'venue':
                 error_entry['ref_venue_correct'] = error.get('ref_venue_correct', '')
             
-            # Propagate verification source tracking for hallucination scoring
+            # Preserve verification source tracking for reports and diagnostics.
             if 'sources_checked' in error:
                 error_entry['sources_checked'] = error['sources_checked']
             if 'sources_negative' in error:
@@ -4436,9 +4287,6 @@ class ArxivReferenceChecker:
                         if len(bibliography) < original_count:
                             logger.debug(f"Deduplicated {original_count} references to {len(bibliography)} unique references")
 
-                    if self.ai_detection_enabled and not self.fatal_error:
-                        self._run_ai_detection_for_paper(paper)
-                                        
                     # Update statistics
                     self.total_papers_processed += 1
                     self.total_references_processed += len(bibliography)
@@ -4534,11 +4382,8 @@ class ArxivReferenceChecker:
         if not self.fatal_error:
             if self.single_paper_mode:
                 # Single paper mode - show simplified summary
-                # Build structured payload to get hallucination counts
                 structured_payload = self._build_structured_report_payload()
-                flagged_count = structured_payload['summary'].get('flagged_records', 0)
-                # Match WebUI: hallucinated refs also count as unverified
-                total_unverified = max(self.total_unverified_refs, flagged_count)
+                total_unverified = self.total_unverified_refs
 
                 print(f"\n" + "="*60)
                 print(f"📋 SUMMARY")
@@ -4552,8 +4397,6 @@ class ArxivReferenceChecker:
                     print(f"ℹ️  Total information: {self.total_info_found}")
                 if total_unverified > 0:
                     print(f"❓ Total unverified: {total_unverified}")
-                if flagged_count > 0:
-                    print(f"🚩 Total likely hallucinated: {flagged_count}")
                 if self.total_errors_found == 0 and self.total_warnings_found == 0 and self.total_info_found == 0 and total_unverified == 0:
                     print(f"✅ All references verified successfully!")
 
@@ -4561,9 +4404,7 @@ class ArxivReferenceChecker:
                 # aggregate verdicts (no fabricated precise %; the exact score is
                 # in the app/report).
                 if self.total_references_processed > 0:
-                    if flagged_count > 0:
-                        grade = "Critical — likely hallucinations present"
-                    elif self.total_errors_found > 0:
+                    if self.total_errors_found > 0:
                         grade = "Poor — errors need correction"
                     elif self.total_warnings_found > 0 or total_unverified > 0:
                         grade = "Fair — minor warnings / unverified"
@@ -4581,8 +4422,7 @@ class ArxivReferenceChecker:
                 # Multi-paper mode - show full summary
                 # Build structured payload once and reuse for console + file report
                 structured_payload = self._build_structured_report_payload()
-                flagged_count = structured_payload['summary'].get('flagged_records', 0)
-                total_unverified = max(self.total_unverified_refs, flagged_count)
+                total_unverified = self.total_unverified_refs
 
                 print(f"\n" + "="*60)
                 print(f"📋 FINAL SUMMARY")
@@ -4596,15 +4436,9 @@ class ArxivReferenceChecker:
                 print(f"ℹ️  Papers with information: {self.papers_with_info}")
                 print(f"         Total information: {self.total_info_found}")
                 print(f"❓ Total unverified: {total_unverified}")
-                if flagged_count > 0:
-                    print(f"🚩 Total likely hallucinated: {flagged_count}")
-                    self._print_hallucination_console_summary(payload=structured_payload)
-
                 # Citation-health grade for the batch (qualitative, real aggregates).
                 if self.total_references_processed > 0:
-                    if flagged_count > 0:
-                        grade = "Critical — likely hallucinations present"
-                    elif self.total_errors_found > 0:
+                    if self.total_errors_found > 0:
                         grade = "Poor — errors need correction"
                     elif self.total_warnings_found > 0 or total_unverified > 0:
                         grade = "Fair — minor warnings / unverified"
@@ -7339,17 +7173,14 @@ class ArxivReferenceChecker:
         def result_callback(result):
             self._process_reference_result(paper, result.reference, result.errors, result.url,
                                          paper_errors, unverified_count, debug_mode, print_output=False,
-                                         verified_data=result.verified_data,
-                                         precomputed_hallucination=result.hallucination_assessment,
-                                         precomputed_hallucination_applied=result.hallucination_verdict_applied)
+                                         verified_data=result.verified_data)
         
         # Run parallel verification
         processor.verify_references_parallel(paper, bibliography, result_callback)
     
     def _process_reference_result(self, paper, reference, errors, reference_url, 
                                 paper_errors, unverified_count, debug_mode, print_output=True,
-                                verified_data=None, precomputed_hallucination=None,
-                                precomputed_hallucination_applied=False):
+                                verified_data=None):
         """
         Process the result of reference verification (shared by both sequential and parallel)
         
@@ -7362,131 +7193,24 @@ class ArxivReferenceChecker:
             unverified_count: Counter for unverified references (passed by reference)
             debug_mode: Whether debug mode is enabled
             print_output: Whether to print output (False for parallel mode to avoid duplication)
-            precomputed_hallucination: Pre-computed hallucination assessment from parallel printer (skip LLM re-call)
-            precomputed_hallucination_applied: Whether that assessment has already been applied to errors/status
         """
         # If errors found, add to dataset and optionally print details
         if errors:
-            from refchecker.core.hallucination_policy import apply_hallucination_verdict
-
             # Check if there's an unverified error among the errors
             has_unverified_error = any(e.get('error_type') == 'unverified' or e.get('warning_type') == 'unverified' or e.get('info_type') == 'unverified' for e in errors)
-
-            def _apply_hallucination_for_decision(assessment):
-                if not assessment:
-                    return None, {}
-                applied = apply_hallucination_verdict(
-                    {'status': 'unverified' if has_unverified_error else 'error', 'errors': errors},
-                    assessment,
-                    reference=reference,
-                    standard_refchecker=lambda found_ref: self.verify_reference_standard(None, found_ref),
-                    llm_client=self.report_builder.llm_verifier,
-                    web_searcher=self.report_builder.web_searcher,
-                )
-                return applied.get('hallucination_assessment', assessment), applied
-            
             if has_unverified_error:
-                if precomputed_hallucination_applied:
-                    self.total_unverified_refs += 1
-                    self._display_unverified_error_with_subreason(reference, reference_url, errors, debug_mode, print_output)
-                # Check if the URL was confirmed to contain the paper
-                elif any(
-                    'url references paper' in (e.get('error_details') or '').lower()
-                    for e in errors
-                ):
-                    # URL contains the paper — ask the LLM to validate
-                    # whether this is a real reference before recording an error.
-                    url_assessment = precomputed_hallucination
-                    if not url_assessment:
-                        url_assessment = self._run_and_return_hallucination_assessment(
-                            reference, errors, verified_data=verified_data, reference_url=reference_url
-                        )
-                    url_assessment, applied_hallucination = _apply_hallucination_for_decision(url_assessment)
-                    
-                    if url_assessment and applied_hallucination.get('verified_via_website'):
-                        website_url = url_assessment.get('website_verified_url') or url_assessment.get('link', '')
-                        if print_output:
-                            print("       Matched Database: Web page")
-                            if website_url:
-                                print(f"       Verified URL: {website_url}")
-                            explanation = url_assessment.get('explanation', '')
-                            if explanation:
-                                print(f"         {explanation}")
-                        return
-                    elif url_assessment and applied_hallucination.get('status') == 'verified':
-                        # LLM confirmed the reference is real — treat as verified
-                        cited_url = reference.get('cited_url') or reference.get('url', '')
-                        if print_output:
-                            print(f"       ✅ Verified via URL: {cited_url}")
-                            explanation = url_assessment.get('explanation', '')
-                            if explanation:
-                                print(f"         {explanation}")
-                        return  # Don't add to errors — reference is verified
-                    elif url_assessment and applied_hallucination.get('status') == 'hallucination':
-                        # LLM says likely hallucinated despite URL containing title
-                        self.total_unverified_refs += 1
-                        if not debug_mode and print_output:
-                            print(f"      ❓ Could not verify: {reference.get('title', 'Untitled')}")
-                        # Store assessment so it isn't re-run below
-                        precomputed_hallucination = url_assessment
-                    else:
-                        # UNCERTAIN or no LLM — fall back to current display
-                        # (shows "✅ Verified via URL" via subreason display)
-                        self._display_unverified_error_with_subreason(
-                            reference, reference_url, errors, debug_mode, print_output)
-                else:
-                    # Check if the LLM already confirmed this is a real reference
-                    llm_assessment = precomputed_hallucination
-                    if not llm_assessment:
-                        llm_assessment = self._run_and_return_hallucination_assessment(
-                            reference, errors, verified_data=verified_data, reference_url=reference_url
-                        )
-                    llm_assessment, applied_hallucination = _apply_hallucination_for_decision(llm_assessment)
-                    if llm_assessment and applied_hallucination.get('verified_via_website'):
-                        website_url = llm_assessment.get('website_verified_url') or llm_assessment.get('link', '')
-                        if print_output:
-                            print("       Matched Database: Web page")
-                            if website_url:
-                                print(f"       Verified URL: {website_url}")
-                        precomputed_hallucination = llm_assessment
-                    elif llm_assessment and applied_hallucination.get('status') == 'verified':
-                        # LLM confirmed the reference is real - don't count as unverified
-                        llm_link = llm_assessment.get('link', '')
-                        if print_output:
-                            print("       Matched Database: LLM search")
-                            if llm_link and llm_link.startswith('http'):
-                                print(f"       Verified URL: {llm_link}")
-                        # Store assessment so it isn't re-run below
-                        precomputed_hallucination = llm_assessment
-                    elif llm_assessment and applied_hallucination.get('status') == 'warning':
-                        if print_output and applied_hallucination.get('matched_database'):
-                            print(f"       Matched Database: {applied_hallucination['matched_database']}")
-                        warning_entries = [
-                            {
-                                **warning,
-                                'warning_type': warning.get('error_type'),
-                                'warning_details': warning.get('error_details', ''),
-                            }
-                            for warning in applied_hallucination.get('warnings', [])
-                        ]
-                        self._display_non_unverified_errors(
-                            warning_entries, debug_mode, print_output,
-                        )
-                        precomputed_hallucination = llm_assessment
-                    else:
-                        self.total_unverified_refs += 1
-                        self._display_unverified_error_with_subreason(reference, reference_url, errors, debug_mode, print_output)
-                        if llm_assessment:
-                            precomputed_hallucination = llm_assessment
+                self.total_unverified_refs += 1
+                self._display_unverified_error_with_subreason(
+                    reference, reference_url, errors, debug_mode, print_output
+                )
 
             # Add to dataset and handle all errors
-            error_entry_record = self.add_error_to_dataset(paper, reference, errors, reference_url, verified_data)
-            error_entry_index = len(self.errors) - 1 if error_entry_record is not None else None
+            self.add_error_to_dataset(paper, reference, errors, reference_url, verified_data)
             paper_errors.extend(errors)
             
             # Count errors vs warnings vs info — shared function ensures
             # all modes (CLI, Bulk, WebUI) report identical totals.
-            from refchecker.core.hallucination_policy import count_raw_errors
+            from refchecker.core.issue_policy import count_raw_errors
             error_count, warning_count, info_count = count_raw_errors(errors)
             self.total_errors_found += error_count
             self.total_warnings_found += warning_count
@@ -7495,41 +7219,6 @@ class ArxivReferenceChecker:
             # Display all non-unverified errors and warnings
             self._display_non_unverified_errors(errors, debug_mode, print_output)
 
-            # Run hallucination assessment and display if print_output.
-            # If the parallel printer already ran the assessment, just store it
-            # on the error record instead of re-calling the LLM.
-            if precomputed_hallucination:
-                if precomputed_hallucination_applied:
-                    if error_entry_record is not None:
-                        error_entry_record['hallucination_assessment'] = precomputed_hallucination
-                    elif self.errors:
-                        self.errors[-1]['hallucination_assessment'] = precomputed_hallucination
-                else:
-                    _has_unverified = any(e.get('error_type') == 'unverified' for e in errors)
-                    applied = apply_hallucination_verdict(
-                        {'status': 'unverified' if _has_unverified else 'error', 'errors': errors},
-                        precomputed_hallucination,
-                        reference=reference,
-                        standard_refchecker=lambda found_ref: self.verify_reference_standard(None, found_ref),
-                        llm_client=self.report_builder.llm_verifier,
-                        web_searcher=self.report_builder.web_searcher,
-                    )
-                    precomputed_hallucination = applied.get('hallucination_assessment', precomputed_hallucination)
-                    if error_entry_record is not None:
-                        error_entry_record['hallucination_assessment'] = precomputed_hallucination
-                    elif self.errors:
-                        self.errors[-1]['hallucination_assessment'] = precomputed_hallucination
-            else:
-                self._run_and_display_hallucination_assessment(
-                    reference,
-                    errors,
-                    debug_mode,
-                    print_output,
-                    verified_data=verified_data,
-                    error_entry_record=error_entry_record,
-                    error_entry_index=error_entry_index,
-                    reference_url=reference_url,
-                )
     
     def _has_arxiv_id_error(self, errors):
         """Check if there's an ArXiv ID error in the error list"""
@@ -7782,106 +7471,6 @@ class ArxivReferenceChecker:
                 else:
                     print_labeled_multiline("ℹ️  Information", error_details)
 
-    def _run_and_display_hallucination_assessment(
-        self,
-        reference,
-        errors,
-        debug_mode,
-        print_output,
-        verified_data=None,
-        error_entry_record=None,
-        error_entry_index=None,
-        reference_url=None,
-    ):
-        """Run hallucination assessment and store result on the error entry.
-
-        Always runs the check (for both sequential and parallel modes) so the
-        result is available in self.errors for report generation. Only prints
-        to console when print_output is True.
-
-        Delegates to the shared ``build_hallucination_error_entry`` /
-        ``run_hallucination_check`` so CLI, bulk, and WebUI use identical
-        filtering and assessment logic.
-        """
-        from refchecker.core.hallucination_policy import (
-            build_hallucination_error_entry, run_hallucination_check,
-        )
-
-        target_record = None
-        if error_entry_index is not None and 0 <= error_entry_index < len(self.errors):
-            target_record = self.errors[error_entry_index]
-        elif error_entry_record is not None:
-            target_record = error_entry_record
-
-        verified_url = (reference_url or self._extract_verified_url(verified_data)) if verified_data else ''
-        error_entry = build_hallucination_error_entry(errors, reference, verified_url=verified_url)
-        if error_entry is None:
-            return
-
-        assessment = run_hallucination_check(
-            error_entry,
-            llm_client=self.report_builder.llm_verifier,
-            web_searcher=self.report_builder.web_searcher,
-        )
-
-        if not assessment:
-            return
-
-        from refchecker.core.hallucination_policy import apply_hallucination_verdict
-        has_unverified = any(e.get('error_type') == 'unverified' for e in errors)
-        applied = apply_hallucination_verdict(
-            {'status': 'unverified' if has_unverified else 'error', 'errors': errors},
-            assessment,
-            reference=reference,
-            standard_refchecker=lambda found_ref: self.verify_reference_standard(None, found_ref),
-            llm_client=self.report_builder.llm_verifier,
-            web_searcher=self.report_builder.web_searcher,
-        )
-        assessment = applied.get('hallucination_assessment', assessment)
-
-        # Store assessment on the exact error record for this reference so
-        # later references cannot overwrite earlier report entries.
-        if target_record is not None:
-            target_record['hallucination_assessment'] = assessment
-        elif self.errors:
-            self.errors[-1]['hallucination_assessment'] = assessment
-
-        verdict = assessment.get('verdict', 'UNCERTAIN')
-        explanation = assessment.get('explanation', '')
-
-        # For unverified references not flagged as hallucinated, store the
-        # LLM explanation as the subreason so it's visible in reports.
-        if verdict != 'LIKELY' and explanation and target_record is not None:
-            error_type = (target_record.get('error_type') or '').lower()
-            if error_type == 'unverified':
-                target_record['error_details'] = f"Reference could not be verified — {explanation}"
-            elif error_type == 'multiple':
-                # Update the unverified line within a multi-error entry
-                details = target_record.get('error_details', '')
-                details = details.replace(
-                    'Reference could not be verified',
-                    f'Reference could not be verified — {explanation}',
-                )
-                target_record['error_details'] = details
-
-        if not print_output:
-            return
-
-        if debug_mode:
-            print(f"      🔍 Hallucination check: {verdict}")
-            if explanation:
-                print(f"         {explanation}")
-        elif verdict == 'LIKELY':
-            print(f"      🚩 Likely hallucinated: {explanation}")
-        elif verdict in ('UNLIKELY', 'UNCERTAIN') and explanation:
-            # Show why an unverified reference was not flagged as hallucinated
-            has_unverified = any(
-                e.get('error_type') == 'unverified'
-                for e in errors
-            )
-            if has_unverified:
-                print(f"         Not flagged: {explanation}")
-
     @staticmethod
     def _extract_verified_url(verified_data):
         """Extract the best verified URL from verification result data."""
@@ -7893,38 +7482,6 @@ class ArxivReferenceChecker:
             or verified_data.get('arxiv_url', '')
             or verified_data.get('doi_url', '')
         )
-
-    def _run_and_return_hallucination_assessment(self, reference, errors, verified_data=None, reference_url=None):
-        """Run hallucination assessment and return the result without printing or storing.
-
-        Used by the parallel processor to get the assessment before
-        add_error_to_dataset has been called.  Delegates to the shared
-        ``build_hallucination_error_entry`` / ``run_hallucination_check``
-        so CLI, bulk, and WebUI use identical filtering and assessment logic.
-        """
-        from refchecker.core.hallucination_policy import (
-            build_hallucination_error_entry, run_hallucination_check,
-        )
-
-        verified_url = (reference_url or self._extract_verified_url(verified_data)) if verified_data else ''
-        error_entry = build_hallucination_error_entry(errors, reference, verified_url=verified_url)
-        if error_entry is None:
-            logger.debug("Hallucination skip (no real errors): %s", reference.get('title', '')[:60])
-            return None
-
-        result = run_hallucination_check(
-            error_entry,
-            llm_client=self.report_builder.llm_verifier,
-            web_searcher=self.report_builder.web_searcher,
-        )
-        if result:
-            logger.debug(
-                "Hallucination assessment: title='%s' verdict=%s explanation=%s",
-                reference.get('title', ''), result.get('verdict'), result.get('explanation') or '',
-            )
-        else:
-            logger.debug("Hallucination assessment returned None for: %s", reference.get('title', ''))
-        return result
 
     def _output_reference_errors(self, reference, errors, url):
         """
@@ -8043,7 +7600,7 @@ def main():
         description=(
             "RefChecker — verify the references in an academic paper against "
             "Semantic Scholar / OpenAlex / Crossref / DBLP / ACL / arXiv / "
-            "OpenReview, and optionally screen the manuscript for AI-generated text."
+            "OpenReview, and produce structured verification reports."
         ),
         epilog=(
             "examples:\n"
@@ -8051,9 +7608,7 @@ def main():
             "  academic-refchecker --paper https://arxiv.org/abs/2406.01234\n"
             "  academic-refchecker --paper ./paper.pdf --report-format json\n"
             "  academic-refchecker --paper ./refs.bib --output-file errors.txt\n"
-            "  academic-refchecker --paper-list papers.txt\n\n"
-            "AI-text detection is opt-in and ADVISORY ONLY — never proof of "
-            "misconduct. See the README for the full options and the desktop app."
+            "  academic-refchecker --paper-list papers.txt"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -8144,13 +7699,6 @@ def main():
                         help="Disable parallel processing of LLM chunks")
     parser.add_argument("--llm-max-chunk-workers", type=int,
                         help="Maximum number of workers for parallel LLM chunk processing (default: 4)")
-    parser.add_argument("--hallucination-provider", type=str,
-                        choices=["openai", "anthropic", "google", "azure"],
-                        help="Separate LLM provider for hallucination checking (defaults to --llm-provider if it supports hallucination)")
-    parser.add_argument("--hallucination-model", type=str,
-                        help="Model to use for hallucination checking (defaults to provider's default)")
-    parser.add_argument("--hallucination-endpoint", type=str,
-                        help="Endpoint for the hallucination LLM provider")
     parser.add_argument("--cache", type=str, metavar="DIR",
                         help="Cache PDFs and extracted bibliographies in DIR to speed up repeated runs")
     parser.add_argument("--disable-parallel", action="store_true",
@@ -8165,10 +7713,6 @@ def main():
             "The WebUI creates profile 'local'; credentials and cookies are never printed."
         ),
     )
-    parser.add_argument("--ai-detection", action="store_true",
-                        help="Also run advisory local AI-generated-text detection on each paper")
-    parser.add_argument("--ai-detection-device", choices=["cpu", "cuda"], default="cpu",
-                        help="Compute device for local AI detection (default: cpu)")
 
     args = parser.parse_args()
 
@@ -8299,16 +7843,6 @@ def main():
         if args.llm_max_chunk_workers is not None:
             llm_config['max_chunk_workers'] = args.llm_max_chunk_workers
 
-        # Handle separate hallucination provider
-        if args.hallucination_provider:
-            h_api_key = get_llm_api_key_interactive(args.hallucination_provider)
-            if h_api_key is None:
-                print(f"Error: API key is required for hallucination provider {args.hallucination_provider}.")
-                return 1
-            llm_config['hallucination_provider'] = args.hallucination_provider
-            llm_config['hallucination_model'] = args.hallucination_model
-            llm_config['hallucination_api_key'] = h_api_key
-            llm_config['hallucination_endpoint'] = args.hallucination_endpoint
     
     # Get Semantic Scholar API key from command line or environment variable
     semantic_scholar_api_key = args.semantic_scholar_api_key or os.getenv('SEMANTIC_SCHOLAR_API_KEY')
@@ -8334,8 +7868,6 @@ def main():
             report_file=args.report_file,
             report_format=report_format,
             cache_dir=args.cache,
-            ai_detection_enabled=args.ai_detection,
-            ai_detection_device=args.ai_detection_device,
             extraction_mode=args.extraction_mode,
         )
         

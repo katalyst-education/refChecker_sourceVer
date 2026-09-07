@@ -578,13 +578,13 @@ class ArXivCitationChecker:
                 else:
                     # Check actual overlap — if zero overlap, this is not a
                     # version update but a completely different paper.
-                    from refchecker.core.hallucination_policy import _compute_author_overlap
+                    from refchecker.core.issue_policy import compute_author_overlap
                     cited_str = ', '.join(
                         a.get('name', str(a)) if isinstance(a, dict) else str(a)
                         for a in cited_authors
                     ) if isinstance(cited_authors[0], dict) else ', '.join(str(a) for a in cited_authors)
                     correct_str = ', '.join(auth_names)
-                    overlap = _compute_author_overlap(cited_str, correct_str)
+                    overlap = compute_author_overlap(cited_str, correct_str)
                     if overlap is not None and overlap < 0.1:
                         # No meaningful author overlap — cannot be a version update
                         return 0.0

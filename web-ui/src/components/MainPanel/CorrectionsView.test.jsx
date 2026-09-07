@@ -11,7 +11,6 @@ vi.mock('../../utils/api', () => ({
   verifyReferenceInCheck,
   decideReferenceWarning,
   removeReferenceFromCheck: vi.fn(),
-  suggestAlternativeReference: vi.fn(),
 }))
 
 // Zustand stores — each hook applies the selector to a static mock state and

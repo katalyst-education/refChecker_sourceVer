@@ -3,12 +3,10 @@ import { logger } from '../utils/logger'
 import * as api from '../utils/api'
 
 const EXTRACTION_SELECTION_KEY = 'refchecker_selected_extraction_llm'
-const HALLUCINATION_SELECTION_KEY = 'refchecker_selected_hallucination_llm'
 const CHAT_SELECTION_KEY = 'refchecker_selected_chat_llm'
 // R34 — Chat-with-PDF and Summarize each get their own model selection.
 // Summarize falls back to the chat → extraction/default chain when unset.
 const SUMMARY_SELECTION_KEY = 'refchecker_selected_summary_llm'
-const hallucinationCapableProviders = ['openai', 'anthropic', 'google', 'azure']
 
 function getStoredSelection(key) {
   try {
@@ -38,7 +36,6 @@ export const useConfigStore = create((set, get) => ({
   configs: [],
   selectedConfigId: null,
   selectedExtractionConfigId: getStoredSelection(EXTRACTION_SELECTION_KEY),
-  selectedHallucinationConfigId: getStoredSelection(HALLUCINATION_SELECTION_KEY),
   selectedChatConfigId: getStoredSelection(CHAT_SELECTION_KEY),
   selectedSummaryConfigId: getStoredSelection(SUMMARY_SELECTION_KEY),
   isLoading: false,
@@ -64,16 +61,11 @@ export const useConfigStore = create((set, get) => ({
         
         const defaultConfigId = defaultConfig?.id || configs[0]?.id || null
         const storedExtractionId = get().selectedExtractionConfigId
-        const storedHallucinationId = get().selectedHallucinationConfigId
         const storedChatId = get().selectedChatConfigId
         const storedSummaryId = get().selectedSummaryConfigId
         const extractionConfigId = configs.some(c => c.id === storedExtractionId)
           ? storedExtractionId
           : defaultConfigId
-        const hallucinationConfig = configs.find(c => hallucinationCapableProviders.includes(c.provider))
-        const hallucinationConfigId = configs.some(c => c.id === storedHallucinationId && hallucinationCapableProviders.includes(c.provider))
-          ? storedHallucinationId
-          : hallucinationConfig?.id || null
         // Chat (with PDF) works with any configured provider; default to the
         // extraction/default config when nothing is stored.
         const chatConfigId = configs.some(c => c.id === storedChatId)
@@ -87,7 +79,6 @@ export const useConfigStore = create((set, get) => ({
           : chatConfigId
 
         setStoredSelection(EXTRACTION_SELECTION_KEY, extractionConfigId)
-        setStoredSelection(HALLUCINATION_SELECTION_KEY, hallucinationConfigId)
         setStoredSelection(CHAT_SELECTION_KEY, chatConfigId)
         setStoredSelection(SUMMARY_SELECTION_KEY, summaryConfigId)
 
@@ -95,7 +86,6 @@ export const useConfigStore = create((set, get) => ({
           configs,
           selectedConfigId: defaultConfigId,
           selectedExtractionConfigId: extractionConfigId,
-          selectedHallucinationConfigId: hallucinationConfigId,
           selectedChatConfigId: chatConfigId,
           selectedSummaryConfigId: summaryConfigId,
           isLoading: false,
@@ -134,25 +124,16 @@ export const useConfigStore = create((set, get) => ({
       const response = await api.createLLMConfig(config)
       const newConfig = response.data
       const selectFor = options.selectFor || 'extraction'
-      const canUseForHallucination = hallucinationCapableProviders.includes(newConfig.provider)
       const selectExtraction = selectFor === 'extraction' || selectFor === 'both'
-      const selectHallucination = canUseForHallucination && (selectFor === 'hallucination' || selectFor === 'both')
-      const initializeHallucination = canUseForHallucination && selectExtraction && get().selectedHallucinationConfigId == null
 
       if (selectExtraction) {
         setStoredSelection(EXTRACTION_SELECTION_KEY, newConfig.id)
-      }
-      if (selectHallucination || initializeHallucination) {
-        setStoredSelection(HALLUCINATION_SELECTION_KEY, newConfig.id)
       }
       
       set(state => ({
         configs: [...state.configs, newConfig],
         selectedConfigId: selectExtraction ? newConfig.id : state.selectedConfigId,
         selectedExtractionConfigId: selectExtraction ? newConfig.id : state.selectedExtractionConfigId,
-        selectedHallucinationConfigId: (selectHallucination || (canUseForHallucination && selectExtraction && state.selectedHallucinationConfigId == null))
-          ? newConfig.id
-          : state.selectedHallucinationConfigId,
         isLoading: false
       }))
       
@@ -204,9 +185,6 @@ export const useConfigStore = create((set, get) => ({
         const newExtractionId = state.selectedExtractionConfigId === id
           ? (newConfigs[0]?.id || null)
           : state.selectedExtractionConfigId
-        const newHallucinationId = state.selectedHallucinationConfigId === id
-          ? (newConfigs.find(c => hallucinationCapableProviders.includes(c.provider))?.id || null)
-          : state.selectedHallucinationConfigId
         const newChatId = state.selectedChatConfigId === id
           ? (newConfigs[0]?.id || null)
           : state.selectedChatConfigId
@@ -214,14 +192,12 @@ export const useConfigStore = create((set, get) => ({
           ? (newConfigs[0]?.id || null)
           : state.selectedSummaryConfigId
         setStoredSelection(EXTRACTION_SELECTION_KEY, newExtractionId)
-        setStoredSelection(HALLUCINATION_SELECTION_KEY, newHallucinationId)
         setStoredSelection(CHAT_SELECTION_KEY, newChatId)
         setStoredSelection(SUMMARY_SELECTION_KEY, newSummaryId)
         return {
           configs: newConfigs,
           selectedConfigId: newSelectedId,
           selectedExtractionConfigId: newExtractionId,
-          selectedHallucinationConfigId: newHallucinationId,
           selectedChatConfigId: newChatId,
           selectedSummaryConfigId: newSummaryId,
           isLoading: false
@@ -258,12 +234,6 @@ export const useConfigStore = create((set, get) => ({
     }
   },
 
-  selectHallucinationConfig: (id) => {
-    logger.info('ConfigStore', `Selecting hallucination config ${id}`)
-    setStoredSelection(HALLUCINATION_SELECTION_KEY, id)
-    set({ selectedHallucinationConfigId: id })
-  },
-
   selectChatConfig: (id) => {
     logger.info('ConfigStore', `Selecting chat config ${id}`)
     setStoredSelection(CHAT_SELECTION_KEY, id)
@@ -286,13 +256,6 @@ export const useConfigStore = create((set, get) => ({
     return configs.find(c => c.id === (selectedExtractionConfigId || selectedConfigId)) || null
   },
 
-  getSelectedHallucinationConfig: () => {
-    const { configs, selectedHallucinationConfigId, selectedExtractionConfigId, selectedConfigId } = get()
-    const selected = configs.find(c => c.id === (selectedHallucinationConfigId || selectedExtractionConfigId || selectedConfigId))
-    if (selected && hallucinationCapableProviders.includes(selected.provider)) return selected
-    return configs.find(c => hallucinationCapableProviders.includes(c.provider)) || null
-  },
-
   // Chat-with-PDF accepts any configured provider; fall back to the
   // extraction/default config when no chat-specific selection exists.
   getSelectedChatConfig: () => {
@@ -309,3 +272,5 @@ export const useConfigStore = create((set, get) => ({
     return configs.find(c => c.id === (selectedSummaryConfigId || selectedChatConfigId || selectedExtractionConfigId || selectedConfigId)) || null
   },
 }))
+
+

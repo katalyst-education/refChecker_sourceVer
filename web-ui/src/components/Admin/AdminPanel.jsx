@@ -60,11 +60,8 @@ const formatTime = (ts) => {
   return Number.isNaN(parsed.getTime()) ? ts : parsed.toLocaleString()
 }
 
-// Status colours mirror ReferenceCard.getStatusColor so a reference looks the
-// same here as it does everywhere else. Hallucination has its own hue (orange)
-// and must not be shown as a plain error.
+// Status colours mirror ReferenceCard so a reference looks the same here.
 const STATUS_ICONS = {
-  hallucination: { icon: '🚫', label: 'Hallucinated', color: 'var(--color-hallucination)' },
   error: { icon: '❌', label: 'Error', color: 'var(--color-error)' },
   warning: { icon: '⚠️', label: 'Warning', color: 'var(--color-warning)' },
   suggestion: { icon: '💡', label: 'Suggestion', color: 'var(--color-suggestion)' },
@@ -183,7 +180,7 @@ function DailyChart({ daily }) {
             height={h}
             fill="var(--color-accent)"
           >
-            <title>{`${d.day}: ${d.checks} ${plural(d.checks, 'check')}, ${d.references_checked} ${plural(d.references_checked, 'ref')}, ${d.hallucinations} hallucinated`}</title>
+            <title>{`${d.day}: ${d.checks} ${plural(d.checks, 'check')}, ${d.references_checked} ${plural(d.references_checked, 'ref')}`}</title>
           </rect>
         )
       })}
@@ -266,12 +263,6 @@ function OverviewTab({ overview }) {
           label="References"
           value={num(t.references_checked)}
           sub={t.avg_references_per_check ? `${t.avg_references_per_check} avg/check` : null}
-        />
-        <Stat
-          label="Hallucinated"
-          value={num(t.hallucinations)}
-          sub={`${pct(t.hallucination_rate)} of refs`}
-          tone="var(--color-hallucination)"
         />
       </div>
 
@@ -390,10 +381,7 @@ function UsersTab({ data, onSelectUser, showInactive, onToggleInactive }) {
               <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
                 {u.checks > 0 ? (
                   <>
-                    {num(u.references_checked)} {plural(u.references_checked, 'ref')} ·{' '}
-                    <span style={{ color: 'var(--color-hallucination)' }}>
-                      {num(u.hallucinations)} hallucinated
-                    </span>
+                    {num(u.references_checked)} {plural(u.references_checked, 'ref')}
                   </>
                 ) : u.never_checked ? (
                   'never used'
@@ -480,11 +468,6 @@ function PapersTab({ data, onSelectCheck }) {
                         {num(p.warnings)} {plural(p.warnings, 'warning')}
                       </span>
                     )}
-                    {p.hallucinations > 0 && (
-                      <span style={{ color: 'var(--color-hallucination)' }}>
-                        {num(p.hallucinations)} hallucinated
-                      </span>
-                    )}
                   </>
                 )}
               </div>
@@ -567,10 +550,6 @@ function SessionsTab({ sessions, loading, onSelectCheck, onBack, user }) {
             </div>
             <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
               {formatDuration(s.duration_seconds)} · {num(s.checks)} {plural(s.checks, 'paper')} ·{' '}
-              {num(s.references_checked)} {plural(s.references_checked, 'ref')} ·{' '}
-              <span style={{ color: 'var(--color-hallucination)' }}>
-                {num(s.hallucinations)} hallucinated
-              </span>
             </div>
           </div>
           <div className="space-y-1">
@@ -587,12 +566,6 @@ function SessionsTab({ sessions, loading, onSelectCheck, onBack, user }) {
                 </span>
                 <span className="shrink-0" style={{ color: 'var(--color-text-secondary)' }}>
                   {num(c.total_refs)} {plural(c.total_refs, 'ref')}
-                  {c.hallucination_count > 0 && (
-                    <span style={{ color: 'var(--color-hallucination)' }}>
-                      {' '}
-                      · {num(c.hallucination_count)} hallucinated
-                    </span>
-                  )}
                 </span>
               </button>
             ))}
@@ -670,11 +643,6 @@ function CheckTab({ check, loading, onBack, origin = 'sessions' }) {
             <Stat label="References" value={num(check.total_refs)} />
             <Stat label="Verified" value={num(check.refs_verified)} tone="var(--color-success)" />
             <Stat label="Errors" value={num(check.errors_count)} tone="var(--color-error)" />
-            <Stat
-              label="Hallucinated"
-              value={num(check.hallucination_count)}
-              tone="var(--color-hallucination)"
-            />
           </div>
 
           <div className="space-y-1">
@@ -961,3 +929,5 @@ export default function AdminPanel({ open, onClose }) {
     </div>
   )
 }
+
+

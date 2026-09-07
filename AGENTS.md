@@ -27,22 +27,15 @@ Running the same paper with the same configuration through bulk, CLI, and WebUI 
 The following must match across paths (modulo LLM non-determinism):
 
 - Set of extracted references.
-- Per-reference verification verdicts (verified / unverified / errors / warnings / hallucination, etc.).
-- Aggregate counts (total references processed, error counts, warning counts, unverified counts, hallucination counts).
+- Per-reference verification verdicts (verified / unverified / errors / warnings).
+- Aggregate counts (total references processed, error counts, warning counts, and unverified counts).
 - Error/warning categorization and messages.
 
 If you observe a discrepancy across paths that is **not** explainable by LLM non-determinism, treat it as a bug and fix the divergence at the shared layer.
 
 ## Reference Status Icon Precedence
 
-When rendering a per-reference status icon (WebUI, CLI summaries, bulk reports), the icon is selected by the following precedence — the first matching rule wins:
-
-1. **Hallucination** — if the reference is flagged as hallucinated, show the hallucination icon.
-2. **Error** — otherwise, if the reference has any error, show the error icon.
-3. **Warning** — otherwise, if the reference has any warning, show the warning icon.
-4. **Verified / Unverified** — otherwise, show the verified or unverified icon based on the reference's verification status.
-
-This precedence is implemented in the shared status helper (see [web-ui/src/utils/referenceStatus.js](web-ui/src/utils/referenceStatus.js), `getEffectiveReferenceStatus`) and must be mirrored by any other path that renders per-reference status.
+When rendering a per-reference status icon, errors take precedence over warnings, followed by the verified or unverified status. This precedence must remain consistent across bulk, CLI, and WebUI paths.
 
 ## Guidance for Changes
 

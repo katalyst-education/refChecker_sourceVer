@@ -1,6 +1,3 @@
-/**
- * Formatting utilities
- */
 import { shouldSuppressVenueWarning, venuesCoreMatch } from './venueAbbreviations'
 import { getEffectiveReferenceStatus } from './referenceStatus'
 
@@ -387,7 +384,7 @@ const _COSMETIC_STOPWORDS = new Set([
 const _foldText = (s) =>
   String(s || '')
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')   // strip combining diacritics
+    .replace(/[\u0300-\u036f]/g, '')   // strip combining diacritics
     .toLowerCase()
 
 const _normalizeTitle = (s) =>
@@ -466,7 +463,7 @@ const _surnameCandidates = (raw) => {
   // resolve which is right by intersecting with the other name's
   // candidates.
   const cleaned = String(raw || '')
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/\./g, '')
   const parts = cleaned.split(/[\s,]+/).filter(Boolean)
   if (parts.length === 0) return []
@@ -824,7 +821,6 @@ export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, refere
   lines.push(`| With Errors | ${stats.refs_with_errors ?? 0} |`)
   lines.push(`| With Warnings | ${stats.refs_with_warnings_only ?? 0} |`)
   lines.push(`| Unverified | ${stats.unverified_count ?? 0} |`)
-  lines.push(`| Likely Hallucinated | ${stats.hallucination_count ?? 0} |`)
   lines.push('')
   lines.push(`| Issue Type | Count |`)
   lines.push(`|------------|-------|`)
@@ -848,7 +844,6 @@ export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, refere
         error: '❌',
         suggestion: '💡',
         unverified: '❓',
-        hallucination: '🚩',
       }[status] || '❓'
       
       lines.push(`### ${index + 1}. ${ref.title || ref.cited_url || 'Unknown Title'} ${statusEmoji}`)
@@ -922,17 +917,9 @@ export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, refere
           })
         }
         
-        if (unverifiedError && (status === 'unverified' || status === 'hallucination')) {
+        if (unverifiedError && status === 'unverified') {
           lines.push('')
           lines.push(`**Could not verify:** ${unverifiedError.error_details || 'Paper not found by any checker'}`)
-        }
-      }
-
-      if (ref.hallucination_assessment?.verdict === 'LIKELY') {
-        lines.push('')
-        lines.push(`**Likely hallucinated:** ${ref.hallucination_assessment.explanation || 'Strong fabrication signals detected.'}`)
-        if (ref.hallucination_assessment.link) {
-          lines.push(`**Link:** ${ref.hallucination_assessment.link}`)
         }
       }
       
@@ -1039,7 +1026,6 @@ export function exportResultsAsPlainText({ paperTitle, paperSource, stats, refer
   lines.push(`Errors: ${stats.errors_count || 0}`)
   lines.push(`Warnings: ${stats.warnings_count || 0}`)
   lines.push(`Unverified: ${stats.unverified_count ?? 0}`)
-  lines.push(`Likely Hallucinated: ${stats.hallucination_count ?? 0}`)
   lines.push('')
   lines.push('REFERENCES')
   lines.push('-'.repeat(30))
@@ -1070,16 +1056,9 @@ export function exportResultsAsPlainText({ paperTitle, paperSource, stats, refer
         })
       }
       const unverifiedError = ref.errors?.find(e => e.error_type === 'unverified')
-      if (unverifiedError && (status === 'UNVERIFIED' || status === 'HALLUCINATION')) {
+      if (unverifiedError && status === 'UNVERIFIED') {
         lines.push(`    Could not verify: ${unverifiedError.error_details || 'Paper not found by any checker'}`)
-      }
-      if (ref.hallucination_assessment?.verdict === 'LIKELY') {
-        lines.push(`    HALLUCINATION: ${ref.hallucination_assessment.explanation || 'Strong fabrication signals detected.'}`)
-        if (ref.hallucination_assessment.link) {
-          lines.push(`    LINK: ${ref.hallucination_assessment.link}`)
-        }
-      }
-    })
+      }    })
   }
   
   return lines.join('\n')
@@ -1262,9 +1241,6 @@ function _flattenReferenceForReport(ref, index, paperTitle, paperSource, isCheck
     warning_count: warnings.length,
     errors,
     warnings,
-    hallucination_verdict: ref.hallucination_assessment?.verdict || '',
-    hallucination_explanation: ref.hallucination_assessment?.explanation || '',
-    hallucination_link: ref.hallucination_assessment?.link || '',
   }
 }
 
@@ -1290,7 +1266,6 @@ export function exportResultsAsCsv({ paperTitle, paperSource, references, isChec
     'cited_title', 'cited_authors', 'cited_year', 'cited_venue', 'cited_doi',
     'cited_arxiv_id', 'cited_url', 'matched_db', 'verified_url', 'status',
     'error_count', 'warning_count', 'errors', 'warnings',
-    'hallucination_verdict', 'hallucination_explanation', 'hallucination_link',
   ]
   const header = columns.join(',')
   if (!references || references.length === 0) return header
@@ -1766,7 +1741,7 @@ function _firstAuthorKey(ref) {
   // Pull the longest token (usually surname). Strip diacritics for sort.
   const parts = first.split(/\s+/).filter(Boolean)
   const surname = parts.length ? parts.reduce((acc, p) => (p.length > acc.length ? p : acc), '') : ''
-  return surname.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  return surname.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }
 
 export function sortReferencesForExport(references, mode = 'citation') {

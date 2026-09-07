@@ -24,7 +24,6 @@ describe('LLMSelector', () => {
       configs: [{ id: 42, provider: 'anthropic', model: 'claude-sonnet-4-6', has_key: false }],
       selectedConfigId: null,
       selectedExtractionConfigId: 42,
-      selectedHallucinationConfigId: null,
       selectedChatConfigId: null,
       selectedSummaryConfigId: null,
       isLoading: false,

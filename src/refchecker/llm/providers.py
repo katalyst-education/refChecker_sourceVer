@@ -13,7 +13,7 @@ import logging
 from .base import LLMProvider
 from .google_retry import call_google_with_retry, extract_google_response_text
 # Per-check token tracker (FlowScope tagging) — drives the $ badge's
-# per-flow breakdown (extract / verify / hallucination / suggest /
+# per-flow breakdown (extract / verify / suggest /
 # graph / reverify). Distinct from backend/usage_tracker.py, which
 # tracks cumulative process-wide totals.
 from . import usage_tracker as _check_usage_tracker

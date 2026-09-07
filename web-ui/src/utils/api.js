@@ -186,33 +186,6 @@ export const cancelDatabaseDownload = (database) => api.post('/databases/downloa
 // the only view of the local DB in multi-user mode, where db_path is hidden.
 export const getDatabaseStatus = () => api.get('/databases/status')
 
-// AI-generated-text detection: local model management
-export const getAIDetectionModelStatus = () => api.get('/ai-detection/model/status')
-// Explicit (off the status-poll hot path) check for a newer model revision on HF.
-export const checkAIDetectionModelUpdate = () => api.get('/ai-detection/model/update-check', { timeout: 20000 })
-export const downloadAIDetectionModel = () => api.post('/ai-detection/model/download')
-export const deleteAIDetectionModel = () => api.delete('/ai-detection/model')
-export const getAIDetectionRuntimeStatus = () => api.get('/ai-detection/runtime/status')
-export const installAIDetectionRuntime = (variant = 'torch') =>
-  api.post('/ai-detection/runtime/install', null, { params: { variant } })
-export const getAIDetectionDiagnostics = () => api.get('/ai-detection/diagnostics')
-
-// R61 (I1 endpoints) — multi-detector registry. The backend lands in parallel;
-// these talk to the §14-item-2 endpoint shapes. The registry lists every
-// detector in DETECTOR_REGISTRY with real size/license/tier + per-detector
-// install state; install/remove mirror the existing on-demand HF download
-// lifecycle (returns the refreshed registry row(s)). HONESTY: an uninstalled
-// detector is reported as installed:false so the FE can abstain — it never
-// fabricates a number for a detector that isn't downloaded.
-export const getDetectors = () => api.get('/ai-detection/detectors')
-// Install (download) a single detector by key. No timeout — Tier-2 heavy
-// detectors are large multi-GB downloads handled by a background job the FE
-// polls via getDetectors().
-export const installDetector = (key) =>
-  api.post(`/ai-detection/detectors/${encodeURIComponent(key)}/install`, null, { timeout: 0 })
-export const removeDetector = (key) =>
-  api.delete(`/ai-detection/detectors/${encodeURIComponent(key)}`)
-
 // OpenReview venue scanning
 export const fetchOpenReviewList = (venue, status = 'accepted') =>
   api.post('/openreview/list', { venue, status })
@@ -248,17 +221,14 @@ export const findSimilarPapers = ({ references, paper_title, paper_id, limit = 5
   api.post('/papers/similar', { references, paper_title, paper_id, limit, mode }, { timeout: 120000 })
 
 // Real inter-reference citation graph via Semantic Scholar
-export const fetchCitationGraph = ({ references, paper_title, ai_detection = false }) =>
-  // Backend now fans the S2 lookups out concurrently, so this is far faster;
-  // the generous ceiling covers a 60-ref bibliography plus the optional
-  // offline AI-gen pass under slow networks without the old 120s cutoff.
-  api.post('/papers/citation-graph', { references, paper_title, ai_detection }, { timeout: 180000 })
+export const fetchCitationGraph = ({ references, paper_title }) =>
+  api.post('/papers/citation-graph', { references, paper_title }, { timeout: 180000 })
 
 // One-hop expand: a paper's outgoing references for the graph view.
 // `title` is optional — the backend uses it to do a title-search
 // fallback when /paper/<id>/references returns nothing for the DOI.
-export const expandPaper = ({ paper_id, limit = 8, title = null, ai_detection = false, ai_detection_device = 'cpu' }) =>
-  api.post('/papers/expand', { paper_id, limit, title, ai_detection, ai_detection_device })
+export const expandPaper = ({ paper_id, limit = 8, title = null }) =>
+  api.post('/papers/expand', { paper_id, limit, title })
 
 // Enriched Semantic Scholar author profile for the hover card (cached server-side).
 // Author profile for the hover card. Accepts a Semantic Scholar id (string) or
@@ -355,8 +325,6 @@ export const addReferenceToCheck = (checkId, payload) =>
   api.post(`/history/${checkId}/references`, payload)
 export const removeReferenceFromCheck = (checkId, refId) =>
   api.delete(`/history/${checkId}/references/${encodeURIComponent(refId)}`)
-export const suggestAlternativeReference = (checkId, refId) =>
-  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/suggest-alternative`)
 export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
   api.post(
     `/history/${checkId}/references/${encodeURIComponent(refId)}/verify`,
@@ -386,7 +354,7 @@ export const getLLMUsage = (checkId) =>
   api.get(`/history/${checkId}/llm-usage`)
 
 // Extracted body text of a check's source document — used by the in-document
-// highlighter to show AI-detection flagged passages in context. Larger papers
+// highlighter to show citation contexts in the source document. Larger papers
 // can take a moment to extract, so give it a generous budget.
 export const getPaperText = (checkId) =>
   api.get(`/paper-text/${checkId}`, { timeout: 60000 })
@@ -536,3 +504,5 @@ export default {
   clearCache,
   clearCachedFiles,
 }
+
+

@@ -9,19 +9,17 @@ import { logger } from '../../utils/logger'
 /**
  * LLM configuration selector with dropdown
  * @param {Object} props
- * @param {string} props.mode - extraction | hallucination | chat | summarize
+ * @param {string} props.mode - extraction | chat | summarize
  */
 export default function LLMSelector({ mode = 'extraction' }) {
   const {
     configs,
     selectedConfigId,
     selectedExtractionConfigId,
-    selectedHallucinationConfigId,
     selectedChatConfigId,
     selectedSummaryConfigId,
     selectConfig,
     selectExtractionConfig,
-    selectHallucinationConfig,
     selectChatConfig,
     selectSummaryConfig,
     deleteConfig,
@@ -33,16 +31,10 @@ export default function LLMSelector({ mode = 'extraction' }) {
   // in another part of the UI (e.g. saving a key in LLMConfigModal).
   const browserKeys = useKeyStore(state => state.keys)
   const hasKeyInBrowser = (id) => Boolean(browserKeys[id])
-  const hallucinationCapableProviders = ['openai', 'anthropic', 'google', 'azure']
-  const isHallucinationMode = mode === 'hallucination'
   const isChatMode = mode === 'chat'
   const isSummaryMode = mode === 'summarize'
-  const visibleConfigs = isHallucinationMode
-    ? configs.filter(config => hallucinationCapableProviders.includes(config.provider))
-    : configs
-  const activeSelectedId = isHallucinationMode
-    ? selectedHallucinationConfigId
-    : isChatMode
+  const visibleConfigs = configs
+  const activeSelectedId = isChatMode
       ? (selectedChatConfigId || selectedExtractionConfigId || selectedConfigId)
       // Summarize falls back through the chat selection, then extraction/default,
       // mirroring getSelectedSummaryConfig (R34).
@@ -139,9 +131,7 @@ export default function LLMSelector({ mode = 'extraction' }) {
       return
     }
     logger.info('LLMSelector', `Selected config ${config.id}`)
-    if (isHallucinationMode) {
-      selectHallucinationConfig(config.id)
-    } else if (isChatMode) {
+    if (isChatMode) {
       selectChatConfig(config.id)
     } else if (isSummaryMode) {
       selectSummaryConfig(config.id)
@@ -227,7 +217,7 @@ export default function LLMSelector({ mode = 'extraction' }) {
                 className="px-3 py-2 text-sm"
                 style={{ color: 'var(--color-text-muted)' }}
               >
-                {isHallucinationMode ? 'No hallucination-capable configurations' : 'No configurations'}
+                No configurations
               </div>
             ) : (
               visibleConfigs.map(config => {
@@ -400,3 +390,5 @@ export default function LLMSelector({ mode = 'extraction' }) {
     </div>
   )
 }
+
+

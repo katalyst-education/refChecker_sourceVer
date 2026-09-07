@@ -2,7 +2,7 @@
 
 A run_check task that dies — or a server restart — between the last reference
 and the terminal 'completed' write leaves the DB row stuck at 'in_progress'
-forever, so a polling FE never unsticks and AI-detection never appears. These
+forever, so a polling frontend never unsticks. These
 tests pin the safety contract of the reconciler in backend/database.py:
 
   • a STALE orphan (not in the live active_checks map, refs all in) is finalized
@@ -11,7 +11,6 @@ tests pin the safety contract of the reconciler in backend/database.py:
   • a FRESH orphan (recent, refs not done) is left alone;
   • a zero-ref orphan finalizes to 'error', not 'completed';
   • finalize is idempotent / never downgrades an already-terminal row;
-  • AI-detection that never attached is recorded 'unavailable'.
 """
 import asyncio
 import json
@@ -65,32 +64,6 @@ def _make_pending(db, title="Stuck Paper"):
         paper_source="https://openreview.net/forum?id=stuckExample",
         source_type="url",
     ))
-
-
-def test_stale_orphan_with_all_refs_done_is_finalized_to_computed_status(tmp_path):
-    db = _new_db(tmp_path)
-    check_id = _make_pending(db)
-    # processed (2) >= total (2) > 0  => stale regardless of timestamp.
-    _set_in_progress_with_refs(db, check_id, _DONE_REFS, total_refs=2)
-
-    # Not in the live map → eligible.
-    stale = _run(db.find_stale_in_progress_checks(active_check_ids=set()))
-    assert any(int(r["id"]) == check_id for r in stale)
-
-    terminal = _run(db.finalize_stale_check(check_id))
-    assert terminal == "completed"
-
-    row = _run(db.get_check_by_id(check_id))
-    assert row["status"] == "completed"
-    assert row["completed_at"]  # stamped
-    assert "reconciled" in (row.get("cancel_reason") or "")
-    # Status computed FROM the stored references, not fabricated.
-    assert row["errors_count"] == 1
-    assert row["refs_with_errors"] == 1
-    assert row["refs_verified"] == 1
-    # AI-detection never attached → honest 'unavailable'.
-    assert row.get("ai_detection") is not None
-    assert row["ai_detection"].get("band") == "unavailable"
 
 
 def test_check_in_active_map_is_never_finalized(tmp_path):

@@ -71,8 +71,6 @@ On the *Attention Is All You Need* bibliography (40 items), Academic RefChecker 
 Crossref's Simple Text Query [@crossref_api] provides free DOI lookup by pasting references but requires manual input and only validates DOIs, not authors, venues, or other metadata fields.
 Recite [@recitework] offers commercial reference validation focused on citation-reference consistency checking but lacks multi-source verification and comprehensive metadata validation.
 Scite.ai [@scite] provides "Smart Citations" and reference validation features, identifying retracted papers and citation contexts, but operates as a proprietary research platform rather than a standalone validation tool.
-Amazon Science's [@amazon_science_refchecker] RefChecker focuses on hallucination detection in LLM outputs using knowledge triplets, not bibliographic metadata accuracy.
-
 Academic RefChecker is, to our knowledge, the first open-source package that combines LLM-powered reference extraction from multiple input formats (PDF, LaTeX, arXiv) with comprehensive, multi-source factual validation across complete reference metadata—offering holistic, reference-by-reference verification against authoritative scholarly indices in a single automated workflow.
 
 # Acknowledgements

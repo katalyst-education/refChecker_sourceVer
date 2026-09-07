@@ -6,7 +6,6 @@ import { useCheckStore } from '../../stores/useCheckStore'
 import { useConfigStore } from '../../stores/useConfigStore'
 import { useHistoryStore } from '../../stores/useHistoryStore'
 import { useKeyStore } from '../../stores/useKeyStore'
-import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 import { useShallow } from 'zustand/react/shallow'
 import { useFileUpload } from '../../hooks/useFileUpload'
 import * as api from '../../utils/api'
@@ -15,55 +14,6 @@ import { logger } from '../../utils/logger'
 function getConfigApiKey(keyStore, config) {
   if (!config) return null
   return keyStore.getKey(`llm:${config.id}`) || keyStore.getKey(config.provider)
-}
-
-/**
- * Collect the opt-in AI-detection request fields, or null when disabled.
- * Threaded into single + batch requests exactly like the LLM/hallucination
- * params already are.
- */
-function aiDetectionValues() {
-  const s = useAiDetectionStore.getState()
-  if (!s.enabled) return null
-  // detection_mode controls whether reference checking also runs. 'both' (the
-  // default) verifies references AND detects AI text; 'ai_only' skips reference
-  // verification entirely. With AI detection disabled the backend default
-  // ('both' + ai off) is already reference-checking-only.
-  const out = {
-    ai_detection_enabled: true,
-    ai_detection_backend: s.backend,
-    detection_mode: s.detectionMode === 'ai_only' ? 'ai_only' : 'both',
-  }
-  if (s.backend === 'local') out.ai_detection_device = s.device
-  if (s.backend === 'api') {
-    out.ai_detection_service = s.service
-    out.ai_detection_consent = !!s.consent
-    const key = useKeyStore.getState().getKey(s.service)
-    if (key) out.ai_detection_api_key = key
-  }
-  // R61 — the user's chosen multi-detector run set (local backend only). An
-  // empty list is omitted so the backend falls back to the single default
-  // detector (backward compatible — existing desklib users are unaffected).
-  // Sent as a repeated `ai_detection_detectors` form field → a List[str]
-  // server-side, mirroring the wrapper's `ai_detection_detectors` param.
-  if (s.backend === 'local' && Array.isArray(s.selectedDetectors) && s.selectedDetectors.length > 0) {
-    out.ai_detection_detectors = s.selectedDetectors
-  }
-  return out
-}
-
-function appendAiDetection(formData) {
-  const v = aiDetectionValues()
-  if (!v) return
-  Object.entries(v).forEach(([k, val]) => {
-    // A list field (ai_detection_detectors) is appended once per element so the
-    // server receives a repeated form field → List[str].
-    if (Array.isArray(val)) {
-      val.forEach((item) => formData.append(k, String(item)))
-      return
-    }
-    formData.append(k, typeof val === 'boolean' ? String(val) : val)
-  })
 }
 
 /**
@@ -112,7 +62,7 @@ export default function InputSection() {
     setError: s.setError,
   })))
   
-  const { getSelectedExtractionConfig, getSelectedHallucinationConfig, getSelectedConfig } = useConfigStore()
+  const { getSelectedExtractionConfig, getSelectedConfig } = useConfigStore()
   const { fetchHistory, clearSelection, selectCheck } = useHistoryStore()
   
   const fileUpload = useFileUpload()
@@ -169,7 +119,6 @@ export default function InputSection() {
     try {
       // Get selected LLM configs
       const config = getSelectedExtractionConfig?.() || getSelectedConfig()
-      const hallucinationConfig = getSelectedHallucinationConfig?.() ?? null
       
       // Sanitize URL input to handle duplicated URLs (e.g., from double paste)
       const sanitizedUrl = inputMode === 'url' ? sanitizeUrlInput(inputValue) : null
@@ -194,13 +143,6 @@ export default function InputSection() {
           formData.append('llm_model', config.model)
         }
         formData.append('use_llm', 'true')
-        if (hallucinationConfig) {
-          formData.append('hallucination_config_id', hallucinationConfig.id.toString())
-          formData.append('hallucination_provider', hallucinationConfig.provider)
-          if (hallucinationConfig.model) {
-            formData.append('hallucination_model', hallucinationConfig.model)
-          }
-        }
       } else {
         formData.append('use_llm', 'false')
       }
@@ -208,26 +150,21 @@ export default function InputSection() {
       // Attach per-tab API keys from the in-memory browser store.
       const keyStore = useKeyStore.getState()
       const llmKey = getConfigApiKey(keyStore, config)
-      const hallucinationKey = getConfigApiKey(keyStore, hallucinationConfig)
       if (llmKey) formData.append('api_key', llmKey)
       else if (config && !config.has_key) {
         logger.warn('InputSection', `No API key for provider '${config.provider}'. LLM features may be unavailable.`)
       }
-      if (hallucinationKey) formData.append('hallucination_api_key', hallucinationKey)
       const ssKey = keyStore.getKey('semantic_scholar')
       if (ssKey) formData.append('semantic_scholar_api_key', ssKey)
       const googleBooksKey = keyStore.getKey('google_books')
       if (googleBooksKey) formData.append('google_books_api_key', googleBooksKey)
       const paperclipKey = keyStore.getKey('paperclip')
       if (paperclipKey) formData.append('paperclip_api_key', paperclipKey)
-      appendAiDetection(formData)
 
       logger.info('Check', 'Initiating check request', { 
         mode: inputMode, 
         llm: config?.provider,
         model: config?.model,
-        hallucinationLlm: hallucinationConfig?.provider,
-        hallucinationModel: hallucinationConfig?.model,
         hasApiKey: !!(llmKey || config?.has_key),
         source: inputMode === 'url' ? sanitizedUrl : (inputMode === 'file' ? fileUpload.file?.name : 'pasted text')
       })
@@ -272,8 +209,6 @@ export default function InputSection() {
         unverified_count: 0,
         llm_provider: config?.provider || null,
         llm_model: config?.model || null,
-        hallucination_provider: hallucinationConfig?.provider || null,
-        hallucination_model: hallucinationConfig?.model || null,
         status: 'in_progress',
         session_id: session_id,
       })
@@ -327,11 +262,9 @@ export default function InputSection() {
 
     try {
       const config = getSelectedExtractionConfig?.() || getSelectedConfig()
-      const hallucinationConfig = getSelectedHallucinationConfig?.() ?? null
       const { addToHistory } = useHistoryStore.getState()
       const keyStore = useKeyStore.getState()
       const llmKey = getConfigApiKey(keyStore, config)
-      const hallucinationKey = getConfigApiKey(keyStore, hallucinationConfig)
       const ssKey = keyStore.getKey('semantic_scholar')
       const googleBooksKey = keyStore.getKey('google_books')
       const paperclipKey = keyStore.getKey('paperclip')
@@ -347,16 +280,11 @@ export default function InputSection() {
           llm_config_id: config?.id,
           llm_provider: config?.provider || 'anthropic',
           llm_model: config?.model,
-          hallucination_config_id: hallucinationConfig?.id,
-          hallucination_provider: hallucinationConfig?.provider,
-          hallucination_model: hallucinationConfig?.model,
           use_llm: !!config,
           api_key: llmKey,
-          hallucination_api_key: hallucinationKey,
           semantic_scholar_api_key: ssKey,
           paperclip_api_key: paperclipKey,
           ...(googleBooksKey ? { google_books_api_key: googleBooksKey } : {}),
-          ...(aiDetectionValues() || {}),
         })
       } else {
         // File batch
@@ -368,20 +296,13 @@ export default function InputSection() {
           formData.append('llm_provider', config.provider)
           if (config.model) formData.append('llm_model', config.model)
           formData.append('use_llm', 'true')
-          if (hallucinationConfig) {
-            formData.append('hallucination_config_id', hallucinationConfig.id.toString())
-            formData.append('hallucination_provider', hallucinationConfig.provider)
-            if (hallucinationConfig.model) formData.append('hallucination_model', hallucinationConfig.model)
-          }
         } else {
           formData.append('use_llm', 'false')
         }
         if (llmKey) formData.append('api_key', llmKey)
-        if (hallucinationKey) formData.append('hallucination_api_key', hallucinationKey)
         if (ssKey) formData.append('semantic_scholar_api_key', ssKey)
         if (googleBooksKey) formData.append('google_books_api_key', googleBooksKey)
         if (paperclipKey) formData.append('paperclip_api_key', paperclipKey)
-        appendAiDetection(formData)
 
         response = await api.startBatchFileCheck(formData)
       }
@@ -411,8 +332,6 @@ export default function InputSection() {
           unverified_count: 0,
           llm_provider: config?.provider || null,
           llm_model: config?.model || null,
-          hallucination_provider: hallucinationConfig?.provider || null,
-          hallucination_model: hallucinationConfig?.model || null,
           status: 'in_progress',
           session_id: check.session_id,
           batch_id: batch_id,
@@ -652,3 +571,5 @@ export default function InputSection() {
     </div>
   )
 }
+
+

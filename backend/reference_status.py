@@ -18,6 +18,45 @@ Both callers now share the implementation below.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+
+_ACADEMIC_DOMAINS = frozenset({
+    'arxiv.org',
+    'semanticscholar.org',
+    'scholar.google.com',
+    'openreview.net',
+    'aclanthology.org',
+    'proceedings.mlr.press',
+    'papers.nips.cc',
+    'proceedings.neurips.cc',
+    'ieee.org',
+    'ieeexplore.ieee.org',
+    'acm.org',
+    'dl.acm.org',
+    'springer.com',
+    'link.springer.com',
+    'sciencedirect.com',
+    'nature.com',
+    'wiley.com',
+    'onlinelibrary.wiley.com',
+    'plos.org',
+    'biorxiv.org',
+    'medrxiv.org',
+    'dblp.org',
+    'researchgate.net',
+    'academic.oup.com',
+    'pubmed.ncbi.nlm.nih.gov',
+})
+
+
+def _is_academic_url(url: str) -> bool:
+    """Return whether a URL belongs to a known scholarly source domain."""
+    try:
+        domain = (urlparse(url).hostname or '').removeprefix('www.').lower()
+        return any(domain == item or domain.endswith(f'.{item}') for item in _ACADEMIC_DOMAINS)
+    except (TypeError, ValueError):
+        return False
 
 
 def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -137,8 +176,6 @@ def classify_verification_result(
     )
 
     if is_unverified:
-        from refchecker.checkers.web_search import is_academic_url
-
         cited_url = reference.get('cited_url') or reference.get('url') or url or ''
         real_errors = [
             e for e in sanitized
@@ -152,7 +189,7 @@ def classify_verification_result(
         if (
             real_errors
             and all(e.get('error_type') == 'url' for e in real_errors)
-            and not is_academic_url(cited_url)
+            and not _is_academic_url(cited_url)
             and (not is_direct_pdf or 'openai.com' in cited_url_lower)
         ):
             sanitized = [e for e in sanitized if e.get('error_type') != 'url']
@@ -188,7 +225,7 @@ def split_errors_and_warnings(
     """Split a sanitized list into the `errors` / `warnings` fields of a row.
 
     Keeping warnings out of `errors` matters for display as well as counts: the
-    status-icon precedence is hallucination > error > warning, so a warning left
+    status-icon precedence is error > warning, so a warning left
     sitting in `errors` renders an error icon that contradicts the row's own
     status. Unverified findings remain in `errors`: the UI excludes them from
     error severity/counts but needs their details for the "Subreason" line.

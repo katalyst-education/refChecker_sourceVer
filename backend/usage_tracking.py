@@ -217,7 +217,6 @@ async def get_usage_summary(days: int = 30) -> Dict[str, Any]:
             "total_warnings": 0,
             "total_suggestions": 0,
             "total_unverified": 0,
-            "total_hallucinations": 0,
             "avg_duration_ms": 0,
         }
 
@@ -257,7 +256,6 @@ async def get_usage_summary(days: int = 30) -> Dict[str, Any]:
                     "total_refs": 0,
                     "total_errors": 0,
                     "total_warnings": 0,
-                    "total_hallucinations": 0,
                 }
 
             if event_type == "check.started":
@@ -274,18 +272,15 @@ async def get_usage_summary(days: int = 30) -> Dict[str, Any]:
                 warnings_count = int(payload.get("warnings_count") or 0)
                 suggestions_count = int(payload.get("suggestions_count") or 0)
                 unverified_count = int(payload.get("unverified_count") or 0)
-                hallucination_count = int(payload.get("hallucination_count") or 0)
                 totals["total_refs"] += total_refs
                 totals["total_errors"] += errors_count
                 totals["total_warnings"] += warnings_count
                 totals["total_suggestions"] += suggestions_count
                 totals["total_unverified"] += unverified_count
-                totals["total_hallucinations"] += hallucination_count
                 top_users[user_id]["total_refs"] += total_refs
                 top_papers[paper_group]["total_refs"] += total_refs
                 top_papers[paper_group]["total_errors"] += errors_count
                 top_papers[paper_group]["total_warnings"] += warnings_count
-                top_papers[paper_group]["total_hallucinations"] += hallucination_count
                 if payload.get("duration_ms") is not None:
                     durations.append(int(payload["duration_ms"]))
                 for issue_type, count in (payload.get("issue_type_counts") or {}).items():

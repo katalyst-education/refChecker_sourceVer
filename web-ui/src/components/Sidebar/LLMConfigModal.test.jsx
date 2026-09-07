@@ -18,7 +18,6 @@ vi.mock('../../stores/useConfigStore', () => ({
     updateConfig: mocks.updateConfig,
     configs: mocks.configs,
     selectConfig: vi.fn(),
-    selectHallucinationConfig: vi.fn(),
   }),
 }))
 
@@ -71,22 +70,6 @@ describe('LLMConfigModal', () => {
 
     expect(screen.getByText('Retrieved from this encrypted browser cache for the local web interface and not stored in the local database or on the server.')).toBeTruthy()
     expect(screen.queryByText('Stored encrypted in the local RefChecker database and never shown again.')).toBeNull()
-  })
-
-  it('creates hallucination configs without selecting them for extraction', async () => {
-    render(<LLMConfigModal isOpen={true} onClose={vi.fn()} selectionMode="hallucination" />)
-
-    fireEvent.change(screen.getByLabelText(/API Key/i), {
-      target: { value: 'test-key' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /Add Configuration/i }))
-
-    await waitFor(() => {
-      expect(mocks.addConfig).toHaveBeenCalledWith(
-        expect.objectContaining({ provider: 'anthropic' }),
-        { selectFor: 'hallucination' },
-      )
-    })
   })
 
   it('allows server environment keys to satisfy validation in multiuser mode', async () => {

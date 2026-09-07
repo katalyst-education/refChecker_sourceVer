@@ -12,9 +12,8 @@ const STATUS_COLOR = {
   warning: '#f59e0b',
   error: '#ef4444',
   unverified: '#94a3b8',
-  hallucinated: '#a855f7',
 }
-const STATUS_ORDER = { verified: 0, warning: 1, error: 2, hallucinated: 3, unverified: 4 }
+const STATUS_ORDER = { verified: 0, warning: 1, error: 2, unverified: 3 }
 const _linkEnd = (v) => (v && typeof v === 'object' ? v.id : v)
 
 /**

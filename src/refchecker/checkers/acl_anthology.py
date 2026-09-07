@@ -8,7 +8,7 @@ The search endpoint is free and requires no API key.
 
 See: https://aclanthology.org/
 
-Approach inspired by the hallucinator project (https://github.com/gianlucasb/hallucinator).
+Uses normalized bibliographic matching against ACL Anthology records.
 """
 
 import logging

@@ -35,7 +35,7 @@
 
     <!-- wordmark -->
     <text x="48" y="96" font-family="ui-sans-serif,Segoe UI,Helvetica,Arial,sans-serif" font-size="52" font-weight="800" fill="url(#word)">RefChecker</text>
-    <text x="50" y="128" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#94a3b8">academic reference verification &amp; AI-text detection</text>
+    <text x="50" y="128" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" fill="#94a3b8">evidence-based academic reference verification</text>
 
     <!-- animated reference rows being verified -->
     <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13">
@@ -61,7 +61,7 @@
         <circle cx="0" cy="-4" r="5" fill="#7c9cff">
           <animate attributeName="opacity" values="0;0;0;0;1" dur="3s" begin="1.8s" repeatCount="indefinite"/>
         </circle>
-        <text x="14" y="0" fill="#cbd5e1">AI-text: inconclusive</text>
+        <text x="14" y="0" fill="#cbd5e1">unverified: 2</text>
       </g>
     </g>
 

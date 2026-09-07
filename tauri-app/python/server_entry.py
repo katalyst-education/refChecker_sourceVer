@@ -42,30 +42,6 @@ def main() -> int:
     if hasattr(sys, "_MEIPASS"):
         sys.path.insert(0, sys._MEIPASS)
 
-    # Hidden installer mode: the AI-detection runtime installer re-invokes this
-    # bundle as a clean, ABI-matched pip runner (a fresh process with no server
-    # loaded). Handle it before argparse so the pass-through pip args aren't
-    # rejected. See refchecker.ai_detection.runtime_manager.
-    if len(sys.argv) >= 2 and sys.argv[1] == "--pip-install":
-        try:
-            from refchecker.ai_detection import runtime_manager
-        except Exception as exc:  # noqa: BLE001
-            print(f"pip-install mode: cannot import runtime_manager: {exc}", flush=True)
-            return 1
-        return runtime_manager.run_pip_cli(sys.argv[2:])
-
-    # Hidden model-download mode: a clean process where HF_HUB_DISABLE_XET is set
-    # BEFORE huggingface_hub is imported (the only way to truly disable the Xet
-    # backend, which stalls in the bundle), invoked + watchdogged by the parent.
-    #   argv: --hf-download <repo_id> <dest_dir>
-    if len(sys.argv) >= 4 and sys.argv[1] == "--hf-download":
-        try:
-            from refchecker.ai_detection import model_manager
-            return model_manager.run_hf_download_cli(sys.argv[2], sys.argv[3])
-        except Exception as exc:  # noqa: BLE001
-            print(f"hf-download mode failed: {exc}", flush=True)
-            return 1
-
     parser = argparse.ArgumentParser(prog="refchecker-server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

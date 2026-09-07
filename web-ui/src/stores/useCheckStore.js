@@ -20,9 +20,6 @@ export const useCheckStore = create((set, get) => ({
   statusMessage: '',
   progress: 0,
   references: [],
-  // Document-level AI-generated-text detection result for the current check
-  // (null = not run). Set by the 'ai_detection_result' WS event.
-  aiDetection: null,
   stats: {
     total_refs: 0,
     processed_refs: 0,
@@ -31,7 +28,6 @@ export const useCheckStore = create((set, get) => ({
     warnings_count: 0,
     suggestions_count: 0,
     unverified_count: 0,
-    hallucination_count: 0,
     refs_with_issues: 0,
     refs_with_errors: 0,
     refs_with_warnings_only: 0,
@@ -68,7 +64,6 @@ export const useCheckStore = create((set, get) => ({
       statusMessage: 'Starting check...',
       progress: 0,
       references: [],
-      aiDetection: null,
       stats: {
         total_refs: 0,
         processed_refs: 0,
@@ -77,7 +72,6 @@ export const useCheckStore = create((set, get) => ({
         warnings_count: 0,
         suggestions_count: 0,
         unverified_count: 0,
-        hallucination_count: 0,
         refs_with_issues: 0,
         refs_with_errors: 0,
         refs_with_warnings_only: 0,
@@ -127,7 +121,6 @@ export const useCheckStore = create((set, get) => ({
       warnings_count = 0,
       suggestions_count = 0,
       unverified_count = 0,
-      hallucination_count = 0,
       refs_with_issues = 0,
       refs_with_errors: payloadRefsWithErrors,
       refs_with_warnings_only: payloadRefsWithWarningsOnly,
@@ -186,7 +179,6 @@ export const useCheckStore = create((set, get) => ({
         warnings_count,
         suggestions_count,
         unverified_count,
-        hallucination_count,
         refs_with_issues,
         refs_with_errors,
         refs_with_warnings_only,
@@ -476,7 +468,6 @@ export const useCheckStore = create((set, get) => ({
       statusMessage: '',
       progress: 0,
       references: [],
-      aiDetection: null,
       stats: {
         total_refs: 0,
         processed_refs: 0,
@@ -485,7 +476,6 @@ export const useCheckStore = create((set, get) => ({
         warnings_count: 0,
         suggestions_count: 0,
         unverified_count: 0,
-        hallucination_count: 0,
         refs_with_issues: 0,
         refs_with_errors: 0,
         refs_with_warnings_only: 0,
@@ -576,7 +566,6 @@ export const useCheckStore = create((set, get) => ({
             warnings_count: data.warnings_count,
             suggestions_count: data.suggestions_count,
             unverified_count: data.unverified_count,
-            hallucination_count: data.hallucination_count || 0,
             verified_count: data.verified_count,
             refs_with_errors: data.refs_with_errors,
             refs_with_warnings_only: data.refs_with_warnings_only,
@@ -597,7 +586,6 @@ export const useCheckStore = create((set, get) => ({
             warnings_count: data.warnings_count,
             suggestions_count: data.suggestions_count,
             unverified_count: data.unverified_count,
-            hallucination_count: data.hallucination_count || 0,
             verified_count: data.verified_count,
             refs_with_errors: data.refs_with_errors,
             refs_with_warnings_only: data.refs_with_warnings_only,
@@ -625,14 +613,6 @@ export const useCheckStore = create((set, get) => ({
           })
           store.unregisterSession(messageSessionId)
           break
-        case 'ai_detection_result': {
-          // Mirror the AI-likelihood result into the peer check's history
-          // entry so a focused batch child reflects its band the moment it
-          // lands, not only after a refetch. (Parallels reference_result.)
-          const { check_id: _cid, ...detection } = data
-          historyStore.updateHistoryProgress(checkIdForMessage, { ai_detection: detection })
-          break
-        }
         default:
           // Other message types for concurrent sessions - ignore
           break
@@ -734,7 +714,7 @@ export const useCheckStore = create((set, get) => ({
           stats: data,
           progress: data.progress_percent || 0,
           statusMessage: data.processed_refs >= data.total_refs && data.total_refs > 0
-            ? 'Finishing hallucination check...'
+            ? 'Finalizing check...'
             : `Processed ${data.processed_refs} of ${countLabel(data.total_refs, 'reference')}...`,
         })
         useHistoryStore.getState().updateHistoryProgress(store.currentCheckId, {
@@ -745,7 +725,6 @@ export const useCheckStore = create((set, get) => ({
           warnings_count: data.warnings_count,
           suggestions_count: data.suggestions_count,
           unverified_count: data.unverified_count,
-            hallucination_count: data.hallucination_count || 0,
           verified_count: data.verified_count,
           refs_with_errors: data.refs_with_errors,
           refs_with_warnings_only: data.refs_with_warnings_only,
@@ -771,22 +750,6 @@ export const useCheckStore = create((set, get) => ({
         }
         break
         
-      case 'ai_detection_result':
-        // Document-level AI-likelihood result for the manuscript body. Stored
-        // separately from per-reference results (it has no reference index).
-        // Only apply when the event belongs to the displayed check, so a late
-        // result for a now-background check can't overwrite what's on screen.
-        {
-          const { check_id: _cid, ...detection } = data
-          if (!checkIdForMessage || checkIdForMessage === store.currentCheckId) {
-            set({ aiDetection: detection })
-          }
-          if (checkIdForMessage) {
-            useHistoryStore.getState().updateHistoryProgress(checkIdForMessage, { ai_detection: detection })
-          }
-        }
-        break
-
       case 'completed':
         store.completeCheck(data.check_id || store.currentCheckId)
         useHistoryStore.getState().updateHistoryProgress(store.currentCheckId, {
@@ -797,7 +760,6 @@ export const useCheckStore = create((set, get) => ({
           warnings_count: data.warnings_count,
           suggestions_count: data.suggestions_count,
           unverified_count: data.unverified_count,
-            hallucination_count: data.hallucination_count || 0,
           verified_count: data.verified_count,
           refs_with_errors: data.refs_with_errors,
           refs_with_warnings_only: data.refs_with_warnings_only,
@@ -892,7 +854,7 @@ export const useCheckStore = create((set, get) => ({
           latestStats = data
           latestProgress = data.progress_percent || 0
           latestStatusMessage = data.processed_refs >= data.total_refs && data.total_refs > 0
-            ? 'Finishing hallucination check...'
+            ? 'Finalizing check...'
             : `Processed ${data.processed_refs} of ${countLabel(data.total_refs, 'reference')}...`
           historyPayload = {
             status: 'in_progress',
@@ -902,7 +864,6 @@ export const useCheckStore = create((set, get) => ({
             warnings_count: data.warnings_count,
             suggestions_count: data.suggestions_count,
             unverified_count: data.unverified_count,
-            hallucination_count: data.hallucination_count || 0,
             verified_count: data.verified_count,
             refs_with_errors: data.refs_with_errors,
             refs_with_warnings_only: data.refs_with_warnings_only,
@@ -962,3 +923,5 @@ export const useCheckStore = create((set, get) => ({
     }
   },
 }))
+
+

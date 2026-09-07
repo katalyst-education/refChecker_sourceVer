@@ -15,7 +15,6 @@ const mocks = vi.hoisted(() => ({
   registerSession: vi.fn(),
   getSelectedConfig: vi.fn(),
   getSelectedExtractionConfig: vi.fn(),
-  getSelectedHallucinationConfig: vi.fn(),
   getKey: vi.fn(),
   logger: {
     info: vi.fn(),
@@ -57,7 +56,6 @@ vi.mock('../../stores/useConfigStore', () => ({
   useConfigStore: () => ({
     getSelectedConfig: mocks.getSelectedConfig,
     getSelectedExtractionConfig: mocks.getSelectedExtractionConfig,
-    getSelectedHallucinationConfig: mocks.getSelectedHallucinationConfig,
   }),
 }))
 
@@ -116,15 +114,8 @@ describe('InputSection bulk mode', () => {
       model: 'claude-4',
       name: 'Hosted Claude',
     })
-    mocks.getSelectedHallucinationConfig.mockReturnValue({
-      id: 8,
-      provider: 'google',
-      model: 'gemini-2.5-flash',
-      name: 'Hosted Gemini',
-    })
     mocks.getKey.mockImplementation((provider) => {
       if (provider === 'anthropic') return 'llm-key'
-      if (provider === 'google') return 'hallucination-key'
       if (provider === 'semantic_scholar') return 'ss-key'
       if (provider === 'paperclip') return 'paperclip-key'
       return null
@@ -160,12 +151,8 @@ describe('InputSection bulk mode', () => {
         llm_config_id: 7,
         llm_provider: 'anthropic',
         llm_model: 'claude-4',
-        hallucination_config_id: 8,
-        hallucination_provider: 'google',
-        hallucination_model: 'gemini-2.5-flash',
         use_llm: true,
         api_key: 'llm-key',
-        hallucination_api_key: 'hallucination-key',
         semantic_scholar_api_key: 'ss-key',
         paperclip_api_key: 'paperclip-key',
       })
@@ -178,8 +165,6 @@ describe('InputSection bulk mode', () => {
       paper_source: '2401.12345',
       llm_provider: 'anthropic',
       llm_model: 'claude-4',
-      hallucination_provider: 'google',
-      hallucination_model: 'gemini-2.5-flash',
       batch_id: 'batch-1',
       batch_label: '2401.12345',
     }))
@@ -193,7 +178,6 @@ describe('InputSection mode tabs — hover state', () => {
     vi.clearAllMocks()
     mocks.getSelectedConfig.mockReturnValue(null)
     mocks.getSelectedExtractionConfig.mockReturnValue(null)
-    mocks.getSelectedHallucinationConfig.mockReturnValue(null)
     mocks.getKey.mockReturnValue(null)
   })
 

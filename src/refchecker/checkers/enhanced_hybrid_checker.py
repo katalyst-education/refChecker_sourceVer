@@ -2522,8 +2522,7 @@ class EnhancedHybridReferenceChecker:
         """Convert version-only ArXiv metadata mismatches to warnings.
 
         This normalizes the result at the shared checker layer so CLI, bulk,
-        and WebUI all see the same warning-only record before any presentation
-        or hallucination code runs.
+        and WebUI all see the same warning-only record before presentation.
         """
         if not self.arxiv_citation or not errors:
             return verified_data, errors, url
@@ -2661,8 +2660,8 @@ class EnhancedHybridReferenceChecker:
         if not cited_authors or not correct_authors:
             return None
 
-        from refchecker.core.hallucination_policy import _compute_author_overlap
-        overlap = _compute_author_overlap(cited_authors, correct_authors)
+            from refchecker.core.issue_policy import compute_author_overlap
+            overlap = compute_author_overlap(cited_authors, correct_authors)
 
         # Trigger re-verification when:
         # 1. Catastrophic mismatch (≤10% overlap — wrong paper matched), OR

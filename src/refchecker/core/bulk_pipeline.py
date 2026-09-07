@@ -18,13 +18,6 @@ from dataclasses import asdict, dataclass, field
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
-from refchecker.core.hallucination_policy import (
-    apply_hallucination_verdict,
-    build_hallucination_error_entry,
-    pre_screen_hallucination,
-    run_hallucination_check,
-    should_defer_likely_to_llm,
-)
 from refchecker.utils.arxiv_utils import get_bibtex_content
 from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.text_utils import (
@@ -405,34 +398,6 @@ class BulkLLMExtractionBatcher:
         return results
 
 
-class AsyncHallucinationPool:
-    """Thread-pool based hallucination assessment for non-blocking operation.
-
-    This pool runs
-    hallucination LLM calls concurrently via a ThreadPoolExecutor and returns
-    futures that can be collected later — allowing paper workers to proceed
-    to the next paper without waiting for hallucination results.
-    """
-
-    def __init__(self, max_workers: int = 4):
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix='HallucinationLLM',
-        )
-
-    def submit(self, error_entry: Dict[str, Any], llm_verifier: Any, web_searcher: Any) -> Any:
-        """Submit a hallucination check.  Returns a concurrent.futures.Future."""
-        return self._executor.submit(
-            run_hallucination_check,
-            error_entry,
-            llm_client=llm_verifier,
-            web_searcher=web_searcher,
-        )
-
-    def shutdown(self, wait: bool = True) -> None:
-        self._executor.shutdown(wait=wait)
-
-
 def _print_bulk_reference_block(error_entry: Dict[str, Any], ref_idx: int, total_refs: int) -> None:
     """Print a single reference with errors in bulk mode, matching single-paper CLI format.
 
@@ -517,13 +482,6 @@ def _print_bulk_reference_block_unlocked(error_entry: Dict[str, Any], ref_idx: i
         elif error_details:
             _safe_print_labeled('❌', error_details)
 
-    # Hallucination flag (only shown for LIKELY)
-    assessment = error_entry.get('hallucination_assessment', {})
-    if assessment.get('verdict') == 'LIKELY':
-        explanation = assessment.get('explanation', '')
-        _safe_print(f'      🚩 Likely hallucinated: {explanation}')
-
-
 class BulkProgressReporter:
     def __init__(self, total_papers: int):
         self.total_papers = total_papers
@@ -555,19 +513,11 @@ class BulkProgressReporter:
                     _safe_print(f'   {result.source_url}')
 
                 # ── Paper stats ──
-                flagged_entries = [
-                    e for e in result.errors
-                    if e.get('hallucination_assessment', {}).get('verdict') == 'LIKELY'
-                ]
-                flagged_count = len(flagged_entries)
-                paper_unverified = max(result.total_unverified_refs, flagged_count)
                 elapsed = f'{result.elapsed_seconds:.0f}s'
-                flag_note = f' hallucinated={flagged_count}' if flagged_count else ''
                 _safe_print(
                     f'   refs={result.references_processed} '
                     f'errors={result.total_errors_found} warnings={result.total_warnings_found} '
-                    f'info={result.total_info_found} unverified={paper_unverified}'
-                    f'{flag_note} '
+                    f'info={result.total_info_found} unverified={result.total_unverified_refs} '
                     f'({elapsed})'
                 )
 
@@ -664,7 +614,6 @@ def run_bulk_paper_check(root_checker: Any, input_specs: Sequence[str], debug_mo
         reporter.total_info += prev_result.total_info_found
         reporter.total_unverified += prev_result.total_unverified_refs
     extraction_batcher = BulkLLMExtractionBatcher(enabled=bool(getattr(root_checker, 'llm_enabled', False)))
-    hallucination_pool = AsyncHallucinationPool(max_workers=4)
     verification_cache = BulkVerificationCache()
     job_queue: Queue[Any] = Queue()
     result_queue: Queue[tuple] = Queue()
@@ -697,12 +646,11 @@ def run_bulk_paper_check(root_checker: Any, input_specs: Sequence[str], debug_mo
                         return
                     _safe_print(f'⏳ {dt.datetime.now().strftime("%H:%M:%S")} [{job.index + 1}/{len(input_specs)}] Starting: {job.input_spec}')
                     try:
-                        result, pending_halluc = _process_bulk_paper_job(
+                        result = _process_bulk_paper_job(
                             checker=checker,
                             job=job,
                             debug_mode=debug_mode,
                             extraction_batcher=extraction_batcher,
-                            hallucination_pool=hallucination_pool,
                             verification_cache=verification_cache,
                         )
                     except Exception as exc:
@@ -711,8 +659,7 @@ def run_bulk_paper_check(root_checker: Any, input_specs: Sequence[str], debug_mo
                         checker.fatal_error = True
                         checker.fatal_error_message = str(exc)
                         result = _build_bulk_result(checker, job, job.input_spec, job.input_spec, time.perf_counter())
-                        pending_halluc = []
-                    result_queue.put((result, pending_halluc))
+                    result_queue.put(result)
                 finally:
                     job_queue.task_done()
 
@@ -722,11 +669,7 @@ def run_bulk_paper_check(root_checker: Any, input_specs: Sequence[str], debug_mo
 
         completed = 0
         while completed < remaining:
-            result, pending_halluc = result_queue.get()
-            # Finalize hallucination assessments (waits for pending LLM
-            # futures) before reporting.  While we wait here, worker
-            # threads are already verifying the next paper.
-            _finalize_hallucination_on_result(result, pending_halluc)
+            result = result_queue.get()
             result_map[result.index] = result
             reporter.report(result)
             # Save to checkpoint incrementally
@@ -740,7 +683,6 @@ def run_bulk_paper_check(root_checker: Any, input_specs: Sequence[str], debug_mo
         for thread in threads:
             thread.join(timeout=30.0)
     extraction_batcher.close()
-    hallucination_pool.shutdown(wait=True)
 
     # Cache stats (use raw attributes to avoid lock contention with daemon threads)
     if verification_cache.hits > 0 or len(verification_cache._cache) > 0:
@@ -777,9 +719,8 @@ def _process_bulk_paper_job(
     job: BulkPaperJob,
     debug_mode: bool,
     extraction_batcher: BulkLLMExtractionBatcher,
-    hallucination_pool: AsyncHallucinationPool,
     verification_cache: BulkVerificationCache,
-) -> tuple:
+) -> BulkPaperResult:
     start_time = time.perf_counter()
     _reset_worker_state(checker)
 
@@ -797,7 +738,7 @@ def _process_bulk_paper_job(
                 checker.fatal_error_message = f'Could not find paper with ID: {resolved_paper_id}'
                 paper_id = resolved_paper_id
                 title = resolved_paper_id
-                return _build_bulk_result(checker, job, paper_id, title, start_time), []
+                return _build_bulk_result(checker, job, paper_id, title, start_time)
         else:
             paper = checker._create_local_file_paper(local_path)
 
@@ -822,7 +763,7 @@ def _process_bulk_paper_job(
             cache_bibliography(checker.cache_dir, job.input_spec, bibliography, llm_cache_identity)
             phase_times['extract_bib'] = time.perf_counter() - _t
         if checker.fatal_error:
-            return _build_bulk_result(checker, job, paper_id, title, start_time, source_url=source_url), []
+            return _build_bulk_result(checker, job, paper_id, title, start_time, source_url=source_url)
 
         if len(bibliography) > 1:
             bibliography = checker._deduplicate_bibliography_entries(bibliography)
@@ -844,12 +785,6 @@ def _process_bulk_paper_job(
         _t = time.perf_counter()
         _verify_bibliography_silent(checker, paper, bibliography, debug_mode=debug_mode, verification_cache=verification_cache)
         phase_times['verify_refs'] = time.perf_counter() - _t
-
-        _t = time.perf_counter()
-        pending_halluc = _submit_hallucination_assessments_async(checker, hallucination_pool)
-        phase_times['hallucination_submit'] = time.perf_counter() - _t
-        # Hallucination LLM calls run concurrently in the pool.  The
-        # main loop will wait for and apply results before reporting.
 
         # Print phase timing and API stats for this paper
         total_elapsed = time.perf_counter() - start_time
@@ -883,12 +818,12 @@ def _process_bulk_paper_job(
         checker.papers_with_warnings = 1 if warnings else 0
         checker.papers_with_info = 1 if info else 0
         result = _build_bulk_result(checker, job, paper_id, title, start_time, source_url=source_url)
-        return result, pending_halluc
+        return result
     except Exception as exc:
         logger.error('Bulk paper job failed for %s: %s', job.input_spec, exc)
         checker.fatal_error = True
         checker.fatal_error_message = str(exc)
-        return _build_bulk_result(checker, job, paper_id or job.input_spec, title or job.input_spec, start_time), []
+        return _build_bulk_result(checker, job, paper_id or job.input_spec, title or job.input_spec, start_time)
 
 
 def _build_bulk_result(checker: Any, job: BulkPaperJob, paper_id: str, title: str, start_time: float, source_url: str = '') -> BulkPaperResult:
@@ -1501,143 +1436,12 @@ def _record_reference_result_silent(
 
     checker.add_error_to_dataset(paper, reference, errors, reference_url, verified_data)
     paper_errors.extend(errors)
-    from refchecker.core.hallucination_policy import count_raw_errors
+    from refchecker.core.issue_policy import count_raw_errors
     ec, wc, ic = count_raw_errors(errors)
     checker.total_errors_found += ec
     checker.total_warnings_found += wc
     checker.total_info_found += ic
 
-
-def _submit_hallucination_assessments_async(
-    checker: Any,
-    hallucination_pool: AsyncHallucinationPool,
-) -> List[tuple]:
-    """Submit hallucination checks without blocking.
-
-    Runs the same deterministic pre-screening as the former
-    ``_apply_batched_hallucination_assessments``.  Deterministic verdicts are
-    applied immediately to the error-entry dicts.  Entries that need an LLM
-    call are submitted to *hallucination_pool* and the (error_entry, future)
-    pairs are returned so the caller can collect them later.
-    """
-    llm_verifier = checker.report_builder.llm_verifier
-    web_searcher = checker.report_builder.web_searcher
-    pending: List[tuple] = []
-
-    for error_entry in checker.errors:
-        reference = error_entry.get('original_reference') or {}
-        raw_errors = error_entry.get('_original_errors') or []
-        verified_url = error_entry.get('ref_verified_url', '')
-        filtered = build_hallucination_error_entry(raw_errors, reference, verified_url=verified_url)
-        if filtered is None:
-            continue
-
-        outcome, assessment = pre_screen_hallucination(filtered)
-        if outcome == 'resolved':
-            if (
-                should_defer_likely_to_llm(assessment, verified_url)
-                and llm_verifier
-                and (getattr(llm_verifier, 'available', False) or getattr(llm_verifier, 'cache_dir', None))
-            ):
-                # Defer to LLM instead of applying immediately
-                future = hallucination_pool.submit(filtered, llm_verifier, web_searcher)
-                pending.append((checker, error_entry, future))
-                continue
-            error_entry['hallucination_assessment'] = assessment
-            continue
-        if outcome == 'skip':
-            continue
-
-        # 'needs_llm' — submit to pool
-        if not llm_verifier:
-            continue
-        if not getattr(llm_verifier, 'available', False) and not getattr(llm_verifier, 'cache_dir', None):
-            continue
-
-        future = hallucination_pool.submit(filtered, llm_verifier, web_searcher)
-        pending.append((checker, error_entry, future))
-
-    return pending
-
-
-def _finalize_hallucination_on_result(
-    result: BulkPaperResult,
-    pending_tasks: List[tuple],
-) -> None:
-    """Wait for pending hallucination futures and apply results to a BulkPaperResult.
-
-    Adjusts unverified counts for UNLIKELY verdicts and removes
-    URL-verified UNLIKELY entries, matching the CLI single-paper behaviour.
-    """
-    # Collect LLM results
-    for checker, error_entry, future in pending_tasks:
-        try:
-            assessment = future.result(timeout=120)
-            if assessment:
-                reference = error_entry.get('original_reference') or {}
-                raw_errors = error_entry.get('_original_errors') or []
-                has_unverified = any((e.get('error_type') or '') == 'unverified' for e in raw_errors)
-                applied = apply_hallucination_verdict(
-                    {'status': 'unverified' if has_unverified else 'error', 'errors': raw_errors, '_raw_errors': raw_errors},
-                    assessment,
-                    reference=reference,
-                    standard_refchecker=lambda found_ref, checker=checker: checker.verify_reference_standard(None, found_ref),
-                    llm_client=getattr(checker.report_builder, 'llm_verifier', None) if hasattr(checker, 'report_builder') else None,
-                    web_searcher=getattr(checker.report_builder, 'web_searcher', None) if hasattr(checker, 'report_builder') else None,
-                )
-                error_entry['hallucination_assessment'] = applied.get('hallucination_assessment', assessment)
-                if applied.get('matched_database'):
-                    error_entry['matched_database'] = applied['matched_database']
-                authoritative_urls = applied.get('authoritative_urls') or []
-                if authoritative_urls:
-                    error_entry['ref_verified_url'] = authoritative_urls[0].get('url', error_entry.get('ref_verified_url', ''))
-                if (
-                    has_unverified
-                    and applied.get('status') == 'verified'
-                    and not applied.get('errors')
-                    and not applied.get('warnings')
-                ):
-                    error_entry['_resolved_unverified_by_hallucination'] = True
-        except Exception as exc:
-            logger.warning('Hallucination check failed for %s: %s',
-                           error_entry.get('ref_title', '?')[:60], exc)
-
-    # Adjust unverified count for UNLIKELY verdicts
-    for entry in result.errors:
-        assessment = entry.get('hallucination_assessment') or {}
-        if assessment.get('verdict') != 'UNLIKELY':
-            continue
-        raw_errors = entry.get('_original_errors') or []
-        has_unverified = any(
-            e.get('error_type') == 'unverified'
-            or e.get('warning_type') == 'unverified'
-            or e.get('info_type') == 'unverified'
-            for e in raw_errors
-        ) or entry.get('_resolved_unverified_by_hallucination')
-        if has_unverified and result.total_unverified_refs > 0:
-            result.total_unverified_refs -= 1
-
-    # Remove entries whose only issue was an unverified result resolved by the
-    # shared hallucination policy. Bulk output only lists problematic refs, so
-    # keeping these entries would print both a verified URL and "Could not verify".
-    to_remove = []
-    for i, entry in enumerate(result.errors):
-        assessment = entry.get('hallucination_assessment') or {}
-        if assessment.get('verdict') != 'UNLIKELY':
-            continue
-        raw_errors = entry.get('_original_errors') or []
-        has_unverified = any(
-            (e.get('error_type') or '') == 'unverified'
-            for e in raw_errors
-        )
-        has_url_references = any(
-            'url references paper' in (e.get('error_details') or '').lower()
-            for e in raw_errors
-        )
-        if entry.get('_resolved_unverified_by_hallucination') or (has_unverified and has_url_references):
-            to_remove.append(i)
-    for i in reversed(to_remove):
-        result.errors.pop(i)
 
 
 def _apply_bulk_results(root_checker: Any, results: Sequence[BulkPaperResult]) -> None:
@@ -1667,8 +1471,6 @@ def _print_bulk_final_summary(checker: Any) -> None:
     if checker.debug_mode or checker.fatal_error:
         return
 
-    payload = checker._build_structured_report_payload()
-    flagged_count = payload['summary'].get('flagged_records', 0)
     _safe_print(f"\n" + '=' * 60)
     _safe_print('FINAL SUMMARY')
     _safe_print('=' * 60)
@@ -1680,10 +1482,7 @@ def _print_bulk_final_summary(checker: Any) -> None:
     _safe_print(f'         Total warnings: {checker.total_warnings_found}')
     _safe_print(f'ℹ️  Papers with information: {checker.papers_with_info}')
     _safe_print(f'         Total information: {checker.total_info_found}')
-    total_unverified = max(checker.total_unverified_refs, flagged_count)
-    _safe_print(f'❓ Total unverified: {total_unverified}')
-    if flagged_count > 0:
-        _safe_print(f'🚩 Total likely hallucinated: {flagged_count}')
+    _safe_print(f'❓ Total unverified: {checker.total_unverified_refs}')
     if checker.used_unreliable_extraction and checker.total_errors_found > 5:
         _safe_print(f'\nResults might be affected by incorrect reference extraction. Consider using LLM extraction.')
     if checker.verification_output_file:
@@ -1712,3 +1511,5 @@ def _extract_json_payload(text: str) -> Any:
                 continue
 
     return json.loads(candidate)
+
+

@@ -3,7 +3,7 @@
 ``ArticleAssistant`` answers questions and produces summaries ONLY from a
 single delimited document block supplied at call time. It clones the provider
 chat-call paths (``_init_openai`` / ``_init_anthropic`` / ``_init_google`` plus
-``_call_*_chat``) from ``refchecker.llm.hallucination_verifier`` so the same
+``_call_*_chat``) used elsewhere so the same
 configured providers (OpenAI / Azure / vLLM, Anthropic, Google) work here.
 
 Honesty constraints (by construction):
@@ -18,7 +18,7 @@ Honesty constraints (by construction):
 
 Top-level imports are kept stdlib-pure so this module can be imported and unit
 tested without the heavy ``refchecker`` runtime deps; ``resolve_api_key`` /
-``resolve_endpoint`` / ``DEFAULT_HALLUCINATION_MODELS`` are imported lazily.
+``resolve_endpoint`` / ``DEFAULT_EXTRACTION_MODELS`` are imported lazily.
 """
 
 from __future__ import annotations
@@ -85,8 +85,8 @@ class ArticleAssistant:
     """Grounded chat + summarize over a single article's text.
 
     Supports OpenAI / Azure / vLLM (OpenAI client), Anthropic, and Google.
-    Mirrors ``LLMHallucinationVerifier`` init + chat-call paths but uses plain
-    chat completions (no web search) since answers must stay grounded in the
+    Uses the configured provider clients with plain chat completions because
+    answers must stay grounded in the
     supplied document only.
     """
 
@@ -113,9 +113,9 @@ class ArticleAssistant:
             from refchecker.config.settings import (
                 resolve_api_key,
                 resolve_endpoint,
-                DEFAULT_HALLUCINATION_MODELS,
+                DEFAULT_EXTRACTION_MODELS,
             )
-            default_models = DEFAULT_HALLUCINATION_MODELS
+            default_models = DEFAULT_EXTRACTION_MODELS
         except Exception:  # pragma: no cover - exercised only without deps
             resolve_api_key = lambda _p: None  # noqa: E731
             resolve_endpoint = lambda _p: None  # noqa: E731
@@ -155,7 +155,7 @@ class ArticleAssistant:
             logger.warning('Failed to init ArticleAssistant: %s', exc)
 
     # ------------------------------------------------------------------
-    # Provider init (cloned from hallucination_verifier)
+    # Provider initialization
     # ------------------------------------------------------------------
 
     def _init_openai(self) -> None:
@@ -286,7 +286,7 @@ class ArticleAssistant:
     def _record_usage(self, provider: str, response: Any) -> None:
         """Best-effort token tracking; never breaks the chat call.
 
-        Records into BOTH meters, mirroring the hallucination + extraction
+        Records into both usage meters, mirroring the extraction
         paths: the process-wide ``backend.usage_tracker`` (global totals) and
         the per-check ``refchecker.llm.usage_tracker`` (drives the on-screen
         token/$ badge for this check). ``flow`` is ``chat`` or ``summarize`` so

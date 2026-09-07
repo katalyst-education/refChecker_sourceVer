@@ -3,6 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   multiuser: false,
+  authRequired: false,
+  authProviders: [],
+  authUser: { is_admin: true },
+  loginWithGoogle: vi.fn(),
+  loginWithGithub: vi.fn(),
+  loginWithMicrosoft: vi.fn(),
+  authLogout: vi.fn(),
   hasKey: vi.fn(),
   setKey: vi.fn(),
   deleteKey: vi.fn(),
@@ -27,8 +34,8 @@ const mocks = vi.hoisted(() => ({
   getPaperclipKeyStatus: vi.fn(),
   setPaperclipKey: vi.fn(),
   deletePaperclipKey: vi.fn(),
-  getAIDetectionModelStatus: vi.fn(),
-  checkAIDetectionModelUpdate: vi.fn(),
+  getAuthConfig: vi.fn(),
+  setAuthConfig: vi.fn(),
   getDatabaseStatus: vi.fn(),
   getAuthenticatedSourceSession: vi.fn(() => Promise.resolve({ data: { active: false } })),
   closeAuthenticatedSourceSession: vi.fn(() => Promise.resolve({ data: { closed: true } })),
@@ -55,7 +62,16 @@ vi.mock('../../stores/useKeyStore', () => ({
 }))
 
 vi.mock('../../stores/useAuthStore', () => ({
-  useAuthStore: (selector) => selector({ multiuser: mocks.multiuser, user: { is_admin: true } }),
+  useAuthStore: (selector) => selector({
+    multiuser: mocks.multiuser,
+    authRequired: mocks.authRequired,
+    providers: mocks.authProviders,
+    user: mocks.authUser,
+    loginWithGoogle: mocks.loginWithGoogle,
+    loginWithGithub: mocks.loginWithGithub,
+    loginWithMicrosoft: mocks.loginWithMicrosoft,
+    logout: mocks.authLogout,
+  }),
 }))
 
 vi.mock('../Sidebar/LLMSelector', () => ({
@@ -81,10 +97,8 @@ vi.mock('../../utils/api', () => ({
   getPaperclipKeyStatus: mocks.getPaperclipKeyStatus,
   setPaperclipKey: mocks.setPaperclipKey,
   deletePaperclipKey: mocks.deletePaperclipKey,
-  getAIDetectionModelStatus: mocks.getAIDetectionModelStatus,
-  checkAIDetectionModelUpdate: mocks.checkAIDetectionModelUpdate,
-  downloadAIDetectionModel: vi.fn(),
-  deleteAIDetectionModel: vi.fn(),
+  getAuthConfig: mocks.getAuthConfig,
+  setAuthConfig: mocks.setAuthConfig,
   getDatabaseStatus: mocks.getDatabaseStatus,
   getAuthenticatedSourceSession: mocks.getAuthenticatedSourceSession,
   closeAuthenticatedSourceSession: mocks.closeAuthenticatedSourceSession,
@@ -95,7 +109,6 @@ vi.mock('../../utils/logger', () => ({
 }))
 
 import SettingsPanel from './SettingsPanel'
-import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 
 async function saveSemanticScholarKey() {
   render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
@@ -121,6 +134,9 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.multiuser = false
+    mocks.authRequired = false
+    mocks.authProviders = []
+    mocks.authUser = { is_admin: true }
     mocks.hasKey.mockReturnValue(false)
     mocks.getSemanticScholarKeyStatus.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
     mocks.validateSemanticScholarKey.mockResolvedValue({ data: { valid: true } })
@@ -140,25 +156,10 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
     mocks.getPaperclipKeyStatus.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
     mocks.setPaperclipKey.mockResolvedValue({ data: { has_key: true, storage: 'database' } })
     mocks.deletePaperclipKey.mockResolvedValue({ data: { has_key: false, storage: 'database' } })
-    mocks.getAIDetectionModelStatus.mockResolvedValue({
-      data: {
-        installed: true,
-        deps_available: true,
-        cpu_available: true,
-        cuda_available: true,
-        cuda_device_name: 'NVIDIA Test GPU',
-        size_bytes: 1024,
-        repo: 'desklib/test',
-      },
+    mocks.getAuthConfig.mockResolvedValue({
+      data: { multiuser_configured: false, multiuser_active: false, needs_restart: false, providers: {} },
     })
-    mocks.checkAIDetectionModelUpdate.mockResolvedValue({ data: { update_available: false } })
-    useAiDetectionStore.setState({
-      enabled: true,
-      backend: 'local',
-      device: 'cpu',
-      modelStatus: null,
-      modelError: null,
-    })
+    mocks.setAuthConfig.mockResolvedValue({ data: { ok: true } })
   })
 
   it('shows and closes the reusable authenticated browser session', async () => {
@@ -172,6 +173,14 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
 
     await waitFor(() => expect(mocks.closeAuthenticatedSourceSession).toHaveBeenCalled())
     expect(screen.getByText('No authenticated source browser is currently open.')).toBeInTheDocument()
+  })
+
+  it('renders Accounts & Teams section in single-user mode without crashing', async () => {
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Accounts & Teams' }))
+
+    expect(await screen.findByText(/You're in single-user mode\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save (keep single-user)' })).toBeInTheDocument()
   })
 
   it('updates the Google Books magazine fallback option', async () => {
@@ -256,18 +265,6 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
 
     expect(mocks.setPaperclipKey).toHaveBeenCalledWith('pc-key')
     expect(mocks.deleteKey).toHaveBeenCalledWith('paperclip')
-  })
-
-  it('persists the selected local AI-detection compute device', async () => {
-    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'AI Detection' }))
-
-    const selector = await screen.findByLabelText('Compute device')
-    await waitFor(() => expect(screen.getByRole('option', { name: /NVIDIA Test GPU/ })).toBeEnabled())
-    fireEvent.change(selector, { target: { value: 'cuda' } })
-
-    expect(useAiDetectionStore.getState().device).toBe('cuda')
-    expect(selector).toHaveValue('cuda')
   })
 
   it('shows server environment keys as active for all sessions in multi-user mode', async () => {

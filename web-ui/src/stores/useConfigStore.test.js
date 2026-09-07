@@ -24,7 +24,6 @@ describe('useConfigStore', () => {
     expect(result.current.configs).toEqual([])
     expect(result.current.selectedConfigId).toBeNull()
     expect(result.current.selectedExtractionConfigId).toBeNull()
-    expect(result.current.selectedHallucinationConfigId).toBeNull()
     expect(result.current.isLoading).toBe(false)
   })
 
@@ -78,9 +77,7 @@ describe('useConfigStore', () => {
     const { result } = renderHook(() => useConfigStore())
 
     expect(typeof result.current.selectExtractionConfig).toBe('function')
-    expect(typeof result.current.selectHallucinationConfig).toBe('function')
     expect(typeof result.current.getSelectedExtractionConfig).toBe('function')
-    expect(typeof result.current.getSelectedHallucinationConfig).toBe('function')
   })
 
   // R34 — Chat-with-PDF and Summarize have independent model selections.
@@ -165,36 +162,4 @@ describe('useConfigStore', () => {
     expect(result.current.selectedChatConfigId).toBe(1)
   })
 
-  it('does not change extraction selection when adding a hallucination config', async () => {
-    const api = await import('../utils/api')
-    api.createLLMConfig.mockResolvedValueOnce({
-      data: { id: 9, provider: 'google', model: 'gemini-3.1-flash-lite-preview' },
-    })
-    const { useConfigStore } = await import('./useConfigStore')
-    const { result } = renderHook(() => useConfigStore())
-
-    act(() => {
-      useConfigStore.setState({
-        configs: [
-          { id: 7, provider: 'anthropic', model: 'claude-sonnet-4-6' },
-          { id: 8, provider: 'openai', model: 'gpt-4.1' },
-        ],
-        selectedConfigId: 7,
-        selectedExtractionConfigId: 7,
-        selectedHallucinationConfigId: 8,
-      })
-    })
-
-    await act(async () => {
-      await result.current.addConfig(
-        { provider: 'google', model: 'gemini-3.1-flash-lite-preview' },
-        { selectFor: 'hallucination' },
-      )
-    })
-
-    expect(result.current.selectedConfigId).toBe(7)
-    expect(result.current.selectedExtractionConfigId).toBe(7)
-    expect(result.current.selectedHallucinationConfigId).toBe(9)
-    expect(api.setDefaultLLMConfig).not.toHaveBeenCalledWith(9)
-  })
 })

@@ -8,9 +8,6 @@ These lock the backend accounting that drives the on-screen ``LLMUsageBadge``:
   * ``article_chat`` (chat + summarize) now records into the per-check meter so
     follow-up spend ticks the badge up live — previously it only hit the
     process-global tracker and the badge stayed flat;
-  * REGRESSION for the previously-$0 hallucination path: the verifier's usage
-    helper records real provider tokens under flow ``hallucination`` so the
-    badge no longer shows ``$0.000`` after "Halluc checked N".
 
 Honesty: only real provider-returned token counts are recorded; a zero-token
 response records nothing (no fabricated cost).
@@ -175,45 +172,3 @@ def test_chat_without_check_id_does_not_pollute_default_bucket():
     assistant.summarize("text", source="pdf")
     assert usage_tracker.snapshot("default")["calls"] == 0
 
-
-# --------------------------------------------------------------------------- #
-# 3. REGRESSION — the previously-$0 hallucination path now records real cost.  #
-# --------------------------------------------------------------------------- #
-
-def test_hallucination_usage_records_under_hallucination_flow():
-    """The hallucination verifier's usage helper must push real provider tokens
-    into the per-check meter under flow 'hallucination' — the screenshot case
-    where the badge showed $0.000 after "Halluc checked N"."""
-    cid = "909"
-    usage_tracker.reset(cid)
-    usage_tracker.set_current_check(cid)
-
-    from refchecker.llm import providers
-    resp = _FakeOpenAIResponse("VERDICT: UNLIKELY", prompt_tokens=2500, completion_tokens=180)
-    with usage_tracker.FlowScope("hallucination"):
-        providers._track_openai_usage(resp, "gpt-4o-mini")
-
-    snap = usage_tracker.snapshot(cid)
-    assert "hallucination" in snap["by_flow"]
-    assert snap["by_flow"]["hallucination"]["input_tokens"] == 2500
-    assert snap["by_flow"]["hallucination"]["output_tokens"] == 180
-    # The regression: cost is now non-zero, not $0.000.
-    assert snap["by_flow"]["hallucination"]["cost_usd"] > 0
-    assert snap["cost_usd"] > 0
-
-
-def test_hallucination_verifier_helper_attributes_to_current_check():
-    """End-to-end through the verifier's own ``_record_hallucination_usage``
-    helper (the function every hallucination LLM call invokes)."""
-    cid = "910"
-    usage_tracker.reset(cid)
-    usage_tracker.set_current_check(cid)
-
-    hv = importlib.import_module("refchecker.llm.hallucination_verifier")
-    resp = _FakeOpenAIResponse("VERDICT: LIKELY", prompt_tokens=1500, completion_tokens=90)
-    with usage_tracker.FlowScope("hallucination"):
-        hv._record_hallucination_usage("openai", "gpt-4o-mini", resp)
-
-    snap = usage_tracker.snapshot(cid)
-    assert snap["by_flow"]["hallucination"]["input_tokens"] == 1500
-    assert snap["cost_usd"] > 0

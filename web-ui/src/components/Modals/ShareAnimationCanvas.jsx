@@ -21,11 +21,10 @@ import { forwardRef, useEffect, useRef } from 'react'
 const C = {
   bg: '#0f1117', fg: '#f3f4f6', muted: '#9aa0ad',
   verified: '#22c55e', warning: '#f59e0b', error: '#ef4444', accent: '#10a37f',
-  ai: '#ef4444', mixed: '#f59e0b', human: '#22c55e',
 }
 const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 
-const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, stats = {}, aiBand, aiScore, height = 248, loop = false }, fwdRef) {
+const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, stats = {}, height = 248, loop = false }, fwdRef) {
   const ref = useRef(null)
   const rafRef = useRef(0)
   const startRef = useRef(0)
@@ -54,14 +53,11 @@ const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, s
     // ---- Layout — every element is placed relative to a fixed padding and the
     // real canvas height, so nothing overlaps or clips regardless of `height`.
     const PAD = 22
-    const hasAi = !!aiBand && aiBand !== 'unavailable' && aiBand !== 'inconclusive'
     const headerY = PAD + 6          // "RefChecker" brand baseline
     const titleY = headerY + 28      // document title baseline
-    const aiRowH = hasAi ? 26 : 0    // reserved space for the AI footer row
-    // The content band (gauge + chips) sits between the title and the AI row,
-    // vertically centred so it never collides with either.
+    // The content band sits below the title and is vertically centred.
     const bandTop = titleY + 14
-    const bandBottom = H - PAD - aiRowH
+    const bandBottom = H - PAD
     const bandMidY = (bandTop + bandBottom) / 2
     // Gauge: radius derived from the available band height so it always fits.
     const gaugeR = Math.max(34, Math.min(56, (bandBottom - bandTop) / 2 - 6))
@@ -77,8 +73,6 @@ const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, s
     const total = Math.max(0, stats.total || 0)
     const verified = stats.verified || 0
     const verFrac = total ? Math.min(1, verified / total) : 0
-    const bandColor = aiBand === 'high' ? C.ai : aiBand === 'medium' ? C.mixed : C.human
-    const aiPct = typeof aiScore === 'number' ? Math.round(aiScore * 100) : null
 
     const gauge = (cx, cy, r, frac, color, label, sub) => {
       ctx.lineWidth = 10
@@ -136,17 +130,6 @@ const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, s
         ctx.fillText(c[1], chipLblX, y - 1)
         ctx.globalAlpha = 1
       })
-
-      // AI-text likelihood footer (only when there's a real, conclusive band)
-      if (hasAi) {
-        const s4 = ease(Math.max(0, Math.min(1, (t - 0.66) / 0.3))); ctx.globalAlpha = s4
-        const yAi = H - PAD - 6
-        ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.font = '13px -apple-system,Segoe UI,Roboto,sans-serif'
-        ctx.fillText('AI-text likelihood', PAD, yAi)
-        ctx.fillStyle = bandColor; ctx.font = '700 15px -apple-system,Segoe UI,Roboto,sans-serif'
-        ctx.fillText(`${aiBand.toUpperCase()}${aiPct != null ? ` · ${aiPct}` : ''}`, PAD + 132, yAi)
-        ctx.globalAlpha = 1
-      }
       // R23: once a single pass has completed, hold the final frame and STOP
       // the rAF loop — the canvas stays mounted so the banner never blanks.
       if (!loop && t >= 1) {
@@ -158,7 +141,7 @@ const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, s
     }
     rafRef.current = requestAnimationFrame(frame)
     return () => { cancelAnimationFrame(rafRef.current); startRef.current = 0 }
-  }, [title, stats, aiBand, aiScore, height, loop])
+  }, [title, stats, height, loop])
 
   return (
     <canvas
@@ -171,3 +154,5 @@ const ShareAnimationCanvas = forwardRef(function ShareAnimationCanvas({ title, s
 })
 
 export default ShareAnimationCanvas
+
+

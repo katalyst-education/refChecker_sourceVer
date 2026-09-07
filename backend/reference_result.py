@@ -172,7 +172,6 @@ def project_verification_result(
         "enrichment": enrichment,
         "publication_year_assessment": verified.get("_publication_year_assessment"),
         "corrected_reference": None,
-        "hallucination_assessment": None,
         "citation_contexts": cited.get("citation_contexts") or [],
         "citation_context": cited.get("citation_context"),
         "citation_count": cited.get("citation_count") or 0,
@@ -205,8 +204,8 @@ VERIFICATION_DERIVED_FIELDS = frozenset({
     "authoritative_urls", "matched_database", "matched_db", "evidence_reconciliation",
     "verification_basis",
     "supporting_evidence", "verified_via_website", "enrichment",
-    "publication_year_assessment", "corrected_reference", "hallucination_assessment",
-    "hallucination_check_pending", "_raw_errors", "from_cache", "from_fuzzy_cache",
+    "publication_year_assessment", "corrected_reference",
+    "_raw_errors", "from_cache", "from_fuzzy_cache",
     "fuzzy_match_score", "verified_title", "verified_authors", "verified_year",
     "verified_venue", "verified_doi", "verified_arxiv_id", "verified_pmid",
 })

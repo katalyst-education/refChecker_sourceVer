@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   addReferenceToCheck,
   removeReferenceFromCheck,
-  suggestAlternativeReference,
   startReferenceSearch,
   startReferenceVerification,
   cancelReferenceSearch,
@@ -67,15 +66,14 @@ export default function useReferenceActions() {
   const selectedCheckId = useHistoryStore(s => s.selectedCheckId)
   const referenceSearches = useReferenceSearchStore(state => state.operations)
   const registerReferenceSearch = useReferenceSearchStore(state => state.register)
-  // Per-action in-flight tracking, so Re-verify and Suggest-alternative
-  // (and Remove) on the same row don't clobber each other's busy
+  // Per-action in-flight tracking, so Re-verify and Remove on the same row
+  // don't clobber each other's busy
   // indicators when the user fires them concurrently (#18). Each Set
   // holds the row idents currently running that action.
   // Map each row to the re-verification action currently running. Keeping the
   // action type lets the card explain whether it is re-extracting the document
   // or searching all configured databases.
   const [reverifyBusy, setReverifyBusy] = useState(() => new Map())
-  const [suggestBusy, setSuggestBusy] = useState(() => new Set())
   const [removeBusy, setRemoveBusy] = useState(() => new Set())
   // Global busy slot: '__add__' while Add-reference is in flight,
   // '__restore__' during Undo, null otherwise. Kept separate from the
@@ -83,10 +81,6 @@ export default function useReferenceActions() {
   const [globalBusy, setGlobalBusy] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [newRef, setNewRef] = useState(EMPTY_NEW)
-  const [suggestFor, setSuggestFor] = useState(null)
-  // Track the most-recently-started Suggest so a slow earlier request
-  // can't clobber the panel after the user moved on to a newer one.
-  const latestSuggestRef = useRef(null)
   // Session-local "trash" so the user can Undo a removal. Scoped to the
   // currently-selected check — switching checks discards the trash.
   const [removedRefs, setRemovedRefs] = useState([])
@@ -272,28 +266,6 @@ export default function useReferenceActions() {
 
   const clearRemovedRefs = () => setRemovedRefs([])
 
-  const handleSuggestAlt = async (ref, i) => {
-    if (!selectedCheckId) return
-    const ident = referenceRowIdentity(ref, i)
-    const apiRefId = toApiReferenceId(ref, i)
-    enterBusy(setSuggestBusy, ident)
-    latestSuggestRef.current = ident
-    try {
-      const res = await suggestAlternativeReference(selectedCheckId, apiRefId)
-      // Discard the result if the user has since started a newer Suggest
-      // (e.g. clicked Suggest on a different row while this one was slow).
-      // Without this, a slower earlier response can overwrite the panel
-      // the user is actively reading.
-      if (latestSuggestRef.current === ident) {
-        setSuggestFor({ ref_id: ident, candidates: res.data?.candidates || [] })
-      }
-    } catch (e) {
-      alert(e?.response?.data?.detail || e?.message || 'Suggest failed')
-    } finally {
-      leaveBusy(setSuggestBusy, ident)
-    }
-  }
-
   const handleReverify = async (ref, i, opts = {}) => {
     if (!selectedCheckId) return
     const ident = referenceRowIdentity(ref, i)
@@ -408,7 +380,6 @@ export default function useReferenceActions() {
 
   const getReverifyAction = (ident) => reverifyBusy.get(String(ident)) || null
   const isReverifying = (ident) => !!getReverifyAction(ident)
-  const isSuggesting = (ident) => suggestBusy.has(String(ident))
   const isRemoving = (ident) => removeBusy.has(String(ident))
 
   return {
@@ -419,11 +390,8 @@ export default function useReferenceActions() {
     setShowAdd,
     newRef,
     setNewRef,
-    suggestFor,
-    setSuggestFor,
     handleAddRef,
     handleRemoveRef,
-    handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
     getReferenceSearchOperation,
@@ -435,7 +403,6 @@ export default function useReferenceActions() {
     clearRemovedRefs,
     getReverifyAction,
     isReverifying,
-    isSuggesting,
     isRemoving,
   }
 }

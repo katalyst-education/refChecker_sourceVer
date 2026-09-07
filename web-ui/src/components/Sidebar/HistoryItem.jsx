@@ -86,7 +86,6 @@ const HistoryItem = memo(function HistoryItem({ item, isSelected, compact = fals
   const refsWithWarningsOnly = summaryCounts.references.warnings
   const refsWithSuggestionsOnly = summaryCounts.references.suggestions
   const unverifiedCount = summaryCounts.references.unverified
-  const hallucinationCount = summaryCounts.references.hallucinated
 
   const handleClick = () => {
     if (!isEditing && !isSelected) {
@@ -190,10 +189,6 @@ const HistoryItem = memo(function HistoryItem({ item, isSelected, compact = fals
     // Build combined status from all issue types
     const parts = []
     let color = 'var(--color-success)'
-    if (hallucinationCount > 0) {
-      parts.push(`${hallucinationCount} hallucinated`)
-      color = 'var(--color-hallucination)'
-    }
     if (refsWithErrors > 0) {
       parts.push(`${countLabel(refsWithErrors, 'ref')} with errors`)
       if (color === 'var(--color-success)') color = 'var(--color-error)'
@@ -349,18 +344,8 @@ const HistoryItem = memo(function HistoryItem({ item, isSelected, compact = fals
                     <span className="ml-0.5">{unverifiedCount}</span>
                   </span>
                 )}
-                {hallucinationCount > 0 && (
-                  <span className="flex items-center flex-shrink-0" style={{ color: 'var(--color-hallucination)' }} title={countLabel(hallucinationCount, 'likely hallucinated ref')}>
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
-                      <circle cx="12" cy="12" r="10" />
-                      <path d="M12 4v10M10 6l2-2 2 2" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-                      <circle cx="12" cy="17.5" r="1.2" fill="#fff" />
-                    </svg>
-                    <span className="ml-0.5">{hallucinationCount}</span>
-                  </span>
-                )}
                 {/* Green check only when completed with no issues at all */}
-                {!isInProgress && refsWithErrors === 0 && refsWithWarningsOnly === 0 && refsWithSuggestionsOnly === 0 && unverifiedCount === 0 && hallucinationCount === 0 && item.status === 'completed' && (
+                {!isInProgress && refsWithErrors === 0 && refsWithWarningsOnly === 0 && refsWithSuggestionsOnly === 0 && unverifiedCount === 0 && item.status === 'completed' && (
                   <svg className="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" style={{ color: 'var(--color-success)' }} title="All references verified">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                   </svg>

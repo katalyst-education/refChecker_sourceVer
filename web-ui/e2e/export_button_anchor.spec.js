@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test';
 // wherever the pointer was about to click.
 //
 // The trigger is the width of the header's left-hand group: with the
-// "Extracted: Regex/LLM | Halluc checked" chip present (the normal case for a
+// Extraction-method chip present (the normal case for a completed check),
 // real check) the row is close enough to full that adding the "Filtered: …"
 // chip tips the control group onto a second line, where justify-between
 // left-aligns it. So this measures real boxes in a real browser across a range
@@ -89,9 +89,9 @@ async function runCompletedCheck(page, emit, sessionId, checkId, totalRefs) {
   const counts = {
     total_refs: totalRefs, processed_refs: totalRefs,
     errors_count: 3, warnings_count: 3, suggestions_count: 0, unverified_count: 3,
-    hallucination_count: 0, verified_count: 3,
+    verified_count: 3,
     refs_with_errors: 3, refs_with_warnings_only: 3, refs_verified: 3,
-    extraction_method: 'llm', llm_count: totalRefs, regex_count: 0, hallucination_llm_count: 4,
+    extraction_method: 'llm', llm_count: totalRefs, regex_count: 0,
     llm_tokens: 123456, llm_cost: 1.234,
   };
   await emit(sessionId, { type: 'summary_update', ...counts });
@@ -102,7 +102,6 @@ async function runCompletedCheck(page, emit, sessionId, checkId, totalRefs) {
   await expect(page.getByTitle('Export results')).toBeVisible();
   // The wide per-stage chip must actually be on screen, or this test would
   // silently stop reproducing the condition.
-  await expect(page.getByText(/Halluc checked/)).toBeVisible();
 }
 
 test('applying a filter never moves the Summary export button', async ({ page }) => {

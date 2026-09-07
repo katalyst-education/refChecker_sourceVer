@@ -119,8 +119,6 @@ def render_banner(version: str, stream=None) -> str:
     width = shutil.get_terminal_size((80, 24)).columns
 
     # Capability probes (cheap — no heavy imports).
-    ai_runtime = _module_available("torch") or _module_available("onnxruntime")
-    transformers = _module_available("transformers")
     llm_libs = _module_available("openai") or _module_available("anthropic") or _module_available("google")
     py = platform.python_version()
     osname = f"{platform.system()} {platform.release()}".strip()
@@ -138,8 +136,7 @@ def render_banner(version: str, stream=None) -> str:
         lines.append("  " + c.bold(c.cyan("RefChecker")))
     lines.append("")
     lines.append(
-        f"  {c.dim('academic reference verification')}  {c.green('+')}  "
-        f"{c.dim('AI-text detection')}   {c.green('v' + str(version))}"
+        f"  {c.dim('academic reference verification')}   {c.green('v' + str(version))}"
     )
     lines.append("")
     lines.append(
@@ -155,13 +152,6 @@ def render_banner(version: str, stream=None) -> str:
     lines.append(_cmd(c, "--openreview", "fetch + scan an entire OpenReview venue"))
     lines.append("")
 
-    # ── AI-text detection ──
-    lines.append(_section(c, "AI-text detection", "opt-in, advisory — never proof of misconduct"))
-    lines.append(_cmd(c, "local", f"{_ok(ai_runtime and transformers, c)} desklib DeBERTa — offline & calibrated (download in Settings)"))
-    lines.append(_cmd(c, "llm-judge", "reuse your configured LLM provider (uncalibrated)"))
-    lines.append(_cmd(c, "external", "Pangram / GPTZero — key + explicit consent"))
-    lines.append("")
-
     # ── Output ──
     lines.append(_section(c, "Output"))
     lines.append(_cmd(c, "--report-file", "structured report — json · jsonl · csv · text"))
@@ -174,8 +164,7 @@ def render_banner(version: str, stream=None) -> str:
         f"    {c.dim('python')} {c.white(py)}  {c.dim('·')}  {c.white(osname)} {c.dim('(' + arch + ')')}"
     )
     lines.append(
-        f"    {c.dim('runtime')}  {_ok(ai_runtime, c)} torch/onnx   "
-        f"{_ok(transformers, c)} transformers   {_ok(llm_libs, c)} llm sdks"
+        f"    {c.dim('runtime')}  {_ok(llm_libs, c)} llm sdks"
     )
     lines.append(
         "    " + c.dim("sources  Semantic Scholar · OpenAlex · Crossref · DBLP · "

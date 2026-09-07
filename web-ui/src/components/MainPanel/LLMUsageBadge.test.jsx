@@ -17,7 +17,7 @@ const SNAPSHOT = {
   cost_usd: 0.0151,
   calls: 4,
   by_flow: {
-    hallucination: { input_tokens: 2000, output_tokens: 150, cost_usd: 0.009, calls: 1 },
+    extract: { input_tokens: 2000, output_tokens: 150, cost_usd: 0.009, calls: 1 },
     chat: { input_tokens: 800, output_tokens: 300, cost_usd: 0.004, calls: 2 },
     summarize: { input_tokens: 600, output_tokens: 150, cost_usd: 0.0021, calls: 1 },
   },
@@ -44,13 +44,11 @@ describe('LLMUsageBadge — R47 live token + $ telemetry', () => {
     expect(getLLMUsage).toHaveBeenCalledWith(CHECK_ID)
   })
 
-  it('hover breakdown labels chat + summarize + hallucination flows', async () => {
+  it('hover breakdown labels extraction, chat, and summarize flows', async () => {
     render(<LLMUsageBadge checkId={CHECK_ID} isComplete />)
     await screen.findByText('4.0K tok')
     fireEvent.mouseEnter(screen.getByText('LLM').parentElement)
-    // The previously-$0 hallucination flow now shows under its label.
-    expect(await screen.findByText('Hallucination check')).toBeInTheDocument()
-    // The newly-tracked chat + summarize flows are labelled too (R47).
+    expect(await screen.findByText('Reference extraction')).toBeInTheDocument()
     expect(screen.getByText('Chat with article')).toBeInTheDocument()
     expect(screen.getByText('Article summary')).toBeInTheDocument()
   })

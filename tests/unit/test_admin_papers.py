@@ -57,7 +57,6 @@ async def _insert_check(db, **kwargs):
         "errors_count": 1,
         "warnings_count": 1,
         "unverified_count": 1,
-        "hallucination_count": 0,
         "refs_with_errors": 1,
         "refs_with_warnings_only": 1,
         "suggestions_count": 0,
@@ -196,7 +195,7 @@ class TestStatsComeFromTheLatestCheck:
                 total_refs=10,
                 refs_verified=2,
                 errors_count=8,
-                hallucination_count=4,
+                unverified_count=4,
             )
         )
         _run(
@@ -207,7 +206,7 @@ class TestStatsComeFromTheLatestCheck:
                 total_refs=10,
                 refs_verified=10,
                 errors_count=0,
-                hallucination_count=0,
+                unverified_count=0,
             )
         )
 
@@ -216,7 +215,7 @@ class TestStatsComeFromTheLatestCheck:
         assert paper["checks"] == 2
         assert paper["refs_verified"] == 10
         assert paper["errors"] == 0
-        assert paper["hallucinations"] == 0
+        assert paper["unverified"] == 0
         assert paper["verified_rate"] == 100.0
 
     def test_latest_check_id_is_the_newest_row(self, admin_db):

@@ -20,13 +20,7 @@ import {
 import { buildReferenceSummary } from '../../utils/referenceStatus'
 
 /**
- * Per-stage extraction breakdown chip — Regex / LLM / Hallucination LLM.
- *
- * Reads `stats.regex_count` / `stats.llm_count` / `stats.hallucination_llm_count`
- * (emitted by the backend in summary_update events) when present, and falls
- * back to deriving the values from `references` for older check records
- * that don't carry the new fields. Hides when we have nothing useful to
- * show (zero refs, or a cache hit where the original stage is unknown).
+ * Per-stage extraction breakdown for deterministic and LLM extraction.
  */
 function PerStageChip({ stats, references }) {
   const refs = Array.isArray(references) ? references : []
@@ -41,12 +35,9 @@ function PerStageChip({ stats, references }) {
   const llm = typeof stats?.llm_count === 'number'
     ? stats.llm_count
     : (stats?.extraction_method === 'llm' ? total : 0)
-  const hallucLlm = typeof stats?.hallucination_llm_count === 'number'
-    ? stats.hallucination_llm_count
-    : refs.filter(r => r?.hallucination_assessment?.source).length
 
   if (total === 0) return null
-  if (regex === 0 && llm === 0 && hallucLlm === 0) return null
+  if (regex === 0 && llm === 0) return null
 
   return (
     <span
@@ -56,14 +47,7 @@ function PerStageChip({ stats, references }) {
         background: 'var(--color-bg-tertiary)',
         color: 'var(--color-text-secondary)',
       }}
-      title={
-        "Extraction: how many references the deterministic parser " +
-        "(BibTeX / .bbl / regex) handled vs the LLM extractor.\n\n" +
-        "Hallucination check: how many references the hallucination-" +
-        "verifier LLM actually ran on (only the ones flagged as " +
-        "possibly fabricated by the cheap pre-screen — verified refs " +
-        "skip this stage)."
-      }
+      title="References extracted by deterministic parsers versus the configured LLM."
     >
       <span style={{ color: 'var(--color-text-muted)' }}>Extracted:</span>
       <span>
@@ -74,11 +58,6 @@ function PerStageChip({ stats, references }) {
       <span>
         <span style={{ color: 'var(--color-text-secondary)' }}>LLM </span>
         <span style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>{llm}</span>
-      </span>
-      <span style={{ opacity: 0.4, margin: '0 4px' }}>|</span>
-      <span>
-        <span style={{ color: 'var(--color-text-secondary)' }}>Halluc checked </span>
-        <span style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>{hallucLlm}</span>
       </span>
     </span>
   )
@@ -152,12 +131,6 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
       color: 'var(--color-text-muted)',
       bgColor: 'var(--color-bg-tertiary)',
     },
-    hallucination: {
-      id: 'hallucination',
-      label: 'Hallucinated',
-      color: 'var(--color-hallucination)',
-      bgColor: 'var(--color-hallucination-bg)',
-    },
   }
 
   const handleFilterClick = (filterId) => {
@@ -227,7 +200,6 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
   const refsWithSuggestionsOnly = summaryCounts.references.suggestions
   const refsVerified = summaryCounts.references.verified
   const refsUnverified = summaryCounts.references.unverified
-  const refsHallucinated = summaryCounts.references.hallucinated
   const processedRefs = summaryCounts.processedRefs
   const totalRefs = summaryCounts.totalRefs
 
@@ -240,14 +212,12 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
     { ...allFilters.warning, value: refsWithWarningsOnly },
     { ...allFilters.suggestion, value: refsWithSuggestionsOnly },
     { ...allFilters.unverified, value: refsUnverified },
-    { ...allFilters.hallucination, value: refsHallucinated },
   ]
   const isVerifiedSelected = statusFilter.includes('verified')
   const isErrorSelected = statusFilter.includes('error')
   const isWarningSelected = statusFilter.includes('warning')
   const isSuggestionSelected = statusFilter.includes('suggestion')
   const isUnverifiedSelected = statusFilter.includes('unverified')
-  const isHallucinationSelected = statusFilter.includes('hallucination')
 
   // Base filename for exports
   const baseFilename = `refchecker-${(paperTitle || 'report').replace(/[^a-z0-9]/gi, '_').substring(0, 50)}`
@@ -265,7 +235,6 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
       refs_with_warnings_only: summaryCounts.references?.warnings ?? 0,
       refs_with_suggestions_only: summaryCounts.references?.suggestions ?? 0,
       unverified_count: summaryCounts.references?.unverified ?? 0,
-      hallucination_count: summaryCounts.references?.hallucinated ?? 0,
       errors_count: summaryCounts.issues?.errors ?? 0,
       warnings_count: summaryCounts.issues?.warnings ?? 0,
       suggestions_count: summaryCounts.issues?.suggestions ?? 0,
@@ -358,10 +327,7 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
           )}
           {healthBadge}
           {usageChip}
-          {/* Per-stage extraction breakdown — surfaces which stage of
-              the cascade produced the references and how many got the
-              hallucination LLM treatment. Hidden when we have no data
-              (cache hits / pre-#11 checks). */}
+          {/* Per-stage extraction breakdown. */}
           <PerStageChip stats={stats} references={references} />
         </div>
         {/* Right side controls */}
@@ -627,28 +593,6 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
           </button>
         )}
 
-        {/* Hallucinated - only show if > 0 */}
-        {refsHallucinated > 0 && (
-          <button
-            onClick={() => handleFilterClick('hallucination')}
-            className="flex items-center gap-1 px-2 py-1 rounded border transition-colors cursor-pointer"
-            style={{ 
-              backgroundColor: (isHallucinationSelected || hoveredChip === 'hallucination') ? 'var(--color-hallucination-bg)' : 'transparent',
-              borderColor: isHallucinationSelected ? 'var(--color-hallucination)' : 'transparent',
-            }}
-            onMouseEnter={() => setHoveredChip('hallucination')}
-            onMouseLeave={() => setHoveredChip(prev => (prev === 'hallucination' ? null : prev))}
-            title={`${countLabel(refsHallucinated, 'reference')} likely hallucinated`}
-          >
-            <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="10" fill="var(--color-hallucination)" />
-              <path d="M12 4v10M10 6l2-2 2 2" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              <circle cx="12" cy="17.5" r="1.2" fill="#fff" />
-            </svg>
-            <span className="text-sm font-bold" style={{ color: 'var(--color-hallucination)' }}>{refsHallucinated}</span>
-          </button>
-        )}
-
         {/* Separator and total */}
         <span className="text-xs px-1" style={{ color: 'var(--color-text-muted)' }}>of {processedRefs}</span>
       </div>
@@ -708,3 +652,4 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
     </div>
   )
 }
+

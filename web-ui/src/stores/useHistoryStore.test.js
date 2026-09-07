@@ -72,7 +72,7 @@ describe('useHistoryStore', () => {
     act(() => {
       result.current.updateHistoryReference(42, 1, {
         title: 'Updated ref',
-        status: 'hallucination',
+        status: 'unverified',
         errors: [{ error_type: 'unverified' }],
       })
     })
@@ -83,7 +83,7 @@ describe('useHistoryStore', () => {
     expect(updated.results[1]).toMatchObject({
       index: 1,
       title: 'Updated ref',
-      status: 'hallucination',
+      status: 'unverified',
     })
   })
 

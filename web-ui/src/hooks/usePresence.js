@@ -48,7 +48,6 @@ function routeBatchRoomEvent(msg, seen) {
       warnings_count: msg.warnings_count,
       suggestions_count: msg.suggestions_count,
       unverified_count: msg.unverified_count,
-      hallucination_count: msg.hallucination_count || 0,
       verified_count: msg.verified_count,
       refs_with_errors: msg.refs_with_errors,
       refs_with_warnings_only: msg.refs_with_warnings_only,

@@ -10,7 +10,7 @@ checker's findings with its own inline logic that folded `warning_type` into
     output shown through the normal batch flow was correctly an error.
   * every finding was written to `errors` and `warnings` was hard-coded to `[]`,
     so a warning-only reference rendered the *error* icon (precedence is
-    hallucination > error > warning) while its own status said "warning".
+    error > warning > verified/unverified) while its own status said "warning".
 
 Both routes now share `backend.reference_status`.
 """

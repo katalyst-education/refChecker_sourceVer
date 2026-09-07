@@ -23,8 +23,6 @@
   --color-link: #2563eb;
   --color-suggestion: #8b5cf6;
   --color-suggestion-bg: #f5f3ff;
-  --color-hallucination: #dc6b1d;
-  --color-hallucination-bg: #fff7ed;
   /* Previously referenced-but-undefined tokens (were falling back to hardcoded
      values in MainPanel/UserMenu/LoginPage). */
   --color-text-tertiary: #9aa0ad;
@@ -105,8 +103,6 @@
   --color-link: #60a5fa;
   --color-suggestion: #a78bfa;
   --color-suggestion-bg: #2e1f4d;
-  --color-hallucination: #fb923c;
-  --color-hallucination-bg: #431c07;
   --color-text-tertiary: #8b8b96;
   --color-accent-muted: rgba(16, 163, 127, 0.18);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 12px rgba(0, 0, 0, 0.4);

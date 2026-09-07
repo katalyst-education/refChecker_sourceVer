@@ -9,7 +9,7 @@ import { getLLMUsage } from '../../utils/api'
  * Resets to 0 on every new check_id (controlled by the backend
  * accumulator that fires `usage_tracker.reset(check_id)` at the top of
  * each `check_paper`). Hover surfaces a breakdown by flow
- * (extract / verify / hallucination / suggest / graph / reverify) plus a
+ * (extract / verify / graph / reverify) plus a
  * by-model split when the cascade used more than one provider.
  *
  * Polls every ~3s while the check is in progress so the badge ticks up
@@ -20,12 +20,10 @@ import { getLLMUsage } from '../../utils/api'
 const FLOW_LABEL = {
   extract: 'Reference extraction',
   verify: 'Reference verification',
-  hallucination: 'Hallucination check',
   suggest: 'Suggested alternatives',
   graph: 'Citation graph',
   reverify: 'Re-verify',
   context: 'Inline citation contexts',
-  ai_detection: 'AI-generated-text detection',
   chat: 'Chat with article',
   summarize: 'Article summary',
   other: 'Other LLM calls',
@@ -151,7 +149,7 @@ export default function LLMUsageBadge({ checkId, isComplete }) {
               isComplete ? (
                 <>This check used <strong>0</strong> LLM tokens — every reference was resolved deterministically (Crossref / arXiv / Semantic Scholar) without paid LLM calls.</>
               ) : (
-                <>Waiting for the first LLM call to land. The badge ticks live as extraction / verification / hallucination flows record usage.</>
+                <>Waiting for the first LLM call to land. The badge ticks live as extraction and verification record usage.</>
               )
             ) : (
               <>This check used <strong>{fmtTokens(totalTokens)}</strong> tokens

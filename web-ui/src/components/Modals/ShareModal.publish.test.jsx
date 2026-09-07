@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // add suggested corrections) were only ever applied to the DOWNLOAD. Both
 // publish paths — "Publish to web" and "Quick link" — called publishCheck with
 // nothing but the adapter/token, so the server re-rendered the full default
-// report. A user who unchecked "AI-text detection" and published a link still
-// published the AI section. Nothing reported the discrepancy.
+// report. A user who unchecked a section and published a link still received
+// the full default report. Nothing reported the discrepancy.
 
 vi.mock('./ShareAnimationCanvas', () => ({
   default: () => <div data-testid="share-video" />,
@@ -24,7 +24,7 @@ vi.mock('../../utils/api', () => ({
   publishCheck: (...a) => publishCheck(...a),
 }))
 
-const checkState = { references: [], aiDetection: null, stats: {} }
+const checkState = { references: [], stats: {} }
 vi.mock('../../stores/useCheckStore', () => {
   const useCheckStore = (selector) => (selector ? selector(checkState) : checkState)
   useCheckStore.getState = () => checkState
@@ -57,7 +57,6 @@ beforeEach(() => {
     selectedCheck: {
       status: 'completed',
       references,
-      ai_detection: { band: 'high', overall_score: 0.9 },
     },
   }
   styleState = { format: 'ieee' }
@@ -78,14 +77,14 @@ const uncheck = (label) => {
 describe('publish paths carry the dialog’s report options', () => {
   it('quick link sends the selected sections', async () => {
     open()
-    uncheck('AI-text detection')
+    uncheck('Issues to address')
     fireEvent.click(screen.getByText('Quick link'))
 
     await waitFor(() => expect(publishCheck).toHaveBeenCalled())
     const [, opts] = publishCheck.mock.calls[0]
     expect(opts.adapter).toBe('quick_link')
     expect(opts.include).toBeTruthy()
-    expect(opts.include.split(',')).not.toContain('ai')
+    expect(opts.include.split(',')).not.toContain('issues')
     expect(opts.include.split(',')).toContain('references')
   })
 

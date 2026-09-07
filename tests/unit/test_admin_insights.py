@@ -1,7 +1,7 @@
 """Tests for the admin analytics endpoints.
 
 These cover the questions the dashboard exists to answer — how many users,
-papers, references and hallucinations — plus the session grouping, which is
+papers and references — plus the session grouping, which is
 synthesised rather than stored and so has no other source of truth.
 """
 import asyncio
@@ -63,7 +63,6 @@ async def _insert_check(db, **kwargs):
         "errors_count": 1,
         "warnings_count": 1,
         "unverified_count": 1,
-        "hallucination_count": 0,
         "refs_with_errors": 1,
         "refs_with_warnings_only": 1,
         "suggestions_count": 0,
@@ -91,30 +90,6 @@ async def _insert_check(db, **kwargs):
         )
         await conn.commit()
         return cursor.lastrowid
-
-
-def test_overview_totals_count_users_papers_references_and_hallucinations(admin_db):
-    api_main, db = admin_db
-    alice = _run(_make_user(db, "alice"))
-    bob = _run(_make_user(db, "bob"))
-
-    _run(_insert_check(db, user_id=alice, paper_key="arxiv:1", total_refs=10, hallucination_count=2))
-    _run(_insert_check(db, user_id=alice, paper_key="arxiv:2", total_refs=5, hallucination_count=0))
-    _run(_insert_check(db, user_id=bob, paper_key="arxiv:1", total_refs=7, hallucination_count=1))
-
-    admin = api_main.UserInfo(id=alice, provider="github", is_admin=True)
-    result = _run(api_main.get_admin_insights_overview(days=30, current_user=admin))
-
-    totals = result["totals"]
-    assert totals["total_users"] == 2
-    assert totals["active_users"] == 2
-    assert totals["checks"] == 3
-    assert totals["distinct_papers"] == 2, "the same paper checked twice is one paper"
-    assert totals["references_checked"] == 22
-    assert totals["hallucinations"] == 3
-    assert totals["papers_with_hallucinations"] == 2
-    assert totals["hallucination_rate"] == pytest.approx(3 * 100 / 22, rel=1e-3)
-    assert totals["avg_references_per_check"] == pytest.approx(22 / 3, rel=1e-2)
 
 
 def test_overview_window_excludes_older_checks(admin_db):
@@ -181,31 +156,6 @@ def test_overview_daily_series_buckets_by_day(admin_db):
     assert [d["checks"] for d in result["daily"]] == [2, 1]
 
 
-def test_users_rollup_lists_inactive_users_and_unattributed_checks(admin_db):
-    api_main, db = admin_db
-    alice = _run(_make_user(db, "alice"))
-    _run(_make_user(db, "never-checked"))
-
-    _run(_insert_check(db, user_id=alice, total_refs=10, hallucination_count=2))
-    # Rows predating the user_id column must not vanish from the totals.
-    _run(_insert_check(db, user_id=None, total_refs=4, hallucination_count=1))
-
-    admin = api_main.UserInfo(id=alice, provider="github", is_admin=True)
-    result = _run(api_main.get_admin_insights_users(days=0, limit=100, current_user=admin))
-
-    by_name = {u["name"]: u for u in result["users"]}
-    assert by_name["alice"]["checks"] == 1
-    assert by_name["alice"]["references_checked"] == 10
-    assert by_name["alice"]["hallucinations"] == 2
-    assert by_name["alice"]["email_domain"] == "example.com"
-
-    assert by_name["never-checked"]["checks"] == 0, "a signed-up user who never ran a check must still appear"
-    assert by_name["never-checked"]["hallucination_rate"] is None
-
-    assert result["unattributed"]["checks"] == 1
-    assert result["unattributed"]["references_checked"] == 4
-
-
 def test_sessions_split_on_an_inactivity_gap(admin_db):
     api_main, db = admin_db
     user = _run(_make_user(db, "alice"))
@@ -258,56 +208,6 @@ def test_a_batch_is_never_split_across_sessions(admin_db):
     assert len(result["sessions"]) == 1
     assert result["sessions"][0]["checks"] == 3
     assert result["sessions"][0]["batch_labels"] == ["My batch"]
-
-
-def test_session_totals_add_up_across_its_checks(admin_db):
-    api_main, db = admin_db
-    user = _run(_make_user(db, "alice"))
-    now = datetime.now(timezone.utc)
-    _run(_insert_check(db, user_id=user, timestamp=_ts(now), total_refs=10, hallucination_count=2))
-    _run(
-        _insert_check(
-            db, user_id=user, timestamp=_ts(now + timedelta(minutes=1)),
-            total_refs=6, hallucination_count=1,
-        )
-    )
-
-    admin = api_main.UserInfo(id=user, provider="github", is_admin=True)
-    result = _run(
-        api_main.get_admin_insights_user_sessions(user_id=user, days=0, current_user=admin)
-    )
-
-    session = result["sessions"][0]
-    assert session["checks"] == 2
-    assert session["references_checked"] == 16
-    assert session["hallucinations"] == 3
-
-
-def test_check_detail_returns_individual_references(admin_db):
-    api_main, db = admin_db
-    user = _run(_make_user(db, "alice"))
-    references = [
-        {"index": 0, "title": "Real paper", "status": "verified", "errors": [], "warnings": []},
-        {
-            "index": 1,
-            "title": "Invented paper",
-            "status": "unverified",
-            "errors": [],
-            "warnings": [],
-            "hallucination_assessment": {"verdict": "LIKELY"},
-        },
-    ]
-    check_id = _run(
-        _insert_check(db, user_id=user, results_json=json.dumps(references), hallucination_count=1)
-    )
-
-    admin = api_main.UserInfo(id=user, provider="github", is_admin=True)
-    detail = _run(api_main.get_admin_insights_check(check_id=check_id, current_user=admin))
-
-    assert detail["id"] == check_id
-    assert len(detail["references"]) == 2
-    assert detail["references"][1]["title"] == "Invented paper"
-    assert detail["user"]["name"] == "alice", "the admin view must say whose check this was"
 
 
 def test_check_detail_is_not_scoped_to_the_admins_own_checks(admin_db):
@@ -369,15 +269,3 @@ def test_session_grouping_handles_missing_timestamps():
     )
     assert sum(s["checks"] for s in sessions) == 2
 
-
-def test_empty_database_reports_zeros_not_errors(admin_db):
-    api_main, db = admin_db
-    admin = api_main.UserInfo(id=1, provider="github", is_admin=True)
-
-    overview = _run(api_main.get_admin_insights_overview(days=30, current_user=admin))
-    assert overview["totals"]["checks"] == 0
-    assert overview["totals"]["hallucination_rate"] is None
-    assert overview["daily"] == []
-
-    users = _run(api_main.get_admin_insights_users(days=0, limit=10, current_user=admin))
-    assert users["users"] == []

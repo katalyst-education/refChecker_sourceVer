@@ -130,7 +130,7 @@ def record(
 ) -> None:
     """Add one LLM call to the accumulator.
 
-    `flow` is one of: extract | verify | hallucination | suggest | graph |
+    `flow` is one of: extract | verify | suggest | graph |
     reverify | other. Anything not recognised is bucketed under 'other'.
     """
     if input_tokens <= 0 and output_tokens <= 0:

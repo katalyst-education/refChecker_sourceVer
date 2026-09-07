@@ -298,89 +298,19 @@ def get_logs_dir() -> Path:
     return log_dir
 
 
-_FINAL_REFERENCE_STATUSES = {"error", "warning", "suggestion", "unverified", "verified", "hallucination"}
 
-
-def _normalize_for_metadata_comparison(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
-
-
-def _normalize_author_tokens(value: Any) -> List[str]:
-    return [token for token in _normalize_for_metadata_comparison(value).split(" ") if token]
-
-
-def _parse_found_authors(value: Any) -> List[str]:
-    text = str(value or "").strip()
-    if not text or text.upper() == "NONE":
-        return []
-    separator = ";" if ";" in text else ","
-    return [author.strip() for author in text.split(separator) if author.strip()]
-
-
-def _author_matches(cited_author: Any, found_author: Any) -> bool:
-    cited_tokens = _normalize_author_tokens(cited_author)
-    found_tokens = _normalize_author_tokens(found_author)
-    if not cited_tokens or not found_tokens:
-        return False
-
-    cited_last = cited_tokens[-1]
-    found_last = found_tokens[-1]
-    if cited_last != found_last:
-        return False
-
-    cited = " ".join(cited_tokens)
-    found = " ".join(found_tokens)
-    if cited == found or cited in found or found in cited:
-        return True
-
-    cited_given_tokens = [token for token in cited_tokens[:-1] if len(token) > 1]
-    found_given_tokens = {token for token in found_tokens[:-1] if len(token) > 1}
-    return any(token in found_given_tokens for token in cited_given_tokens)
-
-
-def _authors_substantially_match(cited_authors: Any, found_authors_text: Any) -> bool:
-    cited = [author for author in (cited_authors or []) if author]
-    found = _parse_found_authors(found_authors_text)
-    if not cited or not found:
-        return False
-
-    matched_count = sum(
-        1 for cited_author in cited
-        if any(_author_matches(cited_author, found_author) for found_author in found)
-    )
-    required_matches = len(cited) - 1 if len(cited) >= 3 else len(cited)
-    return matched_count >= required_matches
-
-
-def _llm_found_metadata_matches_citation(ref: Dict[str, Any]) -> bool:
-    assessment = ref.get("hallucination_assessment") or {}
-    return (
-        assessment.get("verdict") == "LIKELY"
-        and bool(assessment.get("link"))
-        and _normalize_for_metadata_comparison(assessment.get("found_title"))
-            == _normalize_for_metadata_comparison(ref.get("title"))
-        and _authors_substantially_match(ref.get("authors"), assessment.get("found_authors"))
-        and (not ref.get("year") or str(ref.get("year")) in str(assessment.get("found_year") or ""))
-    )
+_FINAL_REFERENCE_STATUSES = {"error", "warning", "suggestion", "unverified", "verified"}
 
 
 def _get_effective_reference_status(ref: Dict[str, Any], is_complete: bool) -> str:
     base_status = str(ref.get("status") or "").strip().lower()
-    llm_match = _llm_found_metadata_matches_citation(ref)
-
-    if ref.get("hallucination_check_pending") and not ref.get("hallucination_assessment"):
-        return "checking"
-    if base_status == "hallucination" and llm_match:
-        return "verified"
-    if base_status == "hallucination":
-        return "hallucination"
-    if llm_match:
-        return "suggestion" if ref.get("suggestions") else "verified"
-
     errors = ref.get("errors") or []
     warnings = ref.get("warnings") or []
     suggestions = ref.get("suggestions") or []
-    has_errors = any(str((error or {}).get("error_type") or "").lower() != "unverified" for error in errors)
+    has_errors = any(
+        str((error or {}).get("error_type") or "").lower() != "unverified"
+        for error in errors
+    )
     if has_errors:
         return "error"
     if warnings:
@@ -401,44 +331,14 @@ def _compute_reference_buckets_from_results(
     is_complete: bool,
     stored_total_refs: Optional[int] = None,
 ) -> Dict[str, int]:
-    """Compute summary counters from stored check results.
-
-    This mirrors ``web-ui/src/utils/referenceStatus.js`` so history cards and
-    the selected-check Summary render the same numbers even if persisted
-    aggregate columns are stale from an older run.
-
-    ``processed_refs`` is the count of distinct, non-pending reference results
-    actually present in ``results``. The persisted ``total_refs`` column is an
-    EARLY estimate (taken right after the first extraction); de-dup / merge /
-    re-extraction can land MORE references than that estimate, which made
-    ``processed_refs`` exceed ``total_refs`` and the UI render >100% ("28/23 ·
-    122%"). We therefore also return a reconciled ``total_refs`` that is never
-    below ``processed_refs`` — the real final count — so progress can never
-    overshoot. When ``stored_total_refs`` is None we fall back to
-    ``processed_refs`` as the total.
-    """
-    errors_count = 0
-    warnings_count = 0
-    suggestions_count = 0
-    refs_with_errors = 0
-    refs_with_warnings_only = 0
-    refs_with_suggestions_only = 0
-    unverified_count = 0
-    hallucination_count = 0
-    refs_verified = 0
+    """Compute display and persistence counters from reference results."""
     latest_results_by_citation: Dict[str, Dict[str, Any]] = {}
-
     for fallback_index, ref in enumerate(ensure_reference_uids(results)):
         if not isinstance(ref, dict):
             continue
         status = str(ref.get("status") or "").strip().lower()
         if not status or status in {"pending", "checking", "in_progress", "queued", "processing", "started"}:
             continue
-        # Incremental persistence can contain multiple snapshots of the same
-        # citation. Collapse only rows that share BOTH the printed index and
-        # cited metadata; two different works with the same index remain two
-        # references. This preserves the old pending->final update semantics
-        # without assuming that citation numbers themselves are unique.
         cited_identity = {
             key: ref.get(key)
             for key in _REFERENCE_UID_FIELDS
@@ -446,76 +346,67 @@ def _compute_reference_buckets_from_results(
         }
         citation_key = json.dumps(
             {"index": ref.get("index"), "cited": cited_identity},
-            sort_keys=True, ensure_ascii=False, default=str,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
             separators=(",", ":"),
         )
         if not cited_identity and ref.get("index") is None:
             citation_key = f"fallback:{fallback_index}"
         latest_results_by_citation[citation_key] = ref
 
+    counters = {
+        "errors_count": 0,
+        "warnings_count": 0,
+        "suggestions_count": 0,
+        "refs_with_errors": 0,
+        "refs_with_warnings_only": 0,
+        "refs_with_suggestions_only": 0,
+        "unverified_count": 0,
+        "verified_count": 0,
+        "refs_verified": 0,
+    }
     for ref in latest_results_by_citation.values():
-        status = str(ref.get("status") or "").strip().lower()
         effective_status = _get_effective_reference_status(ref, is_complete)
-        llm_match = _llm_found_metadata_matches_citation(ref)
-        assessment = ref.get("hallucination_assessment") or {}
-        likely_hallucinated = assessment.get("verdict") == "LIKELY" and not llm_match
         errors = ref.get("errors") or []
         warnings = ref.get("warnings") or []
         suggestions = ref.get("suggestions") or []
-
-        if effective_status != "hallucination" and not llm_match:
-            errors_count += sum(
-                1 for error in errors
-                if str((error or {}).get("error_type") or "").lower() != "unverified"
-            )
-            warnings_count += len(warnings)
-        if effective_status != "hallucination":
-            suggestions_count += len(suggestions)
-
+        counters["errors_count"] += sum(
+            1 for error in errors
+            if str((error or {}).get("error_type") or "").lower() != "unverified"
+        )
+        counters["warnings_count"] += len(warnings)
+        counters["suggestions_count"] += len(suggestions)
         if effective_status == "error":
-            refs_with_errors += 1
+            counters["refs_with_errors"] += 1
         elif effective_status == "warning":
-            refs_with_warnings_only += 1
+            counters["refs_with_warnings_only"] += 1
         elif effective_status == "suggestion":
-            refs_with_suggestions_only += 1
-
+            counters["refs_with_suggestions_only"] += 1
         if (
-            effective_status in {"unverified", "hallucination"}
+            effective_status == "unverified"
             or (
                 effective_status != "checking"
-                and any(str((error or {}).get("error_type") or "").lower() == "unverified" for error in errors)
+                and any(
+                    str((error or {}).get("error_type") or "").lower() == "unverified"
+                    for error in errors
+                )
             )
-            or likely_hallucinated
         ):
-            unverified_count += 1
-        if effective_status == "hallucination" or likely_hallucinated:
-            hallucination_count += 1
+            counters["unverified_count"] += 1
         if effective_status in {"verified", "suggestion"}:
-            refs_verified += 1
+            counters["refs_verified"] += 1
+            counters["verified_count"] += 1
 
     processed_refs = len(latest_results_by_citation)
-    # Reconcile the total against the REAL processed count so progress never
-    # exceeds 100%. The stored total is an early extraction estimate; the
-    # actual reference set can be larger after de-dup/merge/re-extraction.
     try:
-        _stored_total = int(stored_total_refs) if stored_total_refs is not None else 0
+        stored_total = int(stored_total_refs) if stored_total_refs is not None else 0
     except (TypeError, ValueError):
-        _stored_total = 0
-    reconciled_total_refs = max(_stored_total, processed_refs)
-
+        stored_total = 0
     return {
         "processed_refs": processed_refs,
-        "total_refs": reconciled_total_refs,
-        "errors_count": errors_count,
-        "warnings_count": warnings_count,
-        "suggestions_count": suggestions_count,
-        "refs_with_errors": refs_with_errors,
-        "refs_with_warnings_only": refs_with_warnings_only,
-        "refs_with_suggestions_only": refs_with_suggestions_only,
-        "unverified_count": unverified_count,
-        "hallucination_count": hallucination_count,
-        "verified_count": refs_verified,
-        "refs_verified": refs_verified,
+        "total_refs": max(stored_total, processed_refs),
+        **counters,
     }
 
 
@@ -573,12 +464,9 @@ class Database:
                     refs_with_errors INTEGER DEFAULT 0,
                     refs_with_warnings_only INTEGER DEFAULT 0,
                     refs_verified INTEGER DEFAULT 0,
-                    hallucination_count INTEGER DEFAULT 0,
                     results_json TEXT,
                     llm_provider TEXT,
                     llm_model TEXT,
-                    hallucination_provider TEXT,
-                    hallucination_model TEXT,
                     extraction_method TEXT,
                     status TEXT DEFAULT 'completed',
                     team_id INTEGER REFERENCES teams(id)
@@ -856,12 +744,6 @@ class Database:
             await db.execute("ALTER TABLE check_history ADD COLUMN original_filename TEXT")
         if "user_id" not in columns:
             await db.execute("ALTER TABLE check_history ADD COLUMN user_id INTEGER REFERENCES users(id)")
-        if "hallucination_count" not in columns:
-            await db.execute("ALTER TABLE check_history ADD COLUMN hallucination_count INTEGER DEFAULT 0")
-        if "hallucination_provider" not in columns:
-            await db.execute("ALTER TABLE check_history ADD COLUMN hallucination_provider TEXT")
-        if "hallucination_model" not in columns:
-            await db.execute("ALTER TABLE check_history ADD COLUMN hallucination_model TEXT")
         if "started_at" not in columns:
             await db.execute("ALTER TABLE check_history ADD COLUMN started_at DATETIME")
         if "completed_at" not in columns:
@@ -890,16 +772,6 @@ class Database:
             await db.execute("ALTER TABLE check_history ADD COLUMN cancel_reason TEXT")
         if "batch_size" not in columns:
             await db.execute("ALTER TABLE check_history ADD COLUMN batch_size INTEGER")
-        # AI-generated-text detection (opt-in). The full result blob lives in
-        # ai_detection_json (for the single-check detail view); score + band
-        # are promoted to scalar columns so batch aggregation — which reads
-        # scalar columns, not the JSON blob — can tally per-paper bands.
-        if "ai_detection_json" not in columns:
-            await db.execute("ALTER TABLE check_history ADD COLUMN ai_detection_json TEXT")
-        if "ai_detection_score" not in columns:
-            await db.execute("ALTER TABLE check_history ADD COLUMN ai_detection_score REAL")
-        if "ai_detection_band" not in columns:
-            await db.execute("ALTER TABLE check_history ADD COLUMN ai_detection_band TEXT")
         # Team-scoped sharing (issue #66 / R26). A check (and therefore its
         # batch) can be shared with one team; non-null means members of that
         # team may read it in addition to the owner. Nullable so single-user
@@ -974,8 +846,7 @@ class Database:
                        refs_with_errors = ?,
                        refs_with_warnings_only = ?,
                        refs_with_suggestions_only = ?,
-                       refs_verified = ?,
-                       hallucination_count = ?
+                       refs_verified = ?
                  WHERE id = ?
                 """,
                 (
@@ -988,7 +859,6 @@ class Database:
                     buckets["refs_with_warnings_only"],
                     buckets["refs_with_suggestions_only"],
                     buckets["refs_verified"],
-                    buckets["hallucination_count"],
                     check_id,
                 ),
             )
@@ -1195,7 +1065,6 @@ class Database:
                          llm_provider: Optional[str] = None,
                          llm_model: Optional[str] = None,
                          extraction_method: Optional[str] = None,
-                         hallucination_count: int = 0,
                          refs_with_suggestions_only: int = 0) -> int:
         """Save a check result to database"""
         results = ensure_reference_uids(results)
@@ -1205,8 +1074,8 @@ class Database:
                 (paper_title, paper_source, source_type, total_refs, errors_count, warnings_count,
                  suggestions_count, unverified_count, refs_with_errors, refs_with_warnings_only,
                  refs_with_suggestions_only,
-                 refs_verified, hallucination_count, results_json, llm_provider, llm_model, extraction_method)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 refs_verified, results_json, llm_provider, llm_model, extraction_method)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 paper_title,
                 paper_source,
@@ -1220,7 +1089,6 @@ class Database:
                 refs_with_warnings_only,
                 refs_with_suggestions_only,
                 refs_verified,
-                hallucination_count,
                 json.dumps(results),
                 llm_provider,
                 llm_model,
@@ -1251,12 +1119,11 @@ class Database:
             select_cols = (
                 "id, paper_title, paper_source, custom_label, timestamp, "
                 "total_refs, errors_count, warnings_count, suggestions_count, unverified_count, "
-                "hallucination_count, "
                 "refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified, "
-                "llm_provider, llm_model, hallucination_provider, hallucination_model, "
+                "llm_provider, llm_model, "
                 "status, source_type, batch_id, batch_label, "
                 "bibliography_source_kind, original_filename, results_json, "
-                "ai_detection_json, ai_detection_score, ai_detection_band"
+                "status"
             )
             if user_id is not None:
                 query = f"""
@@ -1281,18 +1148,6 @@ class Database:
                 for row in rows:
                     item = dict(row)
                     raw_results = item.pop('results_json', None)
-                    raw_ai_detection = item.pop('ai_detection_json', None)
-                    item.setdefault('refs_with_suggestions_only', 0)
-                    if raw_ai_detection:
-                        try:
-                            parsed_ai_detection = json.loads(raw_ai_detection)
-                        except (ValueError, TypeError):
-                            parsed_ai_detection = None
-                        if isinstance(parsed_ai_detection, dict):
-                            # Match get_check_by_id's public response shape so
-                            # a history row and its detail response hydrate the
-                            # AI panel identically after a page reload.
-                            item['ai_detection'] = parsed_ai_detection
                     # v0.7.65: recompute display stats from results_json
                     # so processed_refs / unverified_count reflect the
                     # actual reference array (the persisted aggregate
@@ -1372,11 +1227,6 @@ class Database:
                             ))
                     if result.get('issue_type_counts_json'):
                         result['issue_type_counts'] = json.loads(result['issue_type_counts_json'])
-                    if result.get('ai_detection_json'):
-                        try:
-                            result['ai_detection'] = json.loads(result['ai_detection_json'])
-                        except (ValueError, TypeError):
-                            pass
                     return result
                 return None
 
@@ -1425,8 +1275,6 @@ class Database:
                                     source_type: str,
                                     llm_provider: Optional[str] = None,
                                     llm_model: Optional[str] = None,
-                                    hallucination_provider: Optional[str] = None,
-                                    hallucination_model: Optional[str] = None,
                                     batch_id: Optional[str] = None,
                                     batch_label: Optional[str] = None,
                                     original_filename: Optional[str] = None,
@@ -1444,18 +1292,16 @@ class Database:
                 INSERT INTO check_history
                 (paper_title, paper_source, source_type, total_refs, errors_count, warnings_count,
                  suggestions_count, unverified_count, results_json, llm_provider, llm_model,
-                 hallucination_provider, hallucination_model, status,
+                 status,
                  batch_id, batch_label, original_filename, user_id, started_at, input_bytes,
                  source_host, paper_identifier_type, paper_identifier_value, paper_key, batch_size)
-                VALUES (?, ?, ?, 0, 0, 0, 0, 0, '[]', ?, ?, ?, ?, 'in_progress', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, 0, 0, 0, 0, 0, '[]', ?, ?, 'in_progress', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 paper_title,
                 paper_source,
                 source_type,
                 llm_provider,
                 llm_model,
-                hallucination_provider,
-                hallucination_model,
                 batch_id,
                 batch_label,
                 original_filename,
@@ -1485,7 +1331,6 @@ class Database:
                                     results: List[Dict[str, Any]],
                                     status: str = 'completed',
                                     extraction_method: Optional[str] = None,
-                                    hallucination_count: int = 0,
                                     completed_at: Optional[str] = None,
                                     duration_ms: Optional[int] = None,
                                     paper_identifier_type: Optional[str] = None,
@@ -1495,8 +1340,7 @@ class Database:
                                     cache_hit: Optional[bool] = None,
                                     bibliography_source_kind: Optional[str] = None,
                                     failure_class: Optional[str] = None,
-                                    refs_with_suggestions_only: int = 0,
-                                    ai_detection: Optional[Dict[str, Any]] = None) -> bool:
+                                    refs_with_suggestions_only: int = 0) -> bool:
         """Update a check with its results. If paper_title is None, don't update it."""
         results = ensure_reference_uids(results)
         async with aiosqlite.connect(self.db_path) as db:
@@ -1513,7 +1357,6 @@ class Database:
                 "warnings_count = ?",
                 "suggestions_count = ?",
                 "unverified_count = ?",
-                "hallucination_count = ?",
                 "refs_with_errors = ?",
                 "refs_with_warnings_only = ?",
                 "refs_with_suggestions_only = ?",
@@ -1528,7 +1371,6 @@ class Database:
                 warnings_count,
                 suggestions_count,
                 unverified_count,
-                hallucination_count,
                 refs_with_errors,
                 refs_with_warnings_only,
                 refs_with_suggestions_only,
@@ -1565,13 +1407,6 @@ class Database:
             if failure_class is not None:
                 updates.append("failure_class = ?")
                 params.append(failure_class)
-            if ai_detection is not None:
-                updates.append("ai_detection_json = ?")
-                params.append(json.dumps(ai_detection))
-                updates.append("ai_detection_score = ?")
-                params.append(ai_detection.get("overall_score"))
-                updates.append("ai_detection_band = ?")
-                params.append(ai_detection.get("band"))
 
             params.append(check_id)
             await db.execute(
@@ -1641,7 +1476,6 @@ class Database:
                                      warnings_count: int,
                                      suggestions_count: int,
                                      unverified_count: int,
-                                     hallucination_count: int = 0,
                                      refs_with_errors: int = 0,
                                      refs_with_warnings_only: int = 0,
                                      refs_verified: int = 0,
@@ -1658,7 +1492,7 @@ class Database:
             await db.execute("""
                 UPDATE check_history
                 SET total_refs = ?, errors_count = ?, warnings_count = ?,
-                    suggestions_count = ?, unverified_count = ?, hallucination_count = ?,
+                    suggestions_count = ?, unverified_count = ?,
                     refs_with_errors = ?,
                     refs_with_warnings_only = ?,
                     refs_with_suggestions_only = ?,
@@ -1670,7 +1504,6 @@ class Database:
                 warnings_count,
                 suggestions_count,
                 unverified_count,
-                hallucination_count,
                 refs_with_errors,
                 refs_with_warnings_only,
                 refs_with_suggestions_only,
@@ -1763,7 +1596,7 @@ class Database:
         A row is stale when either:
           • its references are all in (processed >= total_refs > 0) — the run
             finished the work but never wrote the terminal status (the classic
-            "59/43 stuck forever" symptom, where the AI-detection await or a
+            "59/43 stuck forever" symptom, where a background task or a
             server restart killed run_check between the last ref and the
             'completed' emit); OR
           • its last-activity timestamp is older than ``stale_after_seconds``
@@ -1820,7 +1653,7 @@ class Database:
             await db.execute("PRAGMA busy_timeout=5000")
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, total_refs, results_json, ai_detection_json, "
+                "SELECT id, total_refs, results_json, "
                 "COALESCE(completed_at, started_at, timestamp) AS last_activity "
                 "FROM check_history WHERE status = 'in_progress'"
             ) as cursor:
@@ -1857,9 +1690,6 @@ class Database:
         died before producing any usable result). Writes ``completed_at``, a
         ``cancel_reason`` of ``reason``, and the recomputed aggregate count
         columns so history cards/Summary render correct numbers. If
-        AI-detection was never attached, marks it ``unavailable`` so the FE
-        stops waiting for an analysis that will never arrive.
-
         Idempotent and race-safe: returns ``None`` (no-op) if the row is not
         (or no longer) ``in_progress`` — so it can never clobber a check that
         a concurrent live run just finalized, or downgrade an already-terminal
@@ -1868,7 +1698,7 @@ class Database:
             await db.execute("PRAGMA busy_timeout=5000")
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT status, total_refs, results_json, ai_detection_json "
+                "SELECT status, total_refs, results_json "
                 "FROM check_history WHERE id = ?",
                 (check_id,),
             ) as cursor:
@@ -1907,7 +1737,6 @@ class Database:
                 "warnings_count = ?",
                 "suggestions_count = ?",
                 "unverified_count = ?",
-                "hallucination_count = ?",
                 "refs_with_errors = ?",
                 "refs_with_warnings_only = ?",
                 "refs_with_suggestions_only = ?",
@@ -1922,25 +1751,12 @@ class Database:
                 buckets["warnings_count"],
                 buckets["suggestions_count"],
                 buckets["unverified_count"],
-                buckets["hallucination_count"],
                 buckets["refs_with_errors"],
                 buckets["refs_with_warnings_only"],
                 buckets["refs_with_suggestions_only"],
                 buckets["refs_verified"],
             ]
 
-            # AI detection never attached → record an honest 'unavailable' so a
-            # polling FE stops waiting for an analysis the dead run never made.
-            if not (row["ai_detection_json"] or "").strip():
-                try:
-                    from refchecker.ai_detection.base import make_unavailable
-                    ai_payload = make_unavailable("reconciled", "local").to_dict()
-                except Exception:  # noqa: BLE001 — ai_detection is optional
-                    ai_payload = {"status": "unavailable", "reason": "reconciled"}
-                updates.append("ai_detection_json = ?")
-                params.append(json.dumps(ai_payload))
-                updates.append("ai_detection_band = ?")
-                params.append(ai_payload.get("band"))
 
             params.append(check_id)
             await db.execute(
@@ -2867,7 +2683,6 @@ class Database:
         warnings_count = sum(len(r.get("warnings") or []) for r in results)
         suggestions_count = sum(len(r.get("suggestions") or []) for r in results)
         unverified_count = sum(1 for r in results if r.get("status") == "unverified")
-        hallucination_count = sum(1 for r in results if r.get("status") == "hallucinated" or (r.get("hallucination_assessment") or {}).get("verdict", "").upper() == "LIKELY")
 
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout=5000")
@@ -2875,7 +2690,7 @@ class Database:
                 json.dumps(results, default=str),
                 total, errors_count, warnings_count, suggestions_count, unverified_count,
                 refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only,
-                refs_verified, hallucination_count,
+                refs_verified,
                 check_id,
             ]
             if user_id is None:
@@ -2883,7 +2698,7 @@ class Database:
                     """UPDATE check_history SET results_json = ?, total_refs = ?, errors_count = ?,
                        warnings_count = ?, suggestions_count = ?, unverified_count = ?,
                        refs_with_errors = ?, refs_with_warnings_only = ?, refs_with_suggestions_only = ?,
-                       refs_verified = ?, hallucination_count = ?
+                       refs_verified = ?
                        WHERE id = ?""",
                     params,
                 )
@@ -2893,7 +2708,7 @@ class Database:
                     """UPDATE check_history SET results_json = ?, total_refs = ?, errors_count = ?,
                        warnings_count = ?, suggestions_count = ?, unverified_count = ?,
                        refs_with_errors = ?, refs_with_warnings_only = ?, refs_with_suggestions_only = ?,
-                       refs_verified = ?, hallucination_count = ?
+                       refs_verified = ?
                        WHERE id = ? AND user_id = ?""",
                     params,
                 )
@@ -3080,7 +2895,7 @@ class Database:
             return None
         status = ref.get("status") or ""
         # Cache every ref the user has checked, regardless of verdict.
-        # Previously hallucinated/error refs were skipped — but the user
+        # Previously error refs were skipped — but the user
         # wants to see EVERYTHING that has flowed through a check, so the
         # Seen Refs library doubles as a curation log. The status column
         # records the verdict; the UI can filter by status to hide
@@ -3360,7 +3175,7 @@ class Database:
         verified for that title previously. Returns one entry per
         cached row that matched the title but disagreed on at least one
         identifying field. Each entry carries the diffs so the FE can
-        render them as a "potential mismatch / hallucination" signal.
+        render them as a "potential mismatch" signal.
 
         Title match is normalized prefix LIKE (case-insensitive,
         non-alphanumeric stripped) to catch typos and punctuation
@@ -3809,12 +3624,10 @@ class Database:
             query = """
                 SELECT id, paper_title, paper_source, custom_label, timestamp,
                        total_refs, errors_count, warnings_count, suggestions_count, unverified_count,
-                       hallucination_count,
                        refs_with_errors, refs_with_warnings_only, refs_verified,
-                      llm_provider, llm_model, hallucination_provider, hallucination_model,
+                      llm_provider, llm_model,
                       status, source_type, batch_id, batch_label,
-                      bibliography_source_kind, original_filename,
-                      ai_detection_score, ai_detection_band
+                      bibliography_source_kind, original_filename
                 FROM check_history
                 WHERE batch_id = ?
             """
@@ -3848,10 +3661,6 @@ class Database:
                     SUM(warnings_count) as total_warnings,
                     SUM(suggestions_count) as total_suggestions,
                     SUM(unverified_count) as total_unverified,
-                    SUM(hallucination_count) as total_hallucinated,
-                    SUM(CASE WHEN ai_detection_band = 'high' THEN 1 ELSE 0 END) as ai_detection_high,
-                    SUM(CASE WHEN ai_detection_band = 'medium' THEN 1 ELSE 0 END) as ai_detection_medium,
-                    SUM(CASE WHEN ai_detection_band = 'low' THEN 1 ELSE 0 END) as ai_detection_low,
                     MIN(timestamp) as started_at
                 FROM check_history
                 WHERE batch_id = ?
@@ -3899,12 +3708,10 @@ class Database:
                 """
                 SELECT id, paper_title, paper_source, custom_label, timestamp,
                        total_refs, errors_count, warnings_count, suggestions_count, unverified_count,
-                       hallucination_count,
                        refs_with_errors, refs_with_warnings_only, refs_verified,
-                      llm_provider, llm_model, hallucination_provider, hallucination_model,
+                      llm_provider, llm_model,
                       status, source_type, batch_id, batch_label, team_id,
-                      bibliography_source_kind, original_filename,
-                      ai_detection_score, ai_detection_band
+                      bibliography_source_kind, original_filename
                 FROM check_history
                 WHERE batch_id = ?
                 """
@@ -3940,10 +3747,6 @@ class Database:
                     SUM(warnings_count) as total_warnings,
                     SUM(suggestions_count) as total_suggestions,
                     SUM(unverified_count) as total_unverified,
-                    SUM(hallucination_count) as total_hallucinated,
-                    SUM(CASE WHEN ai_detection_band = 'high' THEN 1 ELSE 0 END) as ai_detection_high,
-                    SUM(CASE WHEN ai_detection_band = 'medium' THEN 1 ELSE 0 END) as ai_detection_medium,
-                    SUM(CASE WHEN ai_detection_band = 'low' THEN 1 ELSE 0 END) as ai_detection_low,
                     MIN(timestamp) as started_at
                 FROM check_history
                 WHERE batch_id = ?
@@ -3999,10 +3802,9 @@ class Database:
                 """
                 SELECT id, paper_title, paper_source, custom_label, timestamp,
                        total_refs, errors_count, warnings_count, suggestions_count, unverified_count,
-                       hallucination_count,
                        refs_with_errors, refs_with_warnings_only, refs_verified,
                        status, source_type, batch_id, batch_label, team_id, user_id,
-                       ai_detection_score, ai_detection_band
+                       original_filename
                 FROM check_history
                 WHERE team_id = ?
                 ORDER BY timestamp DESC

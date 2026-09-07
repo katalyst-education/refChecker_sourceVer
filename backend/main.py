@@ -170,7 +170,6 @@ MAX_BATCH_UPLOAD_TOTAL_BYTES = int(os.environ.get("MAX_BATCH_UPLOAD_TOTAL_BYTES"
 MAX_BATCH_ARCHIVE_BYTES = int(os.environ.get("MAX_BATCH_ARCHIVE_BYTES", str(250 * 1024 * 1024)))
 MAX_BATCH_SIZE = int(os.environ.get("MAX_BATCH_SIZE", "1000"))
 LLMConfigId = Union[int, str]
-AIDetectionDevice = Literal["cpu", "cuda"]
 ENV_LLM_CONFIG_ID_PREFIX = "env:"
 
 
@@ -854,18 +853,6 @@ def _ensure_allowed_web_llm_provider(provider_name: Optional[str]) -> None:
         )
 
 
-def _ensure_hallucination_capable_provider(provider_name: Optional[str]) -> None:
-    """Reject providers that cannot perform hallucination checks."""
-    from refchecker.config.settings import HALLUCINATION_CAPABLE_PROVIDERS
-
-    normalized = (provider_name or "").strip().lower()
-    if normalized and normalized not in HALLUCINATION_CAPABLE_PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Provider '{provider_name}' is only available for extraction, not hallucination checks",
-        )
-
-
 def _normalize_llm_provider_name(provider_name: Optional[str]) -> str:
     normalized = (provider_name or "").strip().lower()
     return "google" if normalized == "gemini" else normalized
@@ -971,7 +958,6 @@ async def _resolve_llm_config_for_request(
     llm_provider: Optional[str],
     llm_model: Optional[str],
     api_key: Optional[str],
-    require_hallucination_capable: bool = False,
 ) -> tuple[
     Optional[str],
     Optional[str],
@@ -1028,8 +1014,6 @@ async def _resolve_llm_config_for_request(
             endpoint = resolve_endpoint(provider)
 
     _ensure_allowed_web_llm_provider(provider)
-    if require_hallucination_capable:
-        _ensure_hallucination_capable_provider(provider)
 
     return (
         provider,
@@ -1375,25 +1359,11 @@ class BatchUrlsRequest(BaseModel):
     llm_config_id: Optional[LLMConfigId] = None
     llm_provider: str = "anthropic"
     llm_model: Optional[str] = None
-    hallucination_config_id: Optional[LLMConfigId] = None
-    hallucination_provider: Optional[str] = None
-    hallucination_model: Optional[str] = None
     use_llm: bool = True
     api_key: Optional[str] = None
-    hallucination_api_key: Optional[str] = None
     semantic_scholar_api_key: Optional[str] = None
     google_books_api_key: Optional[str] = None
     paperclip_api_key: Optional[str] = None
-    ai_detection_enabled: bool = False
-    ai_detection_backend: str = "local"
-    ai_detection_device: AIDetectionDevice = "cpu"
-    ai_detection_api_key: Optional[str] = None
-    ai_detection_consent: bool = False
-    ai_detection_service: str = "pangram"
-    # R61: the FE's chosen multi-detector run-set. >1 key routes through
-    # multi_run.run_detectors (compare); empty/1 keeps the single-detector path.
-    ai_detection_detectors: Optional[List[str]] = None
-    detection_mode: str = "both"
 
 
 class TeamCreate(BaseModel):
@@ -1415,23 +1385,10 @@ class TeamMemberAdd(BaseModel):
     role: str = "member"
     llm_provider: str = "anthropic"
     llm_model: Optional[str] = None
-    hallucination_config_id: Optional[LLMConfigId] = None
-    hallucination_provider: Optional[str] = None
-    hallucination_model: Optional[str] = None
     use_llm: bool = True
     api_key: Optional[str] = None
-    hallucination_api_key: Optional[str] = None
     semantic_scholar_api_key: Optional[str] = None
     paperclip_api_key: Optional[str] = None
-    ai_detection_enabled: bool = False
-    ai_detection_backend: str = "local"
-    ai_detection_api_key: Optional[str] = None
-    ai_detection_consent: bool = False
-    ai_detection_service: str = "pangram"
-    # R61: the FE's chosen multi-detector run-set. >1 key routes through
-    # multi_run.run_detectors (compare); empty/1 keeps the single-detector path.
-    ai_detection_detectors: Optional[List[str]] = None
-    detection_mode: str = "both"
 
 
 # Create FastAPI app
@@ -1634,7 +1591,6 @@ _cors_origins = [
 ]
 if _SITE_URL and _SITE_URL not in _cors_origins:
     _cors_origins.append(_SITE_URL)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -2554,25 +2510,11 @@ async def start_check(
     llm_config_id: Optional[LLMConfigId] = Form(None),
     llm_provider: str = Form("anthropic"),
     llm_model: Optional[str] = Form(None),
-    hallucination_config_id: Optional[LLMConfigId] = Form(None),
-    hallucination_provider: Optional[str] = Form(None),
-    hallucination_model: Optional[str] = Form(None),
     use_llm: bool = Form(True),
     api_key: Optional[str] = Form(None),
-    hallucination_api_key: Optional[str] = Form(None),
     semantic_scholar_api_key: Optional[str] = Form(None),
     google_books_api_key: Optional[str] = Form(None),
     paperclip_api_key: Optional[str] = Form(None),
-    ai_detection_enabled: bool = Form(False),
-    ai_detection_backend: str = Form("local"),
-    ai_detection_device: AIDetectionDevice = Form("cpu"),
-    ai_detection_api_key: Optional[str] = Form(None),
-    ai_detection_consent: bool = Form(False),
-    ai_detection_service: str = Form("pangram"),
-    # R61: repeated form field — one value per chosen detector key. FastAPI
-    # collects the repeats into a list; >1 routes through the compare path.
-    ai_detection_detectors: Optional[List[str]] = Form(None),
-    detection_mode: str = Form("both"),
     current_user: UserInfo = Depends(require_user),
     http_request: Request = None,
 ):
@@ -2601,22 +2543,11 @@ async def start_check(
         llm_config_id = _form_default_value(llm_config_id)
         llm_provider = _form_default_value(llm_provider)
         llm_model = _form_default_value(llm_model)
-        hallucination_config_id = _form_default_value(hallucination_config_id)
-        hallucination_provider = _form_default_value(hallucination_provider)
-        hallucination_model = _form_default_value(hallucination_model)
         use_llm = _form_default_value(use_llm)
         api_key = _form_default_value(api_key)
-        hallucination_api_key = _form_default_value(hallucination_api_key)
         paperclip_api_key = await _resolve_paperclip_api_key(
             _form_default_value(paperclip_api_key)
         )
-        ai_detection_enabled = _form_default_value(ai_detection_enabled)
-        ai_detection_backend = _form_default_value(ai_detection_backend)
-        ai_detection_device = _form_default_value(ai_detection_device)
-        ai_detection_api_key = _form_default_value(ai_detection_api_key)
-        ai_detection_consent = _form_default_value(ai_detection_consent)
-        ai_detection_service = _form_default_value(ai_detection_service)
-        detection_mode = _form_default_value(detection_mode)
         semantic_scholar_api_key = await _resolve_semantic_scholar_api_key(
             _form_default_value(semantic_scholar_api_key)
         )
@@ -2647,37 +2578,11 @@ async def start_check(
             llm_model=llm_model,
             api_key=api_key,
         )
-        resolved_hallucination_provider = hallucination_provider
-        resolved_hallucination_model = hallucination_model
-        resolved_hallucination_api_key = hallucination_api_key
-        resolved_hallucination_endpoint = None
-        if hallucination_config_id or hallucination_provider:
-            (
-                resolved_hallucination_provider,
-                resolved_hallucination_model,
-                resolved_hallucination_api_key,
-                resolved_hallucination_endpoint,
-                _resolved_hallucination_reasoning_effort,
-                _resolved_hallucination_max_tokens,
-                _resolved_hallucination_context_length,
-                _resolved_hallucination_timeout_seconds,
-            ) = await _resolve_llm_config_for_request(
-                user_id=user_id,
-                use_llm=use_llm,
-                llm_config_id=hallucination_config_id,
-                llm_provider=hallucination_provider,
-                llm_model=hallucination_model,
-                api_key=hallucination_api_key,
-                require_hallucination_capable=True,
-            )
         logger.info(
-            "Effective LLMs resolved: extraction=%s/%s key=%s; hallucination=%s/%s key=%s; SS=%s",
+            "Effective extraction LLM resolved: %s/%s key=%s; SS=%s",
             llm_provider,
             llm_model,
             'present' if effective_api_key else 'MISSING',
-            resolved_hallucination_provider,
-            resolved_hallucination_model,
-            'present' if resolved_hallucination_api_key else 'MISSING',
             'present' if semantic_scholar_api_key else 'MISSING',
         )
 
@@ -2782,8 +2687,6 @@ async def start_check(
             source_type=source_type,
             llm_provider=llm_provider if use_llm else None,
             llm_model=llm_model if use_llm else None,
-            hallucination_provider=resolved_hallucination_provider if use_llm else None,
-            hallucination_model=resolved_hallucination_model if use_llm else None,
             original_filename=original_filename,
             user_id=user_id,
             started_at=check_started_at,
@@ -2812,8 +2715,6 @@ async def start_check(
                 "use_llm": use_llm,
                 "llm_provider": llm_provider if use_llm else None,
                 "llm_model": llm_model if use_llm else None,
-                "hallucination_provider": resolved_hallucination_provider if use_llm else None,
-                "hallucination_model": resolved_hallucination_model if use_llm else None,
                 "input_bytes": input_bytes,
                 "semantic_scholar_key_present": bool(semantic_scholar_api_key),
                 "paperclip_key_present": bool(paperclip_api_key),
@@ -2830,23 +2731,11 @@ async def start_check(
                 use_llm, cancel_event, user_id,
                 semantic_scholar_api_key=semantic_scholar_api_key,
                 google_books_api_key=google_books_api_key,
-                hallucination_provider=resolved_hallucination_provider,
-                hallucination_model=resolved_hallucination_model,
-                hallucination_api_key=resolved_hallucination_api_key,
-                hallucination_endpoint=resolved_hallucination_endpoint,
                 reasoning_effort=llm_reasoning_effort,
                 max_tokens=llm_max_tokens,
                 context_length=llm_context_length,
                 timeout_seconds=llm_timeout_seconds,
-                ai_detection_enabled=ai_detection_enabled,
-                ai_detection_backend=ai_detection_backend,
-                ai_detection_device=ai_detection_device,
-                ai_detection_api_key=ai_detection_api_key,
-                ai_detection_consent=ai_detection_consent,
-                ai_detection_service=ai_detection_service,
-                ai_detection_detectors=ai_detection_detectors,
                 paperclip_api_key=paperclip_api_key,
-                detection_mode=detection_mode,
             )
         )
         slot_acquired = False  # ownership transferred to run_check's finally block
@@ -2884,23 +2773,11 @@ async def run_check(
     user_id: int = 0,
     semantic_scholar_api_key: Optional[str] = None,
     google_books_api_key: Optional[str] = None,
-    hallucination_provider: Optional[str] = None,
-    hallucination_model: Optional[str] = None,
-    hallucination_api_key: Optional[str] = None,
-    hallucination_endpoint: Optional[str] = None,
-    ai_detection_enabled: bool = False,
-    ai_detection_backend: str = "local",
-    ai_detection_device: str = "cpu",
-    ai_detection_api_key: Optional[str] = None,
-    ai_detection_consent: bool = False,
-    ai_detection_service: str = "pangram",
-    ai_detection_detectors: Optional[List[str]] = None,
     paperclip_api_key: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     max_tokens: Optional[int] = None,
     context_length: Optional[int] = None,
     timeout_seconds: Optional[int] = None,
-    detection_mode: str = "both",
 ):
     """
     Run reference check in background and emit progress updates
@@ -2980,7 +2857,6 @@ async def run_check(
                             warnings_count=data.get("warnings_count", 0),
                             suggestions_count=data.get("suggestions_count", 0),
                             unverified_count=data.get("unverified_count", 0),
-                            hallucination_count=data.get("hallucination_count", 0),
                             refs_with_errors=data.get("refs_with_errors", 0),
                             refs_with_warnings_only=data.get("refs_with_warnings_only", 0),
                             refs_with_suggestions_only=data.get("refs_with_suggestions_only", 0),
@@ -3032,19 +2908,7 @@ async def run_check(
             db_path=db_path,
             db_paths=db_paths,
             cache_dir=cache_dir,
-            hallucination_provider=hallucination_provider,
-            hallucination_model=hallucination_model,
-            hallucination_api_key=hallucination_api_key,
-            hallucination_endpoint=hallucination_endpoint,
-            ai_detection_enabled=ai_detection_enabled,
-            ai_detection_backend=ai_detection_backend,
-            ai_detection_device=ai_detection_device,
-            ai_detection_api_key=ai_detection_api_key,
-            ai_detection_consent=ai_detection_consent,
-            ai_detection_service=ai_detection_service,
-            ai_detection_detectors=ai_detection_detectors,
             paperclip_api_key=paperclip_api_key,
-            detection_mode=detection_mode,
             extraction_mode=extraction_mode,
         )
 
@@ -3079,7 +2943,6 @@ async def run_check(
             warnings_count=result["summary"]["warnings_count"],
             suggestions_count=result["summary"].get("suggestions_count", 0),
             unverified_count=result["summary"]["unverified_count"],
-            hallucination_count=result["summary"].get("hallucination_count", 0),
             refs_with_errors=result["summary"].get("refs_with_errors", 0),
             refs_with_warnings_only=result["summary"].get("refs_with_warnings_only", 0),
             refs_with_suggestions_only=result["summary"].get("refs_with_suggestions_only", 0),
@@ -3095,7 +2958,6 @@ async def run_check(
             issue_type_counts=issue_type_counts,
             cache_hit=cache_hit,
             bibliography_source_kind=bibliography_source_kind,
-            ai_detection=result.get("ai_detection"),
         )
 
         await _log_usage_event_safe(
@@ -3118,9 +2980,6 @@ async def run_check(
                 "warnings_count": result["summary"]["warnings_count"],
                 "suggestions_count": result["summary"].get("suggestions_count", 0),
                 "unverified_count": result["summary"]["unverified_count"],
-                "hallucination_count": result["summary"].get("hallucination_count", 0),
-                "hallucination_provider": hallucination_provider,
-                "hallucination_model": hallucination_model,
                 "refs_with_errors": result["summary"].get("refs_with_errors", 0),
                 "refs_with_warnings_only": result["summary"].get("refs_with_warnings_only", 0),
                 "refs_verified": result["summary"].get("refs_verified", 0),
@@ -3215,7 +3074,6 @@ async def run_check(
             "check_id": check_id
         })
     finally:
-        # R54: release the per-request hallucination ThreadPoolExecutor (the
         # 8-worker pool added in R04) so each check does not leak daemon threads.
         # Best-effort + idempotent; runs after all progress/result emission, and
         # `checker` may be unbound if construction failed early, so look it up
@@ -3326,8 +3184,7 @@ async def _render_check_html(check_id: int, current_user: UserInfo, *,
 @app.get("/api/export/{check_id}/html")
 async def export_check_html(check_id: int, download: bool = True,
                             current_user: UserInfo = Depends(require_user)):
-    """Self-contained HTML export of a check's results (references + verdicts +
-    AI-detection summary). The default download path drives 'Share → Download'."""
+    """Self-contained HTML export of a check's results (references and verdicts). The default download path drives 'Share → Download'."""
     try:
         title, html_str = await _render_check_html(check_id, current_user)
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", title)[:80].strip("-") or f"refchecker-{check_id}"
@@ -3450,7 +3307,7 @@ async def _extract_paper_text_for_check(
             from refchecker.utils.cache_utils import get_cached_artifact_path
             cache_dir = await _get_configured_cache_dir()
             if cache_dir:
-                for artifact in ("ai_body.pdf", "paper.pdf"):
+                for artifact in ("paper_body.pdf", "paper.pdf"):
                     pp = get_cached_artifact_path(str(cache_dir), paper_source, artifact)
                     if pp and os.path.exists(pp) and os.path.getsize(pp) > 0:
                         text = await asyncio.to_thread(_extract_pdf_text_cli_style, pp, None)
@@ -3472,7 +3329,7 @@ async def _source_pdf_path_for_check(check: Dict[str, Any]) -> Optional[str]:
 
         cache_dir = await _get_configured_cache_dir()
         if cache_dir:
-            for artifact in ("paper.pdf", "ai_body.pdf"):
+            for artifact in ("paper.pdf", "paper_body.pdf"):
                 path = get_cached_artifact_path(str(cache_dir), paper_source, artifact)
                 if path and os.path.exists(path) and os.path.getsize(path) > 0:
                     return path
@@ -4443,7 +4300,7 @@ async def get_preview_page(
 class _LocateTarget(BaseModel):
     text: str
     span_index: Optional[int] = None
-    span_type: Optional[str] = "ai"   # 'ai' | 'citation'
+    span_type: Optional[str] = "citation"
     band: Optional[str] = None
     reason: Optional[str] = None
     model_score: Optional[float] = None
@@ -4459,7 +4316,7 @@ async def locate_preview_spans(
     req: _LocateRequest,
     current_user: UserInfo = Depends(require_user),
 ):
-    """Locate target texts (AI-flagged passages / citation-context sentences)
+    """Locate citation-context sentences
     inside this check's source PDF and return their page + normalized rects so
     the frontend can highlight them ON the native page image. Returns
     found=False per target that can't be located (never a fabricated position)."""
@@ -4474,194 +4331,6 @@ async def locate_preview_spans(
     from backend.thumbnail import locate_text_spans_in_pdf
     results = await asyncio.to_thread(locate_text_spans_in_pdf, pdf_path, targets)
     return {"available": True, "results": results}
-
-
-@app.get("/api/preview/{check_id}/annotated-pdf")
-async def get_annotated_pdf(
-    check_id: int,
-    current_user: UserInfo = Depends(require_user),
-):
-    """Return the source PDF with the AI-flagged passages highlighted as real
-    PDF annotations (PyMuPDF) — a downloadable native-highlighted artifact."""
-    check = await _get_owned_check_or_404(check_id, current_user)
-    cache_dir = await _get_configured_cache_dir()
-    pdf_path = await _resolve_pdf_path_for_check(check, cache_dir)
-    if not pdf_path:
-        raise HTTPException(status_code=404, detail="No PDF source for this check")
-    ai = check.get("ai_detection") or {}
-    spans = ai.get("spans") if isinstance(ai, dict) else None
-    targets = [
-        {"text": s.get("quote") or "", "band": ai.get("band"), "model_score": s.get("model_score")}
-        for s in (spans or []) if isinstance(s, dict) and s.get("quote")
-    ]
-    if not targets:
-        raise HTTPException(status_code=404, detail="No flagged passages to annotate")
-    out_path = await asyncio.to_thread(_annotate_pdf_highlights, pdf_path, targets, str(cache_dir or ""), check_id)
-    if not out_path or not os.path.exists(out_path):
-        raise HTTPException(status_code=500, detail="Could not annotate PDF")
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", (check.get("paper_title") or f"refchecker-{check_id}"))[:80].strip("-")
-    return FileResponse(out_path, media_type="application/pdf",
-                        headers={"Content-Disposition": f'attachment; filename="{safe}-highlighted.pdf"'})
-
-
-def _annotate_pdf_highlights(pdf_path, targets, cache_dir, check_id):
-    """Add real PyMuPDF highlight annotations on the located target rects."""
-    try:
-        import fitz
-        from backend.thumbnail import locate_text_spans_in_pdf
-        located = locate_text_spans_in_pdf(pdf_path, targets)
-        doc = fitz.open(pdf_path)
-        band_rgb = {"high": (0.96, 0.45, 0.45), "medium": (0.98, 0.75, 0.18), "low": (0.55, 0.86, 0.6)}
-        added = 0
-        for r in located:
-            if not r.get("found"):
-                continue
-            page = doc.load_page(r["page"])
-            pw, ph = float(page.rect.width), float(page.rect.height)
-            color = band_rgb.get((r.get("band") or "").lower(), (0.98, 0.75, 0.18))
-            for nx0, ny0, nx1, ny1 in r["rects"]:
-                rect = fitz.Rect(nx0 * pw, ny0 * ph, nx1 * pw, ny1 * ph)
-                annot = page.add_highlight_annot(rect)
-                try:
-                    annot.set_colors(stroke=color)
-                    annot.update()
-                except Exception:
-                    pass
-                added += 1
-        if not added:
-            doc.close()
-            return None
-        out_dir = os.path.join(cache_dir or os.path.dirname(pdf_path), "annotated")
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"{check_id}-highlighted.pdf")
-        doc.save(out_path, garbage=3, deflate=True)
-        doc.close()
-        return out_path
-    except Exception as e:
-        logger.warning("PDF annotation failed: %s", e)
-        return None
-
-
-def _correction_targets_for_check(check: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Per flagged reference that carries a verified ``corrected_reference``, build
-    a locate target whose ``text`` is the ORIGINAL cited line (so it can be found
-    in the PDF) and whose ``corrected`` is the verified should-be line.
-
-    Honesty contract: a target is produced ONLY when a real ``corrected_reference``
-    exists AND it actually differs from the cited line — never a fabricated
-    correction, never a no-op strikeout. Returns [] when nothing should change."""
-    from backend import export as _export
-    refs = _export._as_list(check.get("results")) or _export._as_list(check.get("references"))
-    targets: List[Dict[str, Any]] = []
-    for ref in refs:
-        if not isinstance(ref, dict) or not isinstance(ref.get("corrected_reference"), dict):
-            continue
-        corrected = _export._corrected_str(ref)
-        if not corrected:
-            continue
-        cited = _export._cited_str(ref)
-        if not cited or cited.strip() == corrected.strip():
-            # No baseline to strike, or an identical "correction" — skip (no
-            # fabricated annotation).
-            continue
-        # Locate the cited TITLE in the PDF (the most reliably present anchor),
-        # but carry the full corrected line as the inserted note.
-        anchor = (ref.get("title") or cited).strip()
-        if len(anchor) < 8:
-            anchor = cited
-        targets.append({
-            "text": anchor,
-            "ref_id": ref.get("index") or ref.get("ref_num"),
-            "cited": cited,
-            "corrected": corrected,
-        })
-    return targets
-
-
-def _annotate_pdf_corrections(pdf_path, targets, marker_shifts, cache_dir, check_id):
-    """R19: render the tracked was→should-be changes as REAL PDF annotations.
-
-    For each correction target, locate the cited text via
-    ``locate_text_spans_in_pdf`` (the same locator the highlight path uses),
-    strike it out (``page.add_strikeout_annot``) and attach a text note
-    (``page.add_text_annot``) carrying the verified corrected line. For inline
-    renumber, each ``marker_shifts`` row's OLD marker (e.g. ``[9]``) is located on
-    its page and annotated with its NEW form (e.g. ``[10]``).
-
-    Never fabricates a position: a target/marker that can't be located is simply
-    skipped. Returns the annotated PDF path, or None when nothing was annotated."""
-    try:
-        import fitz
-        from backend.thumbnail import locate_text_spans_in_pdf
-        added = 0
-        doc = fitz.open(pdf_path)
-        try:
-            located = locate_text_spans_in_pdf(pdf_path, targets) if targets else []
-            by_index = {i: t for i, t in enumerate(targets)}
-            for i, r in enumerate(located):
-                if not r.get("found"):
-                    continue
-                t = by_index.get(i, {})
-                corrected = (t.get("corrected") or "").strip()
-                page = doc.load_page(r["page"])
-                pw, ph = float(page.rect.width), float(page.rect.height)
-                note_pt = None
-                for nx0, ny0, nx1, ny1 in r["rects"]:
-                    rect = fitz.Rect(nx0 * pw, ny0 * ph, nx1 * pw, ny1 * ph)
-                    try:
-                        page.add_strikeout_annot(rect)
-                    except Exception:
-                        pass
-                    if note_pt is None:
-                        note_pt = fitz.Point(rect.x1, rect.y0)
-                    added += 1
-                # Attach the corrected line as a sticky text note anchored at the
-                # end of the struck text (the should-be side of the change).
-                if corrected and note_pt is not None:
-                    try:
-                        annot = page.add_text_annot(note_pt, f"Should be: {corrected}")
-                        annot.set_info(title="RefChecker correction")
-                        annot.update()
-                    except Exception:
-                        pass
-            # Inline renumber: annotate each OLD marker with its NEW form.
-            for sm in (marker_shifts or []):
-                if not isinstance(sm, dict):
-                    continue
-                old_m = (sm.get("marker") or "").strip()
-                new_m = (sm.get("new_marker") or "").strip()
-                if not old_m or not new_m or old_m == new_m:
-                    continue
-                for page in doc:
-                    try:
-                        hits = page.search_for(old_m)
-                    except Exception:
-                        hits = []
-                    if not hits:
-                        continue
-                    rect = hits[0]
-                    try:
-                        page.add_strikeout_annot(rect)
-                        annot = page.add_text_annot(
-                            fitz.Point(rect.x1, rect.y0), f"Renumber: {old_m} -> {new_m}")
-                        annot.set_info(title="RefChecker renumber")
-                        annot.update()
-                        added += 1
-                    except Exception:
-                        pass
-                    break  # annotate the first occurrence only (the marker's offset)
-            if not added:
-                return None
-            out_dir = os.path.join(cache_dir or os.path.dirname(pdf_path), "annotated")
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, f"{check_id}-corrections.pdf")
-            doc.save(out_path, garbage=3, deflate=True)
-            return out_path
-        finally:
-            doc.close()
-    except Exception as e:
-        logger.warning("PDF correction annotation failed: %s", e)
-        return None
 
 
 @app.get("/api/preview/{check_id}/corrections-annotated-pdf")
@@ -4844,7 +4513,7 @@ async def get_paper_pdf(check_id: int, current_user: UserInfo = Depends(require_
             from refchecker.utils.cache_utils import get_cached_artifact_path
             cache_dir = await _get_configured_cache_dir()
             if cache_dir:
-                for artifact in ("ai_body.pdf", "paper.pdf"):
+                for artifact in ("paper_body.pdf", "paper.pdf"):
                     p = get_cached_artifact_path(str(cache_dir), paper_source, artifact)
                     if p and os.path.exists(p) and os.path.getsize(p) > 0:
                         pdf_path = p
@@ -4913,7 +4582,7 @@ async def get_paper_text(check_id: int, current_user: UserInfo = Depends(require
     """Return the extracted body text of a check's source document.
 
     Powers the "view in document" highlighter: the frontend renders this text
-    and marks the AI-detection flagged passages / citation contexts in place.
+    and marks requested citation contexts in place.
     Works for uploaded PDFs/text files AND URL/DOI inputs (via the PDF cached
     during the check). Never throws on a missing source — returns available=False.
     """
@@ -4990,7 +4659,7 @@ async def get_paper_text(check_id: int, current_user: UserInfo = Depends(require
                 from refchecker.utils.cache_utils import get_cached_artifact_path
                 cache_dir = await _get_configured_cache_dir()
                 if cache_dir:
-                    for artifact in ("ai_body.pdf", "paper.pdf"):
+                    for artifact in ("paper_body.pdf", "paper.pdf"):
                         p = get_cached_artifact_path(str(cache_dir), paper_source, artifact)
                         if p and os.path.exists(p) and os.path.getsize(p) > 0:
                             text = await asyncio.to_thread(_extract_pdf_text_cli_style, p, None)
@@ -5169,12 +4838,7 @@ async def recheck(
                 True,
                 cancel_event,
                 user_id,
-                # AI-generated-text detection is intentionally NOT replayed on
-                # recheck: it is a live client-side preference (useAiDetectionStore),
-                # never persisted per-check, so there is nothing to restore. A
-                # recheck re-verifies citations only; run a fresh check to get a
-                # new AI-detection result.
-            )
+                            )
         )
         slot_acquired = False
         active_checks[session_id] = {"task": task, "cancel_event": cancel_event, "check_id": new_check_id, "user_id": user_id}
@@ -5277,30 +4941,6 @@ async def start_batch_check(
             llm_model=request.llm_model,
             api_key=request.api_key,
         )
-        resolved_hallucination_provider = request.hallucination_provider
-        resolved_hallucination_model = request.hallucination_model
-        resolved_hallucination_api_key = request.hallucination_api_key
-        resolved_hallucination_endpoint = None
-        if request.hallucination_config_id or request.hallucination_provider:
-            (
-                resolved_hallucination_provider,
-                resolved_hallucination_model,
-                resolved_hallucination_api_key,
-                resolved_hallucination_endpoint,
-                _resolved_hallucination_reasoning_effort,
-                _resolved_hallucination_max_tokens,
-                _resolved_hallucination_context_length,
-                _resolved_hallucination_timeout_seconds,
-            ) = await _resolve_llm_config_for_request(
-                user_id=user_id,
-                use_llm=request.use_llm,
-                llm_config_id=request.hallucination_config_id,
-                llm_provider=request.hallucination_provider,
-                llm_model=request.hallucination_model,
-                api_key=request.hallucination_api_key,
-                require_hallucination_capable=True,
-            )
-
         valid_urls = [u.strip() for u in request.urls if u.strip()]
 
         # Pre-acquire one slot per URL to enforce per-user rate limit atomically
@@ -5360,8 +5000,6 @@ async def start_batch_check(
                 source_type='url',
                 llm_provider=llm_provider if request.use_llm else None,
                 llm_model=llm_model if request.use_llm else None,
-                hallucination_provider=resolved_hallucination_provider if request.use_llm else None,
-                hallucination_model=resolved_hallucination_model if request.use_llm else None,
                 batch_id=batch_id,
                 batch_label=batch_label,
                 user_id=user_id,
@@ -5404,22 +5042,10 @@ async def start_batch_check(
                     request.use_llm, cancel_event, user_id,
                     semantic_scholar_api_key=semantic_scholar_api_key,
                     google_books_api_key=request.google_books_api_key,
-                    hallucination_provider=resolved_hallucination_provider,
-                    hallucination_model=resolved_hallucination_model,
-                    hallucination_api_key=resolved_hallucination_api_key,
-                    hallucination_endpoint=resolved_hallucination_endpoint,
                     reasoning_effort=llm_reasoning_effort,
                     max_tokens=llm_max_tokens,
                     context_length=llm_context_length,
                     timeout_seconds=llm_timeout_seconds,
-                    ai_detection_enabled=request.ai_detection_enabled,
-                    ai_detection_backend=request.ai_detection_backend,
-                    ai_detection_device=request.ai_detection_device,
-                    ai_detection_api_key=request.ai_detection_api_key,
-                    ai_detection_consent=request.ai_detection_consent,
-                    ai_detection_service=request.ai_detection_service,
-                    ai_detection_detectors=getattr(request, 'ai_detection_detectors', None),
-                    detection_mode=getattr(request, 'detection_mode', 'both'),
                     paperclip_api_key=paperclip_api_key,
                 )
             )
@@ -5460,25 +5086,11 @@ async def start_batch_check_files(
     llm_config_id: Optional[LLMConfigId] = Form(None),
     llm_provider: str = Form("anthropic"),
     llm_model: Optional[str] = Form(None),
-    hallucination_config_id: Optional[LLMConfigId] = Form(None),
-    hallucination_provider: Optional[str] = Form(None),
-    hallucination_model: Optional[str] = Form(None),
     use_llm: bool = Form(True),
     api_key: Optional[str] = Form(None),
-    hallucination_api_key: Optional[str] = Form(None),
     semantic_scholar_api_key: Optional[str] = Form(None),
     google_books_api_key: Optional[str] = Form(None),
     paperclip_api_key: Optional[str] = Form(None),
-    ai_detection_enabled: bool = Form(False),
-    ai_detection_backend: str = Form("local"),
-    ai_detection_device: AIDetectionDevice = Form("cpu"),
-    ai_detection_api_key: Optional[str] = Form(None),
-    ai_detection_consent: bool = Form(False),
-    ai_detection_service: str = Form("pangram"),
-    # R61: repeated form field — one value per chosen detector key. FastAPI
-    # collects the repeats into a list; >1 routes through the compare path.
-    ai_detection_detectors: Optional[List[str]] = Form(None),
-    detection_mode: str = Form("both"),
     current_user: UserInfo = Depends(require_user),
     http_request: Request = None,
 ):
@@ -5492,22 +5104,11 @@ async def start_batch_check_files(
         llm_config_id = _form_default_value(llm_config_id)
         llm_provider = _form_default_value(llm_provider)
         llm_model = _form_default_value(llm_model)
-        hallucination_config_id = _form_default_value(hallucination_config_id)
-        hallucination_provider = _form_default_value(hallucination_provider)
-        hallucination_model = _form_default_value(hallucination_model)
         use_llm = _form_default_value(use_llm)
         api_key = _form_default_value(api_key)
-        hallucination_api_key = _form_default_value(hallucination_api_key)
         semantic_scholar_api_key = _form_default_value(semantic_scholar_api_key)
         google_books_api_key = _form_default_value(google_books_api_key)
         paperclip_api_key = _form_default_value(paperclip_api_key)
-        ai_detection_enabled = _form_default_value(ai_detection_enabled)
-        ai_detection_backend = _form_default_value(ai_detection_backend)
-        ai_detection_device = _form_default_value(ai_detection_device)
-        ai_detection_api_key = _form_default_value(ai_detection_api_key)
-        ai_detection_consent = _form_default_value(ai_detection_consent)
-        ai_detection_service = _form_default_value(ai_detection_service)
-        detection_mode = _form_default_value(detection_mode)
 
         if not files or len(files) == 0:
             raise HTTPException(status_code=400, detail="No files provided")
@@ -5583,29 +5184,6 @@ async def start_batch_check_files(
             llm_model=llm_model,
             api_key=api_key,
         )
-        resolved_hallucination_provider = hallucination_provider
-        resolved_hallucination_model = hallucination_model
-        resolved_hallucination_api_key = hallucination_api_key
-        resolved_hallucination_endpoint = None
-        if hallucination_config_id or hallucination_provider:
-            (
-                resolved_hallucination_provider,
-                resolved_hallucination_model,
-                resolved_hallucination_api_key,
-                resolved_hallucination_endpoint,
-                _resolved_hallucination_reasoning_effort,
-                _resolved_hallucination_max_tokens,
-                _resolved_hallucination_context_length,
-                _resolved_hallucination_timeout_seconds,
-            ) = await _resolve_llm_config_for_request(
-                user_id=user_id,
-                use_llm=use_llm,
-                llm_config_id=hallucination_config_id,
-                llm_provider=hallucination_provider,
-                llm_model=hallucination_model,
-                api_key=hallucination_api_key,
-                require_hallucination_capable=True,
-            )
         
         label = batch_label or f"Batch of {len(files_to_process)} files"
 
@@ -5664,8 +5242,6 @@ async def start_batch_check_files(
                 source_type='file',
                 llm_provider=llm_provider if use_llm else None,
                 llm_model=llm_model if use_llm else None,
-                hallucination_provider=resolved_hallucination_provider if use_llm else None,
-                hallucination_model=resolved_hallucination_model if use_llm else None,
                 batch_id=batch_id,
                 batch_label=label,
                 original_filename=file_info['filename'],
@@ -5704,23 +5280,11 @@ async def start_batch_check_files(
                     use_llm, cancel_event, user_id,
                     semantic_scholar_api_key=semantic_scholar_api_key,
                     google_books_api_key=google_books_api_key,
-                    hallucination_provider=resolved_hallucination_provider,
-                    hallucination_model=resolved_hallucination_model,
-                    hallucination_api_key=resolved_hallucination_api_key,
-                    hallucination_endpoint=resolved_hallucination_endpoint,
                     reasoning_effort=llm_reasoning_effort,
                     max_tokens=llm_max_tokens,
                     context_length=llm_context_length,
                     timeout_seconds=llm_timeout_seconds,
-                    ai_detection_enabled=ai_detection_enabled,
-                    ai_detection_backend=ai_detection_backend,
-                    ai_detection_device=ai_detection_device,
-                    ai_detection_api_key=ai_detection_api_key,
-                    ai_detection_consent=ai_detection_consent,
-                    ai_detection_service=ai_detection_service,
-                    ai_detection_detectors=ai_detection_detectors,
                     paperclip_api_key=paperclip_api_key,
-                    detection_mode=detection_mode,
                 )
             )
             active_checks[session_id] = {
@@ -7523,7 +7087,6 @@ async def get_admin_activity(
     - user_id, provider, email_domain, is_admin, created_at
     - check id, paper_title, paper_source, source_type, status,
       started_at, completed_at, duration_ms, total_refs, errors_count,
-      warnings_count, suggestions_count, unverified_count, hallucination_count,
       llm_provider, llm_model, extraction_method, cache_hit
     """
     _require_admin(current_user)
@@ -7550,7 +7113,6 @@ async def get_admin_activity(
                           status, started_at, completed_at, duration_ms,
                           total_refs, errors_count, warnings_count,
                           suggestions_count, unverified_count,
-                          hallucination_count, refs_with_errors,
                           refs_with_warnings_only, refs_verified,
                           llm_provider, llm_model, extraction_method,
                           cache_hit, original_filename
@@ -8937,7 +8499,7 @@ async def get_llm_usage(
     """Per-check LLM token + cost accumulator snapshot for the $ badge.
 
     Returns total tokens / cost plus a per-flow breakdown
-    (extract / verify / hallucination / suggest / graph / reverify) so the
+    (extract / verify / suggest / graph / reverify) so the
     Summary-tab badge can render a hover tooltip showing what each phase
     cost. The accumulator resets at the start of each `check_paper` call
     so the badge always reflects a single run.
@@ -9430,339 +8992,6 @@ async def verify_single_reference(
             pass
 
     return {"reference": updated, "from_cache": False}
-
-
-@app.post("/api/history/{check_id}/references/{ref_id}/suggest-alternative")
-async def suggest_alternative_reference(
-    check_id: int,
-    ref_id: str,
-    current_user: UserInfo = Depends(require_user),
-):
-    """For a likely-hallucinated reference, surface real candidates the
-    user might have meant. Strategy: query Semantic Scholar's title
-    search with the cited title and return the top match by title
-    similarity. Lightweight (no LLM round-trip) so the user can preview
-    candidates before deciding to swap."""
-    user_id = get_user_id_filter(current_user)
-    refs = await db.get_check_references(check_id, user_id=user_id)
-    if refs is None:
-        raise HTTPException(status_code=404, detail="Check not found")
-    idx = _find_ref_index(refs, ref_id)
-    if idx is None:
-        raise HTTPException(status_code=404, detail="Reference not found in check")
-    target = refs[idx]
-    title = (target.get("title") or "").strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="Reference has no title to search on")
-
-    import asyncio as _asyncio
-    import httpx
-
-    api_key = await _resolve_semantic_scholar_api_key(None)
-    headers = {"x-api-key": api_key} if api_key else {}
-    data = {"data": []}
-    s2_rate_limited = False
-    s2_error: Optional[str] = None
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for attempt in range(3):
-            try:
-                r = await client.get(
-                    "https://api.semanticscholar.org/graph/v1/paper/search",
-                    params={"query": title, "limit": 5, "fields": "paperId,title,authors,year,externalIds,url"},
-                    headers=headers,
-                )
-                if r.status_code == 429:
-                    s2_rate_limited = True
-                    try:
-                        wait_s = float(r.headers.get("Retry-After", "1.5"))
-                    except (TypeError, ValueError):
-                        wait_s = 1.5
-                    await _asyncio.sleep(min(8.0, max(0.5, wait_s)) * (2 ** attempt))
-                    continue
-                if r.status_code >= 400:
-                    s2_error = f"S2 search failed with HTTP {r.status_code}"
-                    break
-                payload = r.json()
-                data = payload if isinstance(payload, dict) else {"data": []}
-                s2_error = None
-                break
-            except httpx.HTTPError as e:
-                s2_error = str(e)
-                await _asyncio.sleep(0.4 * (2 ** attempt))
-    if s2_error:
-        logger.debug("Suggest-alt S2 search failed: %s", s2_error)
-
-    suggestions = []
-    for p in (data.get("data") or [])[:5]:
-        ext = p.get("externalIds") or {}
-        suggestions.append({
-            "title": p.get("title"),
-            "authors": [a.get("name") for a in (p.get("authors") or []) if a.get("name")],
-            "year": p.get("year"),
-            "doi": ext.get("DOI"),
-            "arxiv_id": ext.get("ArXiv"),
-            "url": p.get("url"),
-            "paperId": p.get("paperId"),
-            "source": "semantic_scholar",
-        })
-
-    # ── Crossref fallback (medical / humanities coverage) ────────────
-    # S2 indexing is thin outside CS / physics. Crossref covers
-    # biomedicine, anatomy, surgery far better — and exposes DOIs
-    # directly, so any hit here is immediately verifiable.
-    if len(suggestions) < 3:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                cr = await client.get(
-                    "https://api.crossref.org/works",
-                    params={
-                        "query.bibliographic": title,
-                        "rows": 5,
-                        "select": "DOI,title,author,issued,container-title",
-                    },
-                )
-                if cr.status_code == 200:
-                    cr_data = cr.json()
-                    for item in (cr_data.get("message", {}).get("items") or [])[:5]:
-                        cr_title = (item.get("title") or [None])[0]
-                        if not cr_title:
-                            continue
-                        cr_authors = []
-                        for a in (item.get("author") or [])[:8]:
-                            given = a.get("given") or ""
-                            family = a.get("family") or ""
-                            full = f"{given} {family}".strip()
-                            if full:
-                                cr_authors.append(full)
-                        cr_year = None
-                        issued = item.get("issued", {}).get("date-parts")
-                        if issued and issued[0]:
-                            cr_year = issued[0][0]
-                        cr_doi = item.get("DOI")
-                        suggestions.append({
-                            "title": cr_title,
-                            "authors": cr_authors,
-                            "year": cr_year,
-                            "doi": cr_doi,
-                            "arxiv_id": None,
-                            "url": f"https://doi.org/{cr_doi}" if cr_doi else None,
-                            "venue": (item.get("container-title") or [None])[0],
-                            "source": "crossref",
-                        })
-        except Exception as e:
-            logger.debug("Crossref suggest-alt fallback failed: %s", e)
-
-    # ── OpenAlex fallback (broad coverage, fast) ─────────────────────
-    if len(suggestions) < 3:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                oa = await client.get(
-                    "https://api.openalex.org/works",
-                    params={
-                        "search": title,
-                        "per-page": 5,
-                        "select": "id,title,doi,publication_year,authorships",
-                    },
-                )
-                if oa.status_code == 200:
-                    oa_data = oa.json()
-                    for w in (oa_data.get("results") or [])[:5]:
-                        w_title = w.get("title")
-                        if not w_title:
-                            continue
-                        suggestions.append({
-                            "title": w_title,
-                            "authors": [
-                                a.get("author", {}).get("display_name")
-                                for a in (w.get("authorships") or [])
-                                if a.get("author", {}).get("display_name")
-                            ],
-                            "year": w.get("publication_year"),
-                            "doi": (w.get("doi") or "").replace("https://doi.org/", "") or None,
-                            "arxiv_id": None,
-                            "url": w.get("id"),
-                            "source": "openalex",
-                        })
-        except Exception as e:
-            logger.debug("OpenAlex suggest-alt fallback failed: %s", e)
-
-    # Dedupe by DOI / title — Crossref and OpenAlex often return the same paper.
-    _seen_keys = set()
-    _deduped = []
-    for s in suggestions:
-        key = (s.get("doi") or "").lower() or (s.get("title") or "").strip().lower()[:80]
-        if key in _seen_keys:
-            continue
-        _seen_keys.add(key)
-        _deduped.append(s)
-    suggestions = _deduped[:8]
-
-    # ── Co-citation overlap pass ─────────────────────────────────────
-    # For each title-search hit, ask Semantic Scholar for its reference
-    # list and count how many entries match other references in the
-    # current paper's bibliography (by paperId, when known). The candidate
-    # that shares the most refs with the rest of the bibliography is
-    # almost always the paper the author actually meant — this is the
-    # signal the user described as "algorithms of overlap".
-    import re as _re_overlap
-    try:
-        # Build a paperId set for the rest of the bibliography
-        other_pids: set = set()
-        for r in refs:
-            if r is target:
-                continue
-            for url_obj in (r.get("authoritative_urls") or []):
-                u = url_obj.get("url") or ""
-                m = _re_overlap.search(r"semanticscholar\.org/paper/([0-9a-f]+)", u, _re_overlap.IGNORECASE)
-                if m:
-                    other_pids.add(m.group(1).lower())
-        if other_pids and suggestions:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                for cand in suggestions:
-                    pid = cand.get("paperId")
-                    if not pid:
-                        cand["overlap"] = 0
-                        continue
-                    try:
-                        rr = await client.get(
-                            f"https://api.semanticscholar.org/graph/v1/paper/{pid}/references",
-                            params={"fields": "citedPaper.paperId", "limit": 100},
-                            headers=headers,
-                        )
-                        if rr.status_code != 200:
-                            cand["overlap"] = 0
-                            continue
-                        rd = rr.json()
-                        cited_ids = {
-                            (entry.get("citedPaper", {}) or {}).get("paperId", "").lower()
-                            for entry in (rd.get("data") or [])
-                        }
-                        cand["overlap"] = len(cited_ids & other_pids)
-                    except Exception:
-                        cand["overlap"] = 0
-            # Re-rank: candidates with bibliography overlap float to the top.
-            suggestions.sort(key=lambda c: c.get("overlap", 0), reverse=True)
-            # Mark the overlap winner so the UI can label it
-            if suggestions and suggestions[0].get("overlap", 0) > 0:
-                suggestions[0]["overlap_winner"] = True
-    except Exception as e:
-        logger.debug("Suggest-alt overlap pass skipped: %s", e)
-
-    # LLM augmentation: ask the user's configured default LLM what real
-    # paper the cited reference probably is. Often it can resolve cases
-    # where S2 title-search misses (e.g. mangled author lists, wrong
-    # year, hallucinated venue).
-    llm_candidates = []
-    try:
-        default_cfg = await db.get_default_llm_config(user_id=user_id)
-        if default_cfg and default_cfg.get("provider"):
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-            from refchecker.llm.base import create_llm_provider
-
-            llm_config = {}
-            if default_cfg.get("model"):
-                llm_config["model"] = default_cfg["model"]
-            if default_cfg.get("api_key"):
-                llm_config["api_key"] = default_cfg["api_key"]
-            if default_cfg.get("endpoint"):
-                llm_config["endpoint"] = default_cfg["endpoint"]
-            if default_cfg.get("reasoning_effort"):
-                llm_config["reasoning_effort"] = default_cfg["reasoning_effort"]
-            if default_cfg.get("max_tokens"):
-                llm_config["max_tokens"] = default_cfg["max_tokens"]
-            if default_cfg.get("context_length"):
-                llm_config["context_length"] = default_cfg["context_length"]
-            if default_cfg.get("timeout_seconds"):
-                llm_config["timeout_seconds"] = default_cfg["timeout_seconds"]
-            provider = create_llm_provider(default_cfg["provider"], llm_config)
-            if provider and (not hasattr(provider, "is_available") or provider.is_available()):
-                authors = target.get("authors")
-                if isinstance(authors, list):
-                    authors_str = ", ".join(str(a) for a in authors[:10])
-                else:
-                    authors_str = str(authors or "")
-                prompt = (
-                    "You are helping resolve a likely-hallucinated academic citation.\n"
-                    "Given the (possibly wrong) reference below, identify up to 3 REAL "
-                    "papers the author probably meant. For each, return strict JSON "
-                    "with fields: title, authors (array of strings), year (int), "
-                    "venue, doi (or null), arxiv_id (or null), reason (one short "
-                    "sentence on why this is the likely match).\n\n"
-                    f"Title: {title}\n"
-                    f"Authors: {authors_str}\n"
-                    f"Year: {target.get('year') or 'unknown'}\n"
-                    f"Venue: {target.get('venue') or 'unknown'}\n\n"
-                    "Respond with ONLY a JSON array of objects, no prose, no markdown."
-                )
-                # Tag this call under the `suggest` flow so the $ badge's
-                # per-flow breakdown attributes it correctly. The
-                # FlowScope's thread-local doesn't cross asyncio.to_thread,
-                # so set it INSIDE the worker, same pattern as
-                # `_run_llm_similar` further down this file.
-                _cid_for_suggest_alt = check_id
-                def _run_suggest_alt_llm():
-                    try:
-                        from refchecker.llm import usage_tracker as _ut
-                        if _cid_for_suggest_alt is not None:
-                            _ut.set_current_check(str(_cid_for_suggest_alt))
-                        with _ut.FlowScope("suggest"):
-                            return provider._call_llm(prompt)
-                    except Exception:
-                        return provider._call_llm(prompt)
-                try:
-                    raw = await asyncio.to_thread(_run_suggest_alt_llm)
-                except Exception as e:
-                    logger.debug("LLM suggest-alt call failed: %s", e)
-                    raw = None
-                if raw:
-                    import json as _json, re as _re
-                    text = raw.strip()
-                    # Strip code fences if present
-                    m = _re.search(r"\[.*\]", text, _re.DOTALL)
-                    if m:
-                        text = m.group(0)
-                    try:
-                        parsed = _json.loads(text)
-                        if isinstance(parsed, list):
-                            for item in parsed[:3]:
-                                if not isinstance(item, dict):
-                                    continue
-                                t = item.get("title")
-                                if not t:
-                                    continue
-                                doi_v = item.get("doi")
-                                arxiv_v = item.get("arxiv_id")
-                                url_v = None
-                                if doi_v:
-                                    url_v = f"https://doi.org/{doi_v}"
-                                elif arxiv_v:
-                                    url_v = f"https://arxiv.org/abs/{arxiv_v}"
-                                llm_candidates.append({
-                                    "title": t,
-                                    "authors": item.get("authors") or [],
-                                    "year": item.get("year"),
-                                    "venue": item.get("venue"),
-                                    "doi": doi_v,
-                                    "arxiv_id": arxiv_v,
-                                    "url": url_v,
-                                    "reason": item.get("reason"),
-                                    "source": "llm",
-                                })
-                    except Exception as e:
-                        logger.debug("Failed to parse LLM suggest-alt output: %s", e)
-    except Exception as e:
-        logger.debug("LLM suggest-alt augmentation skipped: %s", e)
-
-    # Put LLM candidates first when present (they typically explain themselves
-    # with `reason`), then fall back to S2 title-search matches.
-    return {
-        "reference_id": ref_id,
-        "cited_title": title,
-        "candidates": llm_candidates + suggestions,
-        "rate_limited": s2_rate_limited,
-    }
 
 
 class _SimilarPapersRequest(BaseModel):
@@ -10629,9 +9858,9 @@ async def _find_similar_papers_impl(req: _SimilarPapersRequest, current_user: Us
     #   - multiple independent sources surfaced it (S2 + OpenAlex / etc.)
     #   - it shares at least 2 references with the input paper
     # LLM-only candidates that failed active verification AND share no
-    # refs are filtered out — those are the "hallucinated suggestion +
+    # refs are filtered out — those are the "unverified suggestion or
     # fake DOI" case the user hit ("none are similar, some are
-    # hallucinations, wrong links"). The previous policy of "always
+    # fabricated entries or wrong links"). The previous policy of "always
     # show something" turned the tab into a noise generator on inputs
     # where nothing could be cross-verified.
     def _trustworthy(o):
@@ -10652,12 +9881,12 @@ async def _find_similar_papers_impl(req: _SimilarPapersRequest, current_user: Us
 
     pre_filter = list(out)
     final = [o for o in pre_filter if _trustworthy(o)]
-    dropped_hallucinations = len(pre_filter) - len(final)
-    if dropped_hallucinations:
+    dropped_untrustworthy = len(pre_filter) - len(final)
+    if dropped_untrustworthy:
         logger.info(
             "similar-papers: filtered %d untrustworthy LLM-only candidate(s) "
             "(no verification + no ref overlap)",
-            dropped_hallucinations,
+            dropped_untrustworthy,
         )
     final.sort(
         key=lambda o: (
@@ -10680,7 +9909,7 @@ async def _find_similar_papers_impl(req: _SimilarPapersRequest, current_user: Us
         "candidates": final[:limit],
         "source_counts": source_counts,
         "total_candidates": len(out),
-        "dropped_untrustworthy": dropped_hallucinations,
+        "dropped_untrustworthy": dropped_untrustworthy,
     }
 
 
@@ -10688,9 +9917,7 @@ class _CitationGraphRequest(BaseModel):
     references: list  # list of {id?, title, doi?, arxiv_id?, authors?}
     paper_title: Optional[str] = None
     # When true (and the local model is installed) attach a per-reference
-    # AI-generated-text band to each first-degree node so the graph's AI
     # ring renders on the bibliography itself, not just expanded nodes.
-    ai_detection: bool = False
 
 
 @app.post("/api/papers/citation-graph")
@@ -10731,10 +9958,7 @@ async def citation_graph(req: _CitationGraphRequest, current_user: UserInfo = De
             logger.debug("S2 fetch failed for %s: %s", url, e)
         return None
 
-    want_ai = bool(getattr(req, "ai_detection", False))
     _node_fields = "paperId,citationCount,references.paperId"
-    if want_ai:
-        _node_fields += ",abstract"
 
     # Cap at 60 — beyond that S2 rate-limits hard and the graph is unreadable.
     refs = refs[:60]
@@ -10773,8 +9997,7 @@ async def citation_graph(req: _CitationGraphRequest, current_user: UserInfo = De
                 "paperId": pid,
                 "citationCount": citation_count,
                 "references": references_list,
-                "abstract": (paper or {}).get("abstract") or "",
-                "title": ref.get("title") or (paper or {}).get("title") or "",
+                    "title": ref.get("title") or (paper or {}).get("title") or "",
             }
 
         # return_exceptions so one ref's failure can't sink the whole graph.
@@ -10807,51 +10030,7 @@ async def citation_graph(req: _CitationGraphRequest, current_user: UserInfo = De
                 seen_edges.add(key)
                 edges.append({"source": src, "target": tgt})
 
-    # Optional per-first-degree-node AI-gen band from the abstract (free,
-    # offline). Mirrors the /papers/expand pass so the ring renders on the
-    # bibliography nodes themselves, not only on expanded ones. Bounded by a
-    # semaphore; short abstracts short-circuit before any model load.
-    if want_ai:
-        try:
-            band_by_local = {}
-            from refchecker.ai_detection import run_detection
-            model_ready = False
-            try:
-                from refchecker.ai_detection import model_manager
-                model_ready = model_manager.is_model_installed() and model_manager.deps_available()
-            except Exception:
-                model_ready = False
-
-            if model_ready:
-                _ai_sem = asyncio.Semaphore(4)
-
-                async def _detect_node(det):
-                    abstract = (det.get("abstract") or "").strip()
-                    if not abstract:
-                        band_by_local[det["local_id"]] = {"band": "unavailable", "score": None}
-                        return
-                    async with _ai_sem:
-                        res = await asyncio.to_thread(
-                            run_detection, abstract, title=det.get("title"), backend="local"
-                        )
-                    band_by_local[det["local_id"]] = {"band": res.band, "score": res.overall_score}
-
-                await asyncio.gather(
-                    *[_detect_node(det) for det in ref_details], return_exceptions=True
-                )
-            else:
-                for det in ref_details:
-                    band_by_local[det["local_id"]] = {"band": "unavailable", "score": None}
-
-            for n in nodes_out:
-                b = band_by_local.get(n["id"])
-                if b:
-                    n["ai_detection_band"] = b["band"]
-                    n["ai_detection_score"] = b["score"]
-        except Exception as e:
-            logger.debug("Graph AI-gen (first-degree) skipped: %s", e)
-
-    return {"nodes": nodes_out, "edges": edges, "ai_detection": want_ai}
+    return {"nodes": nodes_out, "edges": edges}
 
 
 class _ExpandRequest(BaseModel):
@@ -10863,12 +10042,9 @@ class _ExpandRequest(BaseModel):
     # by title to resolve the canonical paperId and retry. Without this
     # the graph view shows lots of central refs with no spokes.
     title: Optional[str] = None
-    # When true, also estimate an AI-generated-text likelihood band for each
     # expanded article from its ABSTRACT, using the free offline local model.
     # Abstracts are short, so most come back "inconclusive" — this is an
     # advisory signal, never proof, and it never incurs API/LLM cost.
-    ai_detection: bool = False
-    ai_detection_device: AIDetectionDevice = "cpu"
 
 
 @app.post("/api/papers/expand")
@@ -10886,13 +10062,10 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
 
     # Pull abstracts too when the caller wants a per-expanded-article AI-gen
     # band (computed locally from the abstract below).
-    want_ai = bool(getattr(req, "ai_detection", False))
     _fields = (
         "citedPaper.paperId,citedPaper.title,citedPaper.year,citedPaper.authors,"
         "citedPaper.externalIds,citedPaper.citationCount"
     )
-    if want_ai:
-        _fields += ",citedPaper.abstract"
 
     # Retry with exponential backoff on 429s. Even with the per-key
     # quota, bursts from the graph 2nd-degree expansion (six parallel
@@ -11035,7 +10208,6 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
             "authors": [a.get("name") for a in (p.get("authors") or []) if a.get("name")],
             "doi": ext.get("DOI"),
             "arxiv_id": ext.get("ArXiv"),
-            "abstract": p.get("abstract") if want_ai else None,
         })
     items.sort(key=lambda x: x["citationCount"] or 0, reverse=True)
     items = items[:limit]
@@ -11087,54 +10259,7 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
             it["pre_verified"] = False
             it["times_seen"] = 0
 
-    # Optional per-expanded-article AI-gen band, computed locally from the
-    # abstract (free, offline). Abstracts are short, so should_abstain()
-    # short-circuits most to "inconclusive" before any model load — keeping
-    # this bounded and cost-free. Never uses a paid backend here.
-    if want_ai:
-        try:
-            from refchecker.ai_detection import run_detection
-            model_ready = False
-            try:
-                from refchecker.ai_detection import model_manager
-                model_ready = model_manager.is_model_installed() and model_manager.deps_available()
-            except Exception:
-                model_ready = False
-
-            # Cap concurrent CPU-bound inferences. Most abstracts short-circuit
-            # in should_abstain() before any model load, but a few long ones can
-            # each run a DeBERTa forward pass; a semaphore keeps the spike bounded
-            # and matches the asyncio.Semaphore idiom used elsewhere in this file.
-            _ai_sem = asyncio.Semaphore(4)
-
-            async def _detect_abstract(it):
-                abstract = (it.get("abstract") or "").strip()
-                if not abstract:
-                    it["ai_detection_band"] = "unavailable"
-                    return
-                async with _ai_sem:
-                    res = await asyncio.to_thread(
-                        run_detection, abstract, title=it.get("title"), backend="local",
-                        device=req.ai_detection_device,
-                    )
-                it["ai_detection_band"] = res.band
-                it["ai_detection_score"] = res.overall_score
-                it["ai_detection_reason"] = res.abstain_reason
-
-            if model_ready:
-                # return_exceptions so one item's failure can't wipe the bands
-                # already computed for the others (each mutates its own dict).
-                await asyncio.gather(
-                    *[_detect_abstract(it) for it in items], return_exceptions=True
-                )
-            else:
-                for it in items:
-                    it["ai_detection_band"] = "unavailable"
-                    it["ai_detection_reason"] = "model_not_installed"
-        except Exception as e:
-            logger.debug("Graph AI-gen expansion skipped: %s", e)
-
-    return {"paper_id": pid, "items": items, "ai_detection": want_ai}
+    return {"paper_id": pid, "items": items}
 
 
 class _AuthorProfileRequest(BaseModel):
@@ -11744,7 +10869,7 @@ async def usage_totals(current_user: UserInfo = Depends(require_user)):
     """Per-provider LLM usage + cost-estimate snapshot.
 
     Tokens are captured from each provider's response on the way through
-    the extractor / hallucination / web-search paths. Cost is derived
+    the extraction, verification, and web-search paths. Cost is derived
     from a hand-curated per-provider/per-model rate table; rows without
     a known rate report `cost_usd: null` and the grand total falls back
     to null too so the UI doesn't claim 'free' for unknown models."""
@@ -12164,167 +11289,6 @@ async def cancel_database_download(payload: Dict[str, str] = Body(...), current_
         return {"cancelled": False, "reason": "no running task"}
     state.task.cancel()
     return {"cancelled": True}
-
-
-@app.get("/api/ai-detection/model/status")
-async def ai_detection_model_status(current_user: UserInfo = Depends(require_user)):
-    """Install/download status for the local AI-text-detection model."""
-    from refchecker.ai_detection import model_manager
-    return model_manager.model_status()
-
-
-@app.get("/api/ai-detection/model/update-check")
-async def ai_detection_model_update_check(current_user: UserInfo = Depends(require_user)):
-    """Is a newer revision of the local model available on Hugging Face?
-
-    Deliberately a SEPARATE endpoint from /status (which the UI polls during
-    downloads) — this makes a network round-trip to HF, run off the hot path and
-    only when the Settings panel asks. Degrades to update_available=false on any
-    failure. The HF call can take a couple of seconds, so run it off-thread.
-    """
-    from refchecker.ai_detection import model_manager
-    return await asyncio.to_thread(model_manager.query_update_available)
-
-
-@app.post("/api/ai-detection/model/download")
-async def ai_detection_model_download(current_user: UserInfo = Depends(require_user)):
-    """Start (or report) the background download of the local model.
-
-    The model lives at a single shared filesystem path (not per-user), so in
-    a multi-user deployment only admins may mutate it; on the single-user
-    desktop app the (admin) user manages their own model.
-    """
-    if is_multiuser_mode():
-        _require_admin(current_user)
-    from refchecker.ai_detection import model_manager
-    if not model_manager.deps_available():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Local detection runtime not installed. Use “Install runtime” "
-                "in Settings → AI Detection (installs torch + transformers for "
-                "the managed model), or pick the LLM-judge or API backend instead. "
-                "ONNX Runtime is supported only with a model.onnx artifact."
-            ),
-        )
-    return model_manager.start_download()
-
-
-@app.delete("/api/ai-detection/model")
-async def ai_detection_model_delete(current_user: UserInfo = Depends(require_user)):
-    """Remove the downloaded local model from disk.
-
-    Admin-gated in multi-user mode: the model is shared across all users, so a
-    non-admin must not be able to delete it out from under everyone else.
-    """
-    if is_multiuser_mode():
-        _require_admin(current_user)
-    from refchecker.ai_detection import model_manager
-    return model_manager.delete_model()
-
-
-@app.get("/api/ai-detection/detectors")
-async def ai_detection_list_detectors(current_user: UserInfo = Depends(require_user)):
-    """Multi-detector registry + per-detector install status (R61).
-
-    Returns the full registry (Tier-1 runnable + Tier-2 heavy/opt-in) with real
-    size/license/RAID-note metadata and each detector's install state. Tier-2
-    detectors report ``installable: false`` so the UI shows them as unavailable
-    and never offers to run them (honesty: never a fabricated number).
-    """
-    from refchecker.ai_detection import model_manager
-    return model_manager.registry_status()
-
-
-@app.post("/api/ai-detection/install/{key}")
-async def ai_detection_install_detector(
-    key: str,
-    current_user: UserInfo = Depends(require_user),
-):
-    """Start (or report) the background download of a specific detector (R61).
-
-    Refuses unknown / non-installable (heavy Tier-2) keys honestly. The model
-    lives at a single shared filesystem path, so admin-gated in multi-user mode.
-    """
-    if is_multiuser_mode():
-        _require_admin(current_user)
-    from refchecker.ai_detection import model_manager
-    entry = model_manager.get_detector(key)
-    if not entry:
-        raise HTTPException(status_code=404, detail=f"Unknown detector: {key}")
-    if not entry.get("installable"):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Detector '{key}' is a heavy Tier-2 detector that is not "
-                "runnable in this build, so it cannot be installed."
-            ),
-        )
-    if not model_manager.deps_available():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Local detection runtime not installed. Use “Install runtime” "
-                "in Settings → AI Detection (installs torch + transformers)."
-            ),
-        )
-    return model_manager.start_detector_download(key)
-
-
-@app.delete("/api/ai-detection/model/{key}")
-async def ai_detection_delete_detector(
-    key: str,
-    current_user: UserInfo = Depends(require_user),
-):
-    """Remove a specific installed detector's weights from disk (R61).
-
-    Per-key counterpart of ``DELETE /api/ai-detection/model``. Admin-gated in
-    multi-user mode (detectors are shared across users).
-    """
-    if is_multiuser_mode():
-        _require_admin(current_user)
-    from refchecker.ai_detection import model_manager
-    if not model_manager.get_detector(key):
-        raise HTTPException(status_code=404, detail=f"Unknown detector: {key}")
-    return model_manager.delete_detector(key)
-
-
-@app.get("/api/ai-detection/runtime/status")
-async def ai_detection_runtime_status(current_user: UserInfo = Depends(require_user)):
-    """Status of the optional local-detector inference runtime (torch/onnx)."""
-    from refchecker.ai_detection import runtime_manager
-    return runtime_manager.runtime_status()
-
-
-@app.post("/api/ai-detection/runtime/install")
-async def ai_detection_runtime_install(
-    variant: str = "torch",
-    current_user: UserInfo = Depends(require_user),
-):
-    """Install the optional inference runtime from the app (pip --target).
-
-    ``variant`` is 'torch' (default; required by the bundled desklib model,
-    which ships safetensors only) or 'onnx' (smaller; needs an ONNX export).
-    Installed into a per-user dir and added to sys.path — no restart needed.
-    Admin-gated in multi-user mode (it mutates a shared on-disk runtime).
-    """
-    if is_multiuser_mode():
-        _require_admin(current_user)
-    from refchecker.ai_detection import runtime_manager
-    return runtime_manager.start_install(variant)
-
-
-@app.get("/api/ai-detection/diagnostics")
-async def ai_detection_diagnostics(current_user: UserInfo = Depends(require_user)):
-    """Debugger payload for Settings → AI Detection: the runtime install
-    status + live install log, plus recent (text-free) detection-run events
-    so users can see why detection produced a given band / no band."""
-    from refchecker.ai_detection import runtime_manager, model_manager, diagnostics
-    return {
-        "runtime": runtime_manager.runtime_status(),
-        "model": model_manager.model_status(),
-        "events": diagnostics.events(),
-    }
 
 
 # Mount static files for bundled frontend (if available)

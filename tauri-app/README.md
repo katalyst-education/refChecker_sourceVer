@@ -20,7 +20,6 @@ Desktop-specific surfaces include:
   and **add-to-reference-list** with dedup + a tracked before→after renumber diff.
 - **Per-reference chat + Summarize** grounded in the article text (separate model
   selection per feature, with an honest TL;DR/abstain fallback).
-- **AI-generated-text detection** (opt-in, advisory) with GPTZero-style visuals.
 - **Share / export** — self-contained HTML, publish link, Markdown / PDF / DOCX,
   RIS, and an animated video walkthrough; a **live token / $ telemetry** meter; a
   **Support** menu; and opt-in **Accounts · Teams · presence**

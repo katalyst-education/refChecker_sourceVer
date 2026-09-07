@@ -3,7 +3,6 @@ import { useConfigStore } from '../../stores/useConfigStore'
 import { useSettingsStore } from '../../stores/useSettingsStore'
 import { useAuthStore } from '../../stores/useAuthStore'
 import { useKeyStore } from '../../stores/useKeyStore'
-import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 import { openExternal, isTauri } from '../../utils/tauriBridge'
 import * as api from '../../utils/api'
 
@@ -26,8 +25,6 @@ export default function OnboardingBanner({ onOpenSettings }) {
   const multiuser = useAuthStore(s => s.multiuser)
   const browserKeys = useKeyStore(s => s.keys)
   const hasLocalKey = useKeyStore(s => s.hasKey)
-  const aiDetectionEnabled = useAiDetectionStore(s => s.enabled)
-  const aiDetectionBackend = useAiDetectionStore(s => s.backend)
   const [semanticScholarHasKey, setSemanticScholarHasKey] = useState(false)
   const [paperclipHasKey, setPaperclipHasKey] = useState(false)
   const [dismissed, setDismissed] = useState(() => {
@@ -67,7 +64,6 @@ export default function OnboardingBanner({ onOpenSettings }) {
   const hasBrowserKey = (key) => Boolean(browserKeys?.[key]) || Boolean(hasLocalKey?.(key))
   const hasSemanticScholarKey = hasBrowserKey('semantic_scholar') || semanticScholarHasKey
   const hasPaperclipKey = hasBrowserKey('paperclip') || paperclipHasKey
-  const hasAiDetection = !!aiDetectionEnabled
   // Previously auto-hid the banner when LLM and DB were both
   // configured, but that also hid the OPTIONAL bonus steps (Semantic
   // Scholar key, Paperclip key) before the user ever saw them. Users
@@ -100,7 +96,7 @@ export default function OnboardingBanner({ onOpenSettings }) {
           </div>
           <p className="text-sm mb-3" style={{ color: 'var(--color-text-secondary)' }}>
             {multiuser
-              ? 'Adding an LLM API key will make bibliography parsing and hallucination checks more accurate. You can paste an ArXiv ID right now and it will still work using public APIs.'
+              ? 'Adding an LLM API key will make bibliography parsing more accurate. You can paste an ArXiv ID right now and it will still work using public APIs.'
               : 'Two quick things will make it noticeably faster and more accurate. Both are optional — you can paste an ArXiv ID right now and it will work out of the box using public APIs.'}
           </p>
 
@@ -121,7 +117,7 @@ export default function OnboardingBanner({ onOpenSettings }) {
                   Add an LLM API key {hasLlm && <span style={{ color: 'var(--color-success, #22c55e)' }}>— configured</span>}
                 </div>
                 <div style={{ color: 'var(--color-text-secondary)' }}>
-                  Needed for accurate bibliography parsing and for the hallucination check.
+                  Used for accurate bibliography parsing.
                   {multiuser
                     ? ' OpenAI, Anthropic, Google, or Azure are supported.'
                     : ' OpenAI, Anthropic, Google, Azure, a local vLLM server, or LM Studio are supported.'}
@@ -148,10 +144,10 @@ export default function OnboardingBanner({ onOpenSettings }) {
                     (Optional) Download the offline database pack {dbPathSet && <span style={{ color: 'var(--color-success, #22c55e)' }}>— directory configured</span>}
                   </div>
                   <div style={{ color: 'var(--color-text-secondary)' }}>
-                    Speeds up verification 5–10× and lets you check papers without an internet round-trip.
+                    Speeds up verification and supports checks without an internet round-trip.
                     Open <button type="button" onClick={() => onOpenSettings?.('General')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → General</button>,
                     click <b>Use default</b> next to <i>Local Database Directory</i>, then{' '}
-                    <b>Build local databases</b> below it (Semantic Scholar, DBLP, OpenAlex).
+                    <b>Build local databases</b> below it.
                   </div>
                 </div>
               </li>
@@ -173,17 +169,11 @@ export default function OnboardingBanner({ onOpenSettings }) {
                   Bonus: Semantic Scholar API key {hasSemanticScholarKey && <span style={{ color: 'var(--color-success, #22c55e)' }}>— configured</span>}
                 </div>
                 <div style={{ color: 'var(--color-text-secondary)' }}>
-                  Cuts verification time from 5–10s to 1–2s per reference.
-                  Free key at{' '}
-                  <button
-                    type="button"
-                    onClick={() => openExternal('https://www.semanticscholar.org/product/api')}
-                    className="underline"
-                    style={{ color: 'var(--color-accent, #3b82f6)' }}
-                  >
+                  Reduces verification delays. Get a free key at{' '}
+                  <button type="button" onClick={() => openExternal('https://www.semanticscholar.org/product/api')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>
                     semanticscholar.org/product/api
                   </button>
-                  {' '}— paste it into <button type="button" onClick={() => onOpenSettings?.('API Keys')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → API Keys</button>.
+                  {' '}and add it under <button type="button" onClick={() => onOpenSettings?.('API Keys')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → API Keys</button>.
                 </div>
               </div>
             </li>
@@ -204,45 +194,11 @@ export default function OnboardingBanner({ onOpenSettings }) {
                   Bonus: Paperclip key (biomedical / arXiv full-text) {hasPaperclipKey && <span style={{ color: 'var(--color-success, #22c55e)' }}>— configured</span>}
                 </div>
                 <div style={{ color: 'var(--color-text-secondary)' }}>
-                  Activates a secondary verification tier over PMC, bioRxiv, medRxiv, and
-                  arXiv full text — useful for medical / life-sciences references the main
-                  pipeline misses. Get a key at{' '}
-                  <button
-                    type="button"
-                    onClick={() => openExternal('https://paperclip.gxl.ai/keys')}
-                    className="underline"
-                    style={{ color: 'var(--color-accent, #3b82f6)' }}
-                  >
+                  Adds full-text sources for medical and life-sciences references. Get a key at{' '}
+                  <button type="button" onClick={() => openExternal('https://paperclip.gxl.ai/keys')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>
                     paperclip.gxl.ai/keys
                   </button>
-                  {' '}— paste it into <button type="button" onClick={() => onOpenSettings?.('API Keys')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → API Keys</button>.
-                  The SDK is already bundled, so the next check picks it up automatically.
-                </div>
-              </div>
-            </li>
-
-            <li className="flex items-start gap-2">
-              <span
-                className="inline-flex items-center justify-center rounded-full text-xs font-semibold"
-                style={{
-                  width: 22, height: 22, flexShrink: 0,
-                  backgroundColor: hasAiDetection ? 'var(--color-success, #22c55e)' : 'var(--color-text-muted, #94a3b8)',
-                  color: 'white',
-                }}
-              >
-                {hasAiDetection ? '✓' : 'i'}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="font-medium">
-                  Bonus: AI-generated-text detection {hasAiDetection && <span style={{ color: 'var(--color-success, #22c55e)' }}>— enabled</span>}
-                </div>
-                <div style={{ color: 'var(--color-text-secondary)' }}>
-                  Optionally flag whether each checked article's prose looks AI-generated, with a
-                  low/medium/high likelihood band. Enable it under{' '}
-                  <button type="button" onClick={() => onOpenSettings?.('AI Detection')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → AI Detection</button>.
-                  {aiDetectionBackend === 'llm-judge' && ' LLM judge mode uses the same provider and model selected for hallucination checks.'}
-                  Note: detection is unreliable on technical and non-native-English academic writing —
-                  treat results as an advisory self-check, never as proof.
+                  {' '}and add it under <button type="button" onClick={() => onOpenSettings?.('API Keys')} className="underline" style={{ color: 'var(--color-accent, #3b82f6)' }}>Settings → API Keys</button>.
                 </div>
               </div>
             </li>
@@ -271,3 +227,4 @@ export default function OnboardingBanner({ onOpenSettings }) {
     </div>
   )
 }
+

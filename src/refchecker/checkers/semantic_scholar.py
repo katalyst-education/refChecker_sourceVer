@@ -688,7 +688,7 @@ class NonArxivReferenceChecker:
 
             # When the reference has authors, require meaningful author overlap.
             # A title-only match with completely wrong authors is NOT a version
-            # update — it's a different paper (or hallucinated reference).
+            # update — it is a different paper.
             if cited_authors:
                 version_authors = [
                     a.get('name', str(a)) if isinstance(a, dict) else str(a)
@@ -700,13 +700,13 @@ class NonArxivReferenceChecker:
                         return title_score + 0.01  # boost
                     # Check actual overlap. A version update should preserve most
                     # cited authors; one shared author on the same title is often
-                    # a different or hallucinated paper, not an arXiv revision.
-                    from refchecker.core.hallucination_policy import _compute_author_overlap
+                    # a different paper, not an arXiv revision.
+                    from refchecker.core.issue_policy import compute_author_overlap
                     cited_str = ', '.join(
                         str(a) for a in cited_authors
                     )
                     correct_str = ', '.join(version_authors)
-                    overlap = _compute_author_overlap(cited_str, correct_str)
+                    overlap = compute_author_overlap(cited_str, correct_str)
                     if overlap is not None and overlap < 0.6:
                         return -1.0  # low author overlap — not a version update
             return title_score

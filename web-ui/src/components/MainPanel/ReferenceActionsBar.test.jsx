@@ -155,6 +155,7 @@ describe('ReferenceRowActions progress feedback', () => {
       <ReferenceRowActions
         {...baseProps}
         searchOperation={{
+          operation_type: 'search-all',
           status: 'running',
           configured_sources: [
             { database: 'crossref', label: 'CrossRef' },
@@ -182,6 +183,7 @@ describe('ReferenceRowActions progress feedback', () => {
       <ReferenceRowActions
         {...baseProps}
         searchOperation={{
+          operation_type: 'search-all',
           status: 'completed',
           duration_ms: 1250,
           configured_sources: [

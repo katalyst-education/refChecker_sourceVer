@@ -4,14 +4,14 @@ RefChecker records every run in ``check_history`` (one row per paper checked,
 with per-reference detail in ``results_json``) but nothing ever surfaced that
 data in aggregate. ``/api/admin/activity`` returns a flat, anonymised dump of
 recent rows, which answers "what happened lately" but not "how many people use
-this, how much are they checking, and how much of it is hallucinated".
+this, how much are they checking, and what outcomes are observed".
 
 This module holds the read-only queries behind the admin dashboard. It is
 deliberately separate from ``backend/main.py`` so the SQL is testable without
 standing up the app.
 
 A note on where the numbers come from: aggregate counters
-(``total_refs``/``hallucination_count``/...) are persisted as columns on
+(``total_refs``/``errors_count``/...) are persisted as columns on
 ``check_history`` when a run completes, so fleet-wide totals are plain SQL SUMs
 and stay fast as history grows. Per-reference detail is only unpacked for a
 single check at a time, where the cost is bounded and the caller wants the
@@ -170,7 +170,7 @@ _CHECK_COLUMNS = """
     timestamp, started_at, completed_at, duration_ms,
     total_refs, refs_verified, refs_with_errors, refs_with_warnings_only,
     errors_count, warnings_count, suggestions_count, unverified_count,
-    hallucination_count, llm_provider, llm_model, extraction_method,
+    llm_provider, llm_model, extraction_method,
     cache_hit, batch_id, batch_label
 """
 
@@ -182,11 +182,9 @@ _TOTALS_SELECT = """
     COALESCE(SUM(errors_count), 0) AS errors,
     COALESCE(SUM(warnings_count), 0) AS warnings,
     COALESCE(SUM(unverified_count), 0) AS unverified,
-    COALESCE(SUM(hallucination_count), 0) AS hallucinations,
     COALESCE(SUM(refs_with_errors), 0) AS refs_with_errors,
     SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-    SUM(CASE WHEN hallucination_count > 0 THEN 1 ELSE 0 END) AS papers_with_hallucinations
+    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
 """
 
 
@@ -201,11 +199,9 @@ def _totals_from_row(row: Optional[Any]) -> Dict[str, int]:
             "errors",
             "warnings",
             "unverified",
-            "hallucinations",
             "refs_with_errors",
             "completed",
             "failed",
-            "papers_with_hallucinations",
         )
     }
 
@@ -269,8 +265,7 @@ async def get_overview(db_path: str, days: Optional[int] = 30) -> Dict[str, Any]
             f"""SELECT substr(timestamp, 1, 10) AS day,
                        COUNT(*) AS checks,
                        COUNT(DISTINCT user_id) AS users,
-                       COALESCE(SUM(total_refs), 0) AS references_checked,
-                       COALESCE(SUM(hallucination_count), 0) AS hallucinations
+                       COALESCE(SUM(total_refs), 0) AS references_checked
                 FROM check_history {where}
                 GROUP BY day ORDER BY day""",
             params,
@@ -283,7 +278,6 @@ async def get_overview(db_path: str, days: Optional[int] = 30) -> Dict[str, Any]
                         "checks": _int(item.get("checks")),
                         "users": _int(item.get("users")),
                         "references_checked": _int(item.get("references_checked")),
-                        "hallucinations": _int(item.get("hallucinations")),
                     }
                 )
 
@@ -307,7 +301,6 @@ async def get_overview(db_path: str, days: Optional[int] = 30) -> Dict[str, Any]
                     rows.append({"name": item.get("name"), "count": _int(item.get("count"))})
             breakdowns[key] = rows
 
-    totals["hallucination_rate"] = _rate(totals["hallucinations"], totals["references_checked"])
     totals["verified_rate"] = _rate(totals["references_verified"], totals["references_checked"])
     totals["avg_references_per_check"] = (
         round(totals["references_checked"] / totals["checks"], 1) if totals["checks"] else None
@@ -363,7 +356,6 @@ async def get_users(
                        COALESCE(SUM(c.errors_count), 0) AS errors,
                        COALESCE(SUM(c.warnings_count), 0) AS warnings,
                        COALESCE(SUM(c.unverified_count), 0) AS unverified,
-                       COALESCE(SUM(c.hallucination_count), 0) AS hallucinations,
                        MIN(c.timestamp) AS first_check_at,
                        MAX(c.timestamp) AS last_check_at,
                        (SELECT COUNT(*) FROM check_history h WHERE h.user_id = u.id)
@@ -403,10 +395,6 @@ async def get_users(
                         "errors": _int(item.get("errors")),
                         "warnings": _int(item.get("warnings")),
                         "unverified": _int(item.get("unverified")),
-                        "hallucinations": _int(item.get("hallucinations")),
-                        "hallucination_rate": _rate(
-                            _int(item.get("hallucinations")), _int(item.get("references_checked"))
-                        ),
                         "first_check_at": item.get("first_check_at"),
                         "last_check_at": item.get("last_check_at"),
                         "lifetime_checks": lifetime_checks,
@@ -447,8 +435,7 @@ async def get_users(
         where = "WHERE c.user_id IS NULL" + (" AND c.timestamp >= ?" if since else "")
         async with conn.execute(
             f"""SELECT COUNT(*) AS checks,
-                       COALESCE(SUM(c.total_refs), 0) AS references_checked,
-                       COALESCE(SUM(c.hallucination_count), 0) AS hallucinations
+                       COALESCE(SUM(c.total_refs), 0) AS references_checked
                 FROM check_history c {where}""",
             params,
         ) as cur:
@@ -456,7 +443,6 @@ async def get_users(
             unattributed = {
                 "checks": _int(row.get("checks")),
                 "references_checked": _int(row.get("references_checked")),
-                "hallucinations": _int(row.get("hallucinations")),
             }
 
     return {
@@ -536,7 +522,7 @@ async def get_papers(
                        c.failure_class, c.duration_ms, c.total_refs, c.refs_verified,
                        c.refs_with_errors, c.refs_with_warnings_only, c.errors_count,
                        c.warnings_count, c.suggestions_count, c.unverified_count,
-                       c.hallucination_count, c.llm_provider, c.llm_model,
+                       c.llm_provider, c.llm_model,
                        c.extraction_method, c.paper_identifier_type,
                        c.paper_identifier_value
                   FROM grouped g
@@ -586,10 +572,6 @@ async def get_papers(
                         "warnings": _int(item.get("warnings_count")),
                         "suggestions": _int(item.get("suggestions_count")),
                         "unverified": _int(item.get("unverified_count")),
-                        "hallucinations": _int(item.get("hallucination_count")),
-                        "hallucination_rate": _rate(
-                            _int(item.get("hallucination_count")), total_refs
-                        ),
                         "verified_rate": _rate(_int(item.get("refs_verified")), total_refs),
                     }
                 )
@@ -641,7 +623,6 @@ def _summarise_session(checks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "errors": sum(_int(c.get("errors_count")) for c in checks),
         "warnings": sum(_int(c.get("warnings_count")) for c in checks),
         "unverified": sum(_int(c.get("unverified_count")) for c in checks),
-        "hallucinations": sum(_int(c.get("hallucination_count")) for c in checks),
         "batch_labels": sorted(set(labels)),
         "items": checks,
     }
@@ -783,3 +764,4 @@ async def get_check_detail(db_path: str, check_id: int) -> Optional[Dict[str, An
 
     check["user"] = owner
     return check
+

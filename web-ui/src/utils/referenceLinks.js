@@ -20,7 +20,6 @@ const addLinkValue = (links, seen, type, value) => {
 
 export const formatReferenceLinkType = (type) => ({
   cited: 'Cited URL',
-  llm_verified: 'LLM verified URL',
   verified_url: 'Verified URL',
   semantic_scholar: 'Semantic Scholar',
   arxiv: 'ArXiv',
@@ -32,7 +31,7 @@ export const formatReferenceLinkType = (type) => ({
   source: 'Source',
 }[type] || 'URL')
 
-export function collectReferenceLinks(reference = {}, assessment = {}) {
+export function collectReferenceLinks(reference = {}) {
   const links = []
   const seen = new Set()
 
@@ -43,8 +42,6 @@ export function collectReferenceLinks(reference = {}, assessment = {}) {
   addLink(links, seen, 'cited', reference.url)
   addLink(links, seen, 'verified_url', reference.verified_url)
   addLink(links, seen, 'verified_url', reference.ref_verified_url)
-  addLink(links, seen, 'llm_verified', assessment.website_verified_url)
-  addLink(links, seen, 'llm_verified', assessment.link)
   addLink(links, seen, 'oa_pdf', reference.oa_pdf_url)
 
   const enrichmentLinks = reference.enrichment?.links

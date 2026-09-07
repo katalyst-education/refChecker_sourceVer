@@ -40,8 +40,8 @@
         <circle cx="533" cy="50" r="11" fill="#0b1020" stroke="#22d3ee" stroke-width="2.5">
           <animate attributeName="r" values="11;14;11" dur="5s" begin="2.5s" repeatCount="indefinite"/>
         </circle>
-        <text x="533" y="86" font-size="13" fill="#cbd5e1">Detect</text>
-        <text x="533" y="102" font-size="10" fill="#64748b">AI-text · hallucinations</text>
+        <text x="533" y="86" font-size="13" fill="#cbd5e1">Report</text>
+        <text x="533" y="102" font-size="10" fill="#64748b">evidence · corrections</text>
       </g>
       <g>
         <circle cx="740" cy="50" r="11" fill="#0b1020" stroke="#34d399" stroke-width="2.5">

@@ -9,12 +9,12 @@ import { logger } from '../../utils/logger'
 
 // Keep in sync with src/refchecker/config/settings.py DEFAULT_EXTRACTION_MODELS
 const PROVIDERS = [
-  { id: 'openai', name: 'OpenAI', defaultModel: 'gpt-4.1', requiresKey: true, hallucinationCapable: true },
-  { id: 'anthropic', name: 'Anthropic', defaultModel: 'claude-sonnet-4-6', requiresKey: true, hallucinationCapable: true },
-  { id: 'google', name: 'Google', defaultModel: 'gemini-3.1-flash-lite-preview', requiresKey: true, hallucinationCapable: true },
-  { id: 'azure', name: 'Azure OpenAI', defaultModel: 'gpt-4.1', requiresKey: true, requiresEndpoint: true, hallucinationCapable: true },
-  { id: 'vllm', name: 'vLLM (Local)', defaultModel: 'meta-llama/Llama-3.1-8B-Instruct', requiresKey: false, requiresEndpoint: true, isLocal: true, hallucinationCapable: false },
-  { id: 'lmstudio', name: 'LM Studio (Local)', defaultModel: '', requiresKey: false, requiresEndpoint: true, requiresModel: true, reasoningConfigurable: true, isLocal: true, hallucinationCapable: false },
+  { id: 'openai', name: 'OpenAI', defaultModel: 'gpt-4.1', requiresKey: true },
+  { id: 'anthropic', name: 'Anthropic', defaultModel: 'claude-sonnet-4-6', requiresKey: true },
+  { id: 'google', name: 'Google', defaultModel: 'gemini-3.1-flash-lite-preview', requiresKey: true },
+  { id: 'azure', name: 'Azure OpenAI', defaultModel: 'gpt-4.1', requiresKey: true, requiresEndpoint: true },
+  { id: 'vllm', name: 'vLLM (Local)', defaultModel: 'meta-llama/Llama-3.1-8B-Instruct', requiresKey: false, requiresEndpoint: true, isLocal: true },
+  { id: 'lmstudio', name: 'LM Studio (Local)', defaultModel: '', requiresKey: false, requiresEndpoint: true, requiresModel: true, reasoningConfigurable: true, isLocal: true },
 ]
 
 const LMSTUDIO_DEFAULT_MAX_TOKENS = 4000
@@ -26,7 +26,7 @@ const REFERENCE_PAGE_TOKEN_RANGE = [600, 900]
  * Modal for adding/editing LLM configurations
  */
 export default function LLMConfigModal({ isOpen, onClose, editConfig = null, prefillConfig = null, selectionMode = 'extraction' }) {
-  const { addConfig, updateConfig, configs, selectHallucinationConfig, selectConfig } = useConfigStore()
+  const { addConfig, updateConfig, configs, selectConfig } = useConfigStore()
   const multiuser = useAuthStore(state => state.multiuser)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isValidating, setIsValidating] = useState(false)
@@ -412,11 +412,7 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
         savedConfig = await updateConfig(prefillConfig.id, configData)
         // Re-fetch configs to get updated has_key flags from backend
         await useConfigStore.getState().fetchConfigs()
-        if (selectionMode === 'hallucination') {
-          selectHallucinationConfig(prefillConfig.id)
-        } else {
-          await selectConfig(prefillConfig.id)
-        }
+        await selectConfig(prefillConfig.id)
         logger.info('LLMConfigModal', 'Keyless config updated with key')
       } else {
         savedConfig = await addConfig(configData, { selectFor: selectionMode })
@@ -480,9 +476,7 @@ export default function LLMConfigModal({ isOpen, onClose, editConfig = null, pre
             className="mt-1 text-xs"
             style={{ color: 'var(--color-text-muted)' }}
           >
-            {selectedProvider?.hallucinationCapable
-              ? 'Can be used for extraction and hallucination checks.'
-              : `${selectedProvider?.name || 'This local provider'} is available for extraction only.`}
+            Used for bibliography extraction and other configured LLM-assisted tasks.
           </p>
         </div>
 

@@ -42,17 +42,7 @@ for root, suffixes in [
             rel_parent = path.parent.relative_to(REPO_ROOT)
             datas.append((str(path), str(rel_parent)))
 
-# Ship the refchecker package SOURCE (.py) alongside the bytecode. PyInstaller
-# normally bundles only .pyc, so a module's __file__ points to a path under the
-# extraction dir that does NOT exist. When torch/transformers emit a warning (or
-# anything raises a traceback) while a refchecker frame is on the stack, Python's
-# formatter tries to read that frame's source line via that path and raises
-#   FileNotFoundError: .../_MEIxxxx/refchecker/ai_detection/local_backend.py
-# which surfaced as "local detection model failed to load". Placing the .py at
-# the same path the loader reports makes inspect/warnings/tracebacks behave
-# exactly as in dev (no read failure), for every module — not just the one that
-# happened to warn this time. Target path mirrors the import name (refchecker/…,
-# NOT src/refchecker/…), matching the reported __file__.
+# Ship package source alongside bytecode so tracebacks can show source lines.
 _src_root = REPO_ROOT / "src"
 _pkg_src = _src_root / "refchecker"
 if _pkg_src.exists():
@@ -64,7 +54,7 @@ if _pkg_src.exists():
 datas += collect_data_files("uvicorn")
 datas += collect_data_files("fastapi")
 # reportlab ships its fonts (Vera.ttf, embedded into generated PDFs) as package
-# data — required for the text→PDF conversion the native document viewer uses
+# data â€” required for the textâ†’PDF conversion the native document viewer uses
 # for non-PDF sources. Without this the conversion fails (graceful: text view).
 datas += collect_data_files("reportlab")
 
@@ -110,57 +100,6 @@ hiddenimports += [
     "python_multipart",
 ]
 
-# Bundle pip (+ its vendored deps) so the optional AI-detection inference
-# runtime can be installed from the app in the frozen desktop build: the
-# install re-invokes this bundle in a clean `--pip-install` subprocess that runs
-# `pip install --target <app-data>`, resolving wheels for THIS interpreter's
-# version/platform (ABI-matched). Without a bundled pip the subprocess falls
-# back to downloading the standalone pip.pyz.
-try:
-    _pip_datas, _pip_bins, _pip_hidden = collect_all("pip")
-    datas += _pip_datas
-    hiddenimports += _pip_hidden
-except Exception:
-    pass  # pip missing at build time → runtime falls back to pip.pyz download
-
-# Belt-and-suspenders for the known import-shadowing case: the base app imports
-# only `from tqdm import tqdm`, so PyInstaller freezes a PARTIAL tqdm (no
-# tqdm/auto.py) that shadows the complete pip-installed runtime copy
-# ("No module named 'tqdm.auto'"). collect_all bundles the COMPLETE tqdm so it
-# works even if the runtime_manager meta-path finder is bypassed. (tqdm is a
-# build-time base dep, so this is present.)
-try:
-    _tq_datas, _tq_bins, _tq_hidden = collect_all("tqdm")
-    datas += _tq_datas
-    hiddenimports += _tq_hidden
-except Exception:
-    pass
-
-# Ship the FULL Python standard library. The optional AI-detection runtime
-# (torch / transformers, pip-installed at runtime into a --target dir) imports
-# stdlib modules the base app never uses — e.g. torch needs `timeit`, which
-# PyInstaller would otherwise omit, giving "ModuleNotFoundError: No module
-# named 'timeit'" at import time. Adding every stdlib top-level name (plus the
-# submodules of the packages torch/transformers/numpy reach into) makes any
-# pip-installed runtime importable inside the frozen interpreter.
-import sys as _sys
-_STDLIB_SKIP = {
-    "tkinter", "turtle", "turtledemo", "idlelib", "lib2to3", "antigravity",
-    "this", "test", "pydoc_data", "ensurepip", "venv",
-}
-hiddenimports += [
-    _m for _m in sorted(getattr(_sys, "stdlib_module_names", set()))
-    if not _m.startswith("_") and _m not in _STDLIB_SKIP
-]
-for _pkg in ("xml", "concurrent", "ctypes", "multiprocessing", "logging",
-             "json", "http", "email", "unittest", "importlib", "encodings",
-             "collections", "sqlite3", "urllib", "html", "wsgiref", "asyncio",
-             "dbm", "curses"):
-    try:
-        hiddenimports += collect_submodules(_pkg)
-    except Exception:
-        pass
-
 a = Analysis(
     [ENTRY_SCRIPT],
     pathex=PATHS,
@@ -178,8 +117,7 @@ a = Analysis(
         "notebook",
         "torch",         # vllm is opt-in; keep desktop bundle small
         "vllm",
-        "transformers",  # also the AI-detection local backend — opt-in download
-        "onnxruntime",   # AI-detection local backend runtime — installed separately
+        "transformers",  # vLLM is opt-in; keep desktop bundle small
     ],
     noarchive=False,
 )
@@ -205,3 +143,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
+

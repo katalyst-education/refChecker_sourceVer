@@ -24,15 +24,13 @@ const overview = {
     errors: 30,
     warnings: 12,
     unverified: 70,
-    hallucinations: 9,
-    hallucination_rate: 1.13,
     verified_rate: 87.5,
     avg_references_per_check: 20,
     avg_duration_ms: 4200,
   },
   daily: [
-    { day: '2026-08-10', checks: 3, users: 2, references_checked: 60, hallucinations: 1 },
-    { day: '2026-08-11', checks: 7, users: 3, references_checked: 140, hallucinations: 2 },
+    { day: '2026-08-10', checks: 3, users: 2, references_checked: 60 },
+    { day: '2026-08-11', checks: 7, users: 3, references_checked: 140 },
   ],
   breakdowns: {
     source_types: [{ name: 'url', count: 30 }, { name: 'pdf', count: 10 }],
@@ -52,14 +50,13 @@ const users = {
       is_admin: false,
       checks: 22,
       references_checked: 400,
-      hallucinations: 5,
       last_check_at: '2026-08-11 10:00:00',
       lifetime_checks: 30,
       lifetime_last_check_at: '2026-08-11 10:00:00',
       never_checked: false,
     },
   ],
-  unattributed: { checks: 4, references_checked: 40, hallucinations: 0 },
+  unattributed: { checks: 4, references_checked: 40 },
   counts: { total_users: 12, active_users: 5, never_checked_users: 6, idle_users: 1 },
 }
 
@@ -84,7 +81,6 @@ const papers = {
       refs_verified: 18,
       errors: 1,
       warnings: 2,
-      hallucinations: 4,
       user: { id: 7, name: 'Ada Lovelace', email: 'ada@example.com' },
     },
     {
@@ -103,7 +99,6 @@ const papers = {
       refs_verified: 5,
       errors: 0,
       warnings: 0,
-      hallucinations: 0,
       user: null,
     },
   ],
@@ -122,10 +117,9 @@ const sessions = {
       errors: 1,
       warnings: 0,
       unverified: 1,
-      hallucinations: 2,
       batch_labels: [],
       items: [
-        { id: 501, paper_title: 'On Computable Numbers', total_refs: 20, hallucination_count: 2 },
+        { id: 501, paper_title: 'On Computable Numbers', total_refs: 20 },
       ],
     },
   ],
@@ -139,12 +133,11 @@ const checkDetail = {
   total_refs: 3,
   refs_verified: 1,
   errors_count: 1,
-  hallucination_count: 1,
   llm_model: 'gpt-5',
   extraction_method: 'llm',
   references: [
     { title: 'A real paper', status: 'verified', authors: ['X Y'], year: 2020 },
-    { title: 'A fake paper', status: 'hallucination', authors: ['Nobody'], year: 2021 },
+    { title: 'An unresolved paper', status: 'unverified', authors: ['Unknown'], year: 2021 },
     {
       title: 'A flawed paper',
       status: 'verified',
@@ -170,7 +163,7 @@ describe('AdminPanel', () => {
     expect(mocks.getAdminOverview).not.toHaveBeenCalled()
   })
 
-  it('shows headline totals including hallucinations', async () => {
+  it('shows headline totals', async () => {
     const { container } = render(<AdminPanel open onClose={() => {}} />)
 
     await waitFor(() => expect(screen.getByText('Checks')).toBeTruthy())
@@ -186,9 +179,7 @@ describe('AdminPanel', () => {
     expect(statFor('Users')).toBe('5')
     expect(statFor('Checks')).toBe('40')
     expect(statFor('References')).toBe('800')
-    expect(statFor('Hallucinated')).toBe('9')
     expect(statFor('Avg duration')).toBe('4.2s')
-    expect(screen.getByText('1.1% of refs')).toBeTruthy()
     expect(screen.getByText('87.5%')).toBeTruthy()
     expect(screen.getByText('12 registered')).toBeTruthy()
   })
@@ -222,7 +213,6 @@ describe('AdminPanel', () => {
       checks: i,
       users: 1,
       references_checked: i * 2,
-      hallucinations: 0,
     }))
     mocks.getAdminOverview.mockResolvedValue({
       data: { ...overview, daily: longDaily },
@@ -252,7 +242,7 @@ describe('AdminPanel', () => {
     fireEvent.click(paper)
 
     await waitFor(() => expect(mocks.getAdminCheckDetail).toHaveBeenCalledWith(501))
-    expect(await screen.findByText('A fake paper')).toBeTruthy()
+    expect(await screen.findByText('An unresolved paper')).toBeTruthy()
   })
 
   it('labels each reference using the shared status precedence', async () => {
@@ -262,10 +252,10 @@ describe('AdminPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /users/i }))
     fireEvent.click(await screen.findByText('Ada Lovelace'))
     fireEvent.click(await screen.findByText('On Computable Numbers'))
-    await screen.findByText('A fake paper')
+    await screen.findByText('An unresolved paper')
 
-    // hallucination beats everything; an error beats a nominal "verified".
-    expect(screen.getByLabelText('Hallucinated')).toBeTruthy()
+    // Errors take precedence over nominal verification; unresolved rows abstain.
+    expect(screen.getByLabelText('Unverified')).toBeTruthy()
     expect(screen.getByLabelText('Error')).toBeTruthy()
     expect(screen.getByLabelText('Verified')).toBeTruthy()
   })
@@ -321,18 +311,6 @@ describe('AdminPanel', () => {
     fireEvent.click(usersTab)
     expect(usersTab.getAttribute('aria-pressed')).toBe('true')
     expect(overviewTab.getAttribute('aria-pressed')).toBe('false')
-  })
-
-  it('colours hallucinations with the hallucination hue, not the error hue', async () => {
-    const { container } = render(<AdminPanel open onClose={() => {}} />)
-    await waitFor(() => expect(screen.getByText('Checks')).toBeTruthy())
-
-    const hallucinated = Array.from(container.querySelectorAll('div')).find(
-      (el) => el.className.includes('text-xs') && el.textContent === 'Hallucinated'
-    )
-    expect(hallucinated?.nextElementSibling?.getAttribute('style')).toContain(
-      'var(--color-hallucination)'
-    )
   })
 
   describe('staying current', () => {
@@ -421,7 +399,6 @@ describe('AdminPanel', () => {
           provider: 'google',
           checks: 0,
           references_checked: 0,
-          hallucinations: 0,
           lifetime_checks: 0,
           lifetime_last_check_at: null,
           never_checked: true,
@@ -434,7 +411,6 @@ describe('AdminPanel', () => {
           provider: 'github',
           checks: 0,
           references_checked: 0,
-          hallucinations: 0,
           lifetime_checks: 14,
           lifetime_last_check_at: '2026-01-05 09:00:00',
           never_checked: false,
@@ -494,7 +470,6 @@ describe('AdminPanel', () => {
       expect(screen.getByText('thesis.pdf')).toBeTruthy()
       expect(screen.getByText('20 refs')).toBeTruthy()
       expect(screen.getByText('18 verified')).toBeTruthy()
-      expect(screen.getByText('4 hallucinated')).toBeTruthy()
       expect(screen.getByText(/2 papers/i)).toBeTruthy()
     })
 
@@ -528,7 +503,7 @@ describe('AdminPanel', () => {
       fireEvent.click(await screen.findByText('Attention Is All You Need'))
 
       await waitFor(() => expect(mocks.getAdminCheckDetail).toHaveBeenCalledWith(501))
-      expect(await screen.findByText('A fake paper')).toBeTruthy()
+      expect(await screen.findByText('An unresolved paper')).toBeTruthy()
 
       const back = screen.getByRole('button', { name: /back to papers/i })
       fireEvent.click(back)

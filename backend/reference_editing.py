@@ -74,7 +74,7 @@ def clear_previous_reference_verification(reference: Dict[str, Any]) -> None:
         "verified_title", "verified_authors", "verified_year", "verified_venue",
         "verified_doi", "verified_arxiv_id", "verified_url", "authoritative_urls",
         "matched_db", "matched_database", "enrichment", "errors", "warnings",
-        "infos", "suggestions", "hallucination_assessment",
+        "infos", "suggestions",
         "publication_year_assessment", "match_decision",
     ):
         reference.pop(field, None)

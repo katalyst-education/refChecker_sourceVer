@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // R45 acceptance: a vitest comparing the SHARE video counts to the
 // StatsSection video counts for the SAME article. ShareModal and StatsSection
 // each independently derive the per-article video `stats` (style-aware
-// buildReferenceSummary → { total, verified, warnings, errors+hallucinated }).
+// buildReferenceSummary → { total, verified, warnings, errors, unverified }).
 // This test renders BOTH surfaces against identical inputs, captures the
 // `stats` prop each one feeds to ShareAnimationCanvas, and asserts they are
 // deep-equal — so any future drift in either grouping fails CI.
@@ -46,12 +46,11 @@ vi.mock('../../utils/api', () => ({
 
 // --- Store mocks faithful to both surfaces' selector usage -----------------
 // ShareModal calls useCheckStore() with NO selector (whole store) and reads
-// `.references` / `.aiDetection` / `.stats`. StatsSection calls it WITH a
+// `.references` / `.stats`. StatsSection calls it WITH a
 // selector for statusFilter/setStatusFilter and uses getState(). The mock must
 // honour both call shapes.
 const checkState = {
   references: [],
-  aiDetection: null,
   stats: {},
   statusFilter: [],
   setStatusFilter: vi.fn(),
@@ -91,8 +90,7 @@ const makeRef = (status, { errors = [], warnings = [], ...rest } = {}) => ({
 })
 
 // A spread of statuses that exercises every bucket the grouping touches:
-// 3 error refs (2 also warn), 2 warning-only, 1 verified, 1 hallucinated.
-// Expected grouped video stats: total 7, verified 1, warnings 2, errors 3+1=4.
+// 3 error refs (2 also warn), 2 warning-only, 1 verified, 1 unverified.
 const references = [
   makeRef('error', {
     errors: [{ error_type: 'author', message: 'author mismatch' }],
@@ -108,10 +106,9 @@ const references = [
   makeRef('warning', { warnings: [{ message: 'year off by 1' }] }),
   makeRef('warning', { warnings: [{ message: 'venue not found' }] }),
   makeRef('verified'),
-  makeRef('hallucination', {
-    title: 'A fabricated paper that does not exist',
-    authors: ['Nobody'],
-    hallucination_assessment: { verdict: 'LIKELY' },
+  makeRef('unverified', {
+    title: 'A reference not found in configured sources',
+    authors: ['Unknown'],
   }),
 ]
 
@@ -137,8 +134,6 @@ function renderStatsSection(readChips = false) {
       references={references}
       paperTitle="Parity Paper"
       paperSource="https://example.com/parity"
-      aiBand="high"
-      aiScore={0.91}
       videoKey="statvid-42"
     />
   )
@@ -168,7 +163,6 @@ beforeEach(() => {
     selectedCheck: {
       status: 'completed',
       references,
-      ai_detection: { band: 'high', overall_score: 0.91 },
     },
   }
   styleState = { format: 'ieee' }
@@ -182,9 +176,7 @@ afterEach(() => {
 // Bug B / R45: the share card/video must show the SAME counts the user sees in
 // the StatsSection results bar. StatsSection no longer renders the animation
 // inline (it lives only in the Share popup), so parity is now measured against
-// the VISIBLE bar chips. Crucially, errors are NOT grouped with hallucinated —
-// the bar's errors chip is references.errors only (hallucinated is its own
-// bucket), so grouping made the share read 9 vs the bar's 7.
+// the visible bar chips.
 describe('ShareModal video counts equal the StatsSection results bar (R45 / Bug-B)', () => {
   it('feeds ShareAnimationCanvas the SAME {verified,warnings,errors} the bar shows', () => {
     const { chips } = renderStatsSection(true)
@@ -194,7 +186,7 @@ describe('ShareModal video counts equal the StatsSection results bar (R45 / Bug-
     // Equal to the visible bar chips — errors un-grouped (3, not 4).
     expect(shareStats.verified).toBe(chips.verified) // 1
     expect(shareStats.warnings).toBe(chips.warnings) // 2
-    expect(shareStats.errors).toBe(chips.errors)     // 3 (hallucinated NOT folded in)
+    expect(shareStats.errors).toBe(chips.errors)     // 3
     expect(shareStats).toEqual({ total: 7, verified: 1, warnings: 2, errors: 3 })
   })
 

@@ -76,7 +76,6 @@ describe('StatsSection warning count excludes refs that also have errors', () =>
       warnings_count: 4,
       suggestions_count: 0,
       unverified_count: 0,
-      hallucination_count: 0,
     }
 
     render(
@@ -203,45 +202,6 @@ describe('HealthBadge counts agree with StatsSection chip counts (R16)', () => {
     expect(errChips.some(c => within(c).queryByText(String(errFromBadge)))).toBe(true)
   })
 
-  // A hallucinated ref carries its error entries as EVIDENCE of the
-  // hallucination. The chips suppress those (counting the ref only in the
-  // hallucination bucket); the badge must too. Before the fix the
-  // error/warning block ran unconditionally, so the hallucinated ref bumped
-  // BOTH halluc and errors → badge "1 error" vs chip "0 references with errors".
-  it('does not count a hallucinated ref with error evidence as an error', () => {
-    const refs = [
-      makeRef('error', { errors: [{ error_type: 'title', message: 'title mismatch' }] }),
-      makeRef('hallucination', {
-        title: 'A fabricated paper that does not exist',
-        authors: ['Nobody'],
-        errors: [{ error_type: 'not_found', message: 'no matching record found' }],
-        hallucination_assessment: { verdict: 'LIKELY' },
-      }),
-    ]
-
-    const { container, unmount } = render(<HealthBadge references={refs} />)
-    const tooltip = container.querySelector('span[title]').getAttribute('title')
-    const errFromBadge = Number(/(\d+)\s+error/.exec(tooltip)?.[1])
-    const warnFromBadge = Number(/(\d+)\s+warning/.exec(tooltip)?.[1])
-    unmount()
-
-    // Only the genuine error ref is an error; the hallucinated ref's error
-    // entry is evidence, not a counted error.
-    expect(errFromBadge).toBe(1)
-    expect(warnFromBadge).toBe(0)
-
-    render(
-      <StatsSection
-        stats={{ total_refs: 2, processed_refs: 2 }}
-        isComplete={true}
-        references={refs}
-        paperTitle="Hallucination Paper"
-        paperSource="https://example.com/halluc"
-      />
-    )
-    const errChips = screen.getAllByTitle(/references? with (an error|errors)/i)
-    expect(errChips.some(c => within(c).queryByText(String(errFromBadge)))).toBe(true)
-  })
 })
 
 // R48: ONE canonical count/health across the Summary badge AND the report card.
@@ -313,7 +273,7 @@ describe('HealthBadge and StatsSection share one canonical summary (R48)', () =>
   })
 })
 
-describe('StatsSection hallucination count', () => {
+describe('StatsSection progress count', () => {
   it('uses backend processed_refs instead of deriving progress from status buckets', () => {
     const references = [
       ...Array.from({ length: 24 }, () => makeRef('verified')),
@@ -325,7 +285,6 @@ describe('StatsSection hallucination count', () => {
       })),
       ...Array.from({ length: 4 }, () => makeRef('unverified', {
         errors: [{ error_type: 'unverified', message: 'not found' }],
-        hallucination_check_pending: true,
       })),
     ]
 
@@ -338,7 +297,6 @@ describe('StatsSection hallucination count', () => {
           refs_with_errors: 14,
           refs_with_warnings_only: 8,
           unverified_count: 4,
-          hallucination_count: 0,
         }}
         isComplete={false}
         references={references}
@@ -349,37 +307,6 @@ describe('StatsSection hallucination count', () => {
 
     expect(screen.getByText('50/59 checked')).toBeTruthy()
     expect(screen.getByText('of 50')).toBeTruthy()
-    expect(screen.queryByTitle(/could not be verified/i)).toBeNull()
-    expect(screen.queryByRole('button', { name: /unverified/i })).toBeNull()
-  })
-
-  it('does not count LLM-found matching metadata as hallucinated', () => {
-    const references = [
-      makeRef('hallucination', {
-        title: 'Pytag: Tabletop games for multi-agent reinforcement learning',
-        authors: ['Martin Balla', 'M. Long', 'George E. James Goodman'],
-        year: 2024,
-        hallucination_assessment: {
-          verdict: 'LIKELY',
-          link: 'https://arxiv.org/abs/2405.18123',
-          found_title: 'Pytag: Tabletop games for multi-agent reinforcement learning',
-          found_authors: 'Martin Balla, G. E. Long, George E. James Goodman',
-          found_year: '2024',
-        },
-      }),
-    ]
-
-    render(
-      <StatsSection
-        stats={{ total_refs: 1, processed_refs: 1, hallucination_count: 1 }}
-        isComplete={true}
-        references={references}
-        paperTitle="Test Paper"
-        paperSource="https://example.com/paper"
-      />
-    )
-
-    expect(screen.queryByTitle(/likely hallucinated/i)).toBeNull()
   })
 })
 

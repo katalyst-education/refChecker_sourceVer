@@ -12,10 +12,7 @@ import {
   displayReferenceValue,
   countLabel,
 } from '../../utils/formatters'
-import {
-  getEffectiveReferenceStatus,
-  llmFoundMetadataMatchesCitation,
-} from '../../utils/referenceStatus'
+import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import { openExternal, isTauri } from '../../utils/tauriBridge'
 import { fetchAuthorProfile, findAuthorProfile, getVenueProfile } from '../../utils/api'
 import { useStyleStore } from '../../stores/useStyleStore'
@@ -46,12 +43,6 @@ const handleExternalClick = (url) => (e) => {
 }
 
 const urlPattern = /https?:\/\/[^\s]+/g
-
-// R04: client-side wall-clock cap on the hallucination "checking" state.
-// If a ref stays pending longer than this (~180s) the FE reverts it to its
-// base status with a "check timed out" note, so a missing backend
-// reference_result can never wedge the card on the spinner forever.
-const HALLUCINATION_PENDING_TIMEOUT_MS = 180000
 
 function normalizeCitationMarkerText(value) {
   return String(value || '')
@@ -275,44 +266,7 @@ function CollapsibleText({ text }) {
 const ReferenceCard = memo(function ReferenceCard({ reference, index, displayIndex, totalRefs: _totalRefs, isCheckComplete = false }) {
   // Always use the original index for consistent numbering, even when filtered
   const numberToShow = typeof index === 'number' ? index : (typeof displayIndex === 'number' ? displayIndex : 0)
-  const assessment = reference.hallucination_assessment || {}
-  const foundMetadataMatchesCitation = llmFoundMetadataMatchesCitation(reference)
-
-  // R04 FE safety net: if a ref sits in the hallucination "checking" state
-  // for longer than HALLUCINATION_PENDING_TIMEOUT_MS (~180s) — e.g. the
-  // backend's final reference_result never arrived — stop spinning forever.
-  // We locally treat the check as finished (no pending flag) so the card
-  // falls back to its real base status and shows a "check timed out" note,
-  // instead of wedging on "Checking for hallucination with LLM…".
-  const [hallucinationTimedOut, setHallucinationTimedOut] = useState(false)
-  // Only the backend knows whether an LLM check was actually scheduled.
-  // Inferring it from an unverified result creates a false spinner (and later
-  // a false timeout) when no hallucination LLM is configured.
-  const isHallucinationPending = Boolean(
-    reference.hallucination_check_pending && !reference.hallucination_assessment,
-  )
-  useEffect(() => {
-    if (!isHallucinationPending) {
-      // Pending resolved (or never started) — clear any prior timeout flag
-      // so a later legitimate re-check isn't immediately marked timed-out.
-      setHallucinationTimedOut(false)
-      return undefined
-    }
-    if (hallucinationTimedOut) return undefined
-    const t = setTimeout(() => setHallucinationTimedOut(true), HALLUCINATION_PENDING_TIMEOUT_MS)
-    return () => clearTimeout(t)
-  }, [isHallucinationPending, hallucinationTimedOut])
-
-  // Once timed out, evaluate status as if the check had finished: clear the
-  // pending flag AND treat the check as complete, so the card resolves to its
-  // real base status (verified/error/warning/etc.) instead of staying on
-  // 'checking' — covering both the explicit-pending and the unverified-during-
-  // active-check cases.
-  const statusReference = hallucinationTimedOut && reference.hallucination_check_pending
-    ? { ...reference, hallucination_check_pending: false }
-    : reference
-  const statusIsComplete = isCheckComplete || (hallucinationTimedOut && isHallucinationPending)
-  const status = getEffectiveReferenceStatus(statusReference, statusIsComplete)
+  const status = getEffectiveReferenceStatus(reference, isCheckComplete)
 
   // Subscribe to the shared citation-style store so the card re-renders
   // when the user changes the style picker on the References tab.
@@ -332,7 +286,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     : (selectedCheckId && selectedCheckId > 0 ? selectedCheckId : null)
 
   // "View in document": ask the preview overlay to locate + highlight this
-  // citation context on the native PDF page (same machinery as AI highlights).
+  // citation context on the native PDF page (the same document-highlighting machinery).
   const requestCitation = useDocViewerStore(s => s.requestCitation)
   const viewContextInDoc = (ctx, i) => {
     // Locate the WHOLE referenced sentence (with its surrounding before/after
@@ -416,7 +370,6 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
       case 'warning': return 'var(--color-warning)'
       case 'error': return 'var(--color-error)'
       case 'suggestion': return 'var(--color-suggestion)'
-      case 'hallucination': return 'var(--color-hallucination)'
       case 'unverified': return 'var(--color-text-muted)'
       case 'unchecked': return 'var(--color-text-muted)'
       case 'checking': return 'var(--color-accent)'
@@ -553,18 +506,6 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
       )
     }
 
-    if (status === 'hallucination') {
-      return (
-        <span className="flex-shrink-0 inline-block" title="Likely hallucinated">
-          <svg className={commonSize} viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="var(--color-hallucination)" />
-            <path d="M12 4v10M10 6l2-2 2 2" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-            <circle cx="12" cy="17.5" r="1.2" fill="#fff" />
-          </svg>
-        </span>
-      )
-    }
-
     // unverified/default
     return (
       <span className="flex-shrink-0 inline-block" title="Unverified">
@@ -587,11 +528,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     }
   }
 
-  const hasLlmVerifiedUrl = foundMetadataMatchesCitation || reference.authoritative_urls?.some(urlObj => urlObj.type === 'llm_verified')
-
-  const matchedDatabase = hasLlmVerifiedUrl
-    ? 'LLM search'
-    : reference.from_fuzzy_cache
+  const matchedDatabase = reference.from_fuzzy_cache
       ? `Cache (fuzzy${reference.fuzzy_match_score ? ` · score ${reference.fuzzy_match_score}` : ''})`
       : reference.matched_database || (
         reference.status === 'verified' && reference.cited_url && !reference.authoritative_urls?.length
@@ -599,7 +536,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
           : null
       )
 
-  const displayUrls = collectReferenceLinks(reference, assessment)
+  const displayUrls = collectReferenceLinks(reference)
 
   const recheckWarnings = (reference.errors || [])
       .filter(issue => issue.warning_type && !issue.error_type)
@@ -611,17 +548,15 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
         actual_value:  issue.actual_value,
       }))
 
-  const baseDisplayWarnings = foundMetadataMatchesCitation
-      ? []
-      : recheckWarnings.length > 0
-          ? recheckWarnings
-          : (reference.warnings || []).map(w => ({
+  const baseDisplayWarnings = recheckWarnings.length > 0
+      ? recheckWarnings
+      : (reference.warnings || []).map(w => ({
             ...w,
             error_type:    w.error_type    || w.warning_type    || '',
             error_details: w.error_details || w.warning_details || '',
             cited_value:   w.cited_value,
             actual_value:  w.actual_value,
-          }))
+        }))
 
 // Style-aware venue suppression.
   const displayWarnings = baseDisplayWarnings.filter(w => {
@@ -644,7 +579,6 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
 
   const displayErrors = (reference.errors || [])
     .filter(issue => issue.error_type && issue.error_type !== 'unverified')
-    .filter(() => !foundMetadataMatchesCitation)
     .filter(issue => {
       // Same style-aware suppression for errors typed as 'venue'.
       const t = (issue.error_type || '').toLowerCase()
@@ -1145,47 +1079,6 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
             </div>
           )}
 
-          {/* Hallucination assessment */}
-          {reference.hallucination_assessment?.verdict === 'LIKELY' && !foundMetadataMatchesCitation && (
-            <div className="flex items-start gap-2 text-xs mt-1" style={{ color: 'var(--color-hallucination)' }}>
-              <span className="flex-shrink-0 mt-0.5">🚩</span>
-              <div>
-                <div className="font-medium">Likely hallucinated</div>
-                {reference.hallucination_assessment.explanation && (
-                  <div>
-                    {reference.hallucination_assessment.explanation}
-                  </div>
-                )}
-                {reference.hallucination_assessment.link && (
-                  <div className="mt-0.5">
-                    <a href={reference.hallucination_assessment.link} target="_blank" rel="noopener noreferrer" className="underline" style={{ color: 'var(--color-hallucination)' }}>
-                      {reference.hallucination_assessment.link}
-                    </a>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Hallucination check pending indicator — shown only when the backend
-              explicitly confirms that a check was scheduled. R04: suppressed
-              once the FE wall-clock cap (HALLUCINATION_PENDING_TIMEOUT_MS)
-              elapses — see the "check timed out" note below. */}
-          {isHallucinationPending && !hallucinationTimedOut && (
-            <div className="flex items-center gap-2 text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-              <span>{reference.hallucination_check_pending ? 'Checking for hallucination with LLM...' : 'Awaiting LLM hallucination check...'}</span>
-            </div>
-          )}
-
-          {/* R04 FE safety net: the hallucination check never reported back
-              within the budget. Show a non-blocking note instead of an
-              eternal spinner; the card already fell back to its base status. */}
-          {isHallucinationPending && hallucinationTimedOut && (
-            <div className="flex items-center gap-2 text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-              <span>Hallucination check timed out.</span>
-            </div>
-          )}
-
           {/* Neutral metadata information. These items explain a real
               cross-database discrepancy without downgrading a correct citation
               from Verified to Warning. */}
@@ -1368,8 +1261,6 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     prev.authors === next.authors &&
     prev.year === next.year &&
     prev.venue === next.venue &&
-    prev.hallucination_check_pending === next.hallucination_check_pending &&
-    prev.hallucination_assessment === next.hallucination_assessment &&
     prev.errors === next.errors &&
     prev.warnings === next.warnings &&
     prev.infos === next.infos &&

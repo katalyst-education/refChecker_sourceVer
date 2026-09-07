@@ -14,8 +14,6 @@ const historyState = vi.hoisted(() => ({
     processed_refs: 0,
     llm_provider: 'google',
     llm_model: 'gemini-3.1-flash-lite-preview',
-    hallucination_provider: null,
-    hallucination_model: null,
   },
   history: [],
   updateHistoryProgress: vi.fn(),
@@ -49,7 +47,7 @@ vi.mock('../../stores/useHistoryStore', () => {
   return { useHistoryStore }
 })
 
-describe('StatusSection hallucination model display', () => {
+describe('StatusSection model display', () => {
   beforeEach(() => {
     historyState.selectedCheckId = 42
     historyState.selectedCheck = {
@@ -62,17 +60,14 @@ describe('StatusSection hallucination model display', () => {
       processed_refs: 0,
       llm_provider: 'google',
       llm_model: 'gemini-3.1-flash-lite-preview',
-      hallucination_provider: null,
-      hallucination_model: null,
     }
   })
 
-  it('does not infer hallucination model from extraction-only metadata', () => {
+  it('shows extraction model metadata', () => {
     render(<StatusSection />)
 
     expect(screen.getByText('Extraction Model:')).toBeInTheDocument()
     expect(screen.getByText('google / gemini-3.1-flash-lite-preview')).toBeInTheDocument()
-    expect(screen.queryByText('Hallucination Model:')).toBeNull()
   })
 
   it('retries thumbnail after a check completes', () => {

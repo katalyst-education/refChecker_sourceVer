@@ -681,7 +681,7 @@ def get_text_thumbnail(
         pix.save(output_path)
         doc.close()
         
-        logger.info(f"Generated text thumbnail: {output_path}")
+        logger.info(f"Created text thumbnail: {output_path}")
         return output_path
         
     except ImportError:
@@ -792,7 +792,7 @@ def get_text_preview(
         pix.save(output_path)
         doc.close()
         
-        logger.info(f"Generated text preview: {output_path}")
+        logger.info(f"Created text preview: {output_path}")
         return output_path
         
     except ImportError:

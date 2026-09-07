@@ -76,12 +76,10 @@ export const useHistoryStore = create((set, get) => ({
               warnings_count: detail.warnings_count || 0,
               suggestions_count: detail.suggestions_count || 0,
               unverified_count: detail.unverified_count || 0,
-              hallucination_count: detail.hallucination_count || 0,
               refs_with_issues: detail.refs_with_issues || 0,
               refs_verified: detail.refs_verified || verifiedCount,
               progress_percent: 100,
             },
-            aiDetection: detail.ai_detection || null,
             completedCheckId: detail.status === 'completed' ? detail.id : null,
           })
         } catch (hydrateErr) {
@@ -114,7 +112,6 @@ export const useHistoryStore = create((set, get) => ({
                 warnings_count: detail.warnings_count || 0,
                 suggestions_count: detail.suggestions_count || 0,
                 unverified_count: detail.unverified_count || 0,
-                hallucination_count: detail.hallucination_count || 0,
                 refs_with_errors: detail.refs_with_errors || 0,
                 refs_with_warnings_only: detail.refs_with_warnings_only || 0,
                 results: results, // Store results for display
@@ -153,7 +150,6 @@ export const useHistoryStore = create((set, get) => ({
             warnings_count: checkState.stats?.warnings_count || 0,
             suggestions_count: checkState.stats?.suggestions_count || 0,
             unverified_count: checkState.stats?.unverified_count || 0,
-            hallucination_count: checkState.stats?.hallucination_count || 0,
             llm_provider: null,
             llm_model: null,
             status: 'in_progress',
@@ -308,7 +304,6 @@ export const useHistoryStore = create((set, get) => ({
                   warnings_count: detail.warnings_count || 0,
                   suggestions_count: detail.suggestions_count || 0,
                   unverified_count: detail.unverified_count || 0,
-                  hallucination_count: detail.hallucination_count || 0,
                   refs_with_errors: detail.refs_with_errors || 0,
                   refs_with_warnings_only: detail.refs_with_warnings_only || 0,
                   results: results,
@@ -346,7 +341,6 @@ export const useHistoryStore = create((set, get) => ({
           warnings_count: 0,
           suggestions_count: 0,
           unverified_count: 0,
-          hallucination_count: 0,
           llm_provider: null,
           llm_model: null,
           status: 'idle',
@@ -391,7 +385,6 @@ export const useHistoryStore = create((set, get) => ({
       warnings_count: 0,
       suggestions_count: 0,
       unverified_count: 0,
-      hallucination_count: 0,
       llm_provider: null,
       llm_model: null,
       status: 'idle',
@@ -544,7 +537,6 @@ export const useHistoryStore = create((set, get) => ({
               warnings_count: existingItem.warnings_count ?? check.warnings_count,
               suggestions_count: existingItem.suggestions_count ?? check.suggestions_count,
               unverified_count: existingItem.unverified_count ?? check.unverified_count,
-              hallucination_count: existingItem.hallucination_count ?? check.hallucination_count ?? 0,
               results: useExistingResults ? existingResults : fetchedResults,
             }
             : {
@@ -580,7 +572,6 @@ export const useHistoryStore = create((set, get) => ({
                         warnings_count: check.warnings_count,
                         suggestions_count: check.suggestions_count,
                         unverified_count: check.unverified_count,
-                        hallucination_count: check.hallucination_count || 0,
                         refs_with_errors: check.refs_with_errors,
                         refs_with_warnings_only: check.refs_with_warnings_only,
                         results: useExistingResults ? existingResults : fetchedResults,
@@ -983,7 +974,6 @@ export const useHistoryStore = create((set, get) => ({
         warnings_count: 0,
         suggestions_count: 0,
         unverified_count: 0,
-        hallucination_count: 0,
         llm_provider: null,
         llm_model: null,
         status: 'idle',
@@ -1006,3 +996,5 @@ export const useHistoryStore = create((set, get) => ({
     }))
   },
 }))
+
+

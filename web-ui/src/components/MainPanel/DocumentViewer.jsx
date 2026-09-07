@@ -7,8 +7,7 @@ import NativePdfViewer from './NativePdfViewer'
 
 /**
  * In-document highlighter. Fetches the extracted body text of a check's source
- * document (`/api/paper-text/{checkId}`) and renders it with the AI-detection
- * flagged passages marked in place.
+ * document (`/api/paper-text/{checkId}`) and renders reference context in place.
  *
  * Spans carry only quote TEXT (no char offsets), and PDF extraction leaves odd
  * spacing + ellipsis-truncated quotes, so matching is whitespace-tolerant
@@ -110,7 +109,7 @@ export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = n
   // R42: the native PDF view owns its own find controller (the geometry lives in
   // NativePdfViewer); it publishes count/index + next/prev/setQuery/clear here so
   // the SAME shared FindBar drives find-in-PDF for the per-ref context view and
-  // the AI-detection viewer alike. Null until the PDF view mounts + reports up.
+  // the other document views. Null until the PDF view mounts + reports up.
   const [pdfFind, setPdfFind] = useState(null)
 
   const ZOOM_MIN = 0.7, ZOOM_MAX = 2.2, ZOOM_STEP = 0.15

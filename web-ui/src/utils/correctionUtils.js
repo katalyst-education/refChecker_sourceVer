@@ -9,10 +9,6 @@ export function classifyCorrectionReference(ref, isCheckComplete = false) {
   else if (status === 'warning') tags.add('warning')
   else if (status === 'suggestion') tags.add('suggestion')
   else if (status === 'unverified') tags.add('unverified')
-  else if (status === 'hallucinated' || status === 'hallucination') tags.add('hallucination')
-  if (ref.hallucination_assessment?.verdict?.toUpperCase?.() === 'LIKELY') {
-    tags.add('hallucination')
-  }
   return tags
 }
 

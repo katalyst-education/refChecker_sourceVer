@@ -41,15 +41,7 @@ from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.llm.base import create_llm_provider, ReferenceExtractor
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
 from refchecker.core.refchecker import ArxivReferenceChecker
-from refchecker.core.hallucination_policy import (
-    apply_hallucination_verdict,
-    build_hallucination_error_entry,
-    count_raw_errors,
-    has_real_raw_errors,
-    pre_screen_hallucination,
-    run_hallucination_check,
-    should_defer_likely_to_llm,
-)
+from refchecker.core.issue_policy import count_raw_errors
 from refchecker.utils.arxiv_utils import download_arxiv_paper_pdf, get_arxiv_paper_by_id, get_bibtex_content
 from refchecker.utils.cache_utils import (
     cache_bibliography,
@@ -62,32 +54,6 @@ import arxiv
 
 logger = logging.getLogger(__name__)
 
-
-def _llm_found_metadata_matches_citation(result: Dict[str, Any]) -> bool:
-    assessment = result.get('hallucination_assessment') or {}
-    if assessment.get('verdict') != 'LIKELY' or not assessment.get('link'):
-        return False
-
-    def normalize(value: Any) -> str:
-        return re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower()).strip()
-
-    cited_title = normalize(result.get('title'))
-    found_title = normalize(assessment.get('found_title'))
-    if not cited_title or cited_title != found_title:
-        return False
-
-    found_authors = str(assessment.get('found_authors') or '').lower()
-    cited_last_names = [
-        str(author or '').strip().split()[-1].lower()
-        for author in (result.get('authors') or [])
-        if str(author or '').strip()
-    ]
-    if not cited_last_names or not all(name in found_authors for name in cited_last_names):
-        return False
-
-    cited_year = result.get('year')
-    found_year = str(assessment.get('found_year') or '')
-    return not cited_year or str(cited_year) in found_year
 
 
 def download_pdf(url: str, dest_path: str) -> None:
@@ -1153,23 +1119,11 @@ class ProgressRefChecker:
                  db_path: Optional[str] = None,
                  db_paths: Optional[Dict[str, str]] = None,
                  cache_dir: Optional[str] = None,
-                 hallucination_provider: Optional[str] = None,
-                 hallucination_model: Optional[str] = None,
-                 hallucination_api_key: Optional[str] = None,
-                 hallucination_endpoint: Optional[str] = None,
-                 ai_detection_enabled: bool = False,
-                 ai_detection_backend: str = "local",
-                 ai_detection_device: str = "cpu",
-                 ai_detection_api_key: Optional[str] = None,
-                 ai_detection_consent: bool = False,
-                 ai_detection_service: str = "pangram",
                  paperclip_api_key: Optional[str] = None,
                  reasoning_effort: Optional[str] = None,
                  max_tokens: Optional[int] = None,
                  context_length: Optional[int] = None,
-                 ai_detection_detectors: Optional[List[str]] = None,
                  timeout_seconds: Optional[int] = None,
-                 detection_mode: str = "both",
                  enrich_enabled: bool = True,
                  extraction_mode: Optional[str] = None):
         """
@@ -1205,43 +1159,12 @@ class ProgressRefChecker:
         self.cache_dir = cache_dir or str(get_data_dir() / "cache")
         Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
 
-        # AI-generated-text detection (opt-in). The body text of the
-        # submitted manuscript is analyzed AFTER reference checking — see
-        # `_run_ai_detection`. Off by default; never blocks the check.
-        self.ai_detection_enabled = bool(ai_detection_enabled)
-        self.ai_detection_backend = (ai_detection_backend or "local").lower()
-        self.ai_detection_device = (ai_detection_device or "cpu").lower()
-        self.ai_detection_api_key = ai_detection_api_key
-        self.ai_detection_consent = bool(ai_detection_consent)
-        self.ai_detection_service = (ai_detection_service or "pangram").lower()
-        # Optional multi-detector selection (R61). When a non-empty list of
-        # detector keys is supplied (local backend only), the AI-detection pass
-        # runs each selected detector and returns a side-by-side comparison
-        # under ``ai_detection["multi"]``. Default (None/empty) preserves the
-        # exact single-detector behaviour — FULL backward compatibility.
-        self.ai_detection_detectors = [
-            str(k).strip().lower() for k in (ai_detection_detectors or []) if str(k).strip()
-        ]
         self.paperclip_api_key = paperclip_api_key
         self.google_books_api_key = google_books_api_key
         # Cross-source enrichment backfill is ON by default (mirrors the web/API
         # default). The CLI exposes a `--no-enrich` opt-out which sets this to
         # False so verification results carry no backfilled counts/abstract/tldr.
         self.enrich_enabled = bool(enrich_enabled)
-        # Detection mode: "references" (verify refs only — the default behaviour),
-        # "ai_only" (skip reference extraction + verification, just analyze the
-        # body text for AI-generated content), or "both". AI-only implies the
-        # AI-detection pass, so enable it even if the flag wasn't set explicitly.
-        self.detection_mode = (detection_mode or "both").lower()
-        if self.detection_mode not in ("references", "ai_only", "both"):
-            self.detection_mode = "both"
-        if self.detection_mode == "ai_only" and not self.ai_detection_enabled:
-            self.ai_detection_enabled = True
-        self.hallucination_provider = None
-        self.hallucination_model = None
-        self.hallucination_api_key = None
-        self.hallucination_endpoint = None
-        self.web_searcher = None
 
         # Initialize LLM if requested
         self.llm = None
@@ -1283,74 +1206,6 @@ class ProgressRefChecker:
                 logger.error(f"Failed to initialize LLM: {e}")
 
         # Initialize reference checker
-        self.hallucination_verifier = None
-        try:
-            from refchecker.config.settings import HALLUCINATION_CAPABLE_PROVIDERS
-            from refchecker.llm.hallucination_verifier import LLMHallucinationVerifier
-
-            # Determine which provider to use for hallucination checking
-            if hallucination_provider:
-                h_provider = hallucination_provider
-                h_model = hallucination_model
-                h_api_key = hallucination_api_key
-                h_endpoint = hallucination_endpoint
-            elif llm_provider and llm_provider in HALLUCINATION_CAPABLE_PROVIDERS:
-                h_provider = llm_provider
-                h_model = llm_model
-                h_api_key = api_key
-                h_endpoint = endpoint
-            else:
-                h_provider = None
-                h_model = None
-                h_api_key = None
-                h_endpoint = None
-
-            if h_provider or cache_dir:
-                verifier = LLMHallucinationVerifier(
-                    provider=h_provider,
-                    api_key=h_api_key,
-                    endpoint=h_endpoint,
-                    model=h_model,
-                )
-                self.hallucination_provider = verifier.provider
-                self.hallucination_model = verifier.model
-                self.hallucination_api_key = h_api_key
-                self.hallucination_endpoint = h_endpoint
-                verifier.cache_dir = cache_dir
-                if verifier.available or cache_dir:
-                    self.hallucination_verifier = verifier
-                    logger.info(
-                        'Hallucination verifier configured for web UI (provider=%s, model=%s, available=%s, key=%s, cache=%s)',
-                        verifier.provider,
-                        verifier.model,
-                        verifier.available,
-                        'present' if h_api_key else 'resolved-from-env' if verifier.available else 'missing',
-                        bool(cache_dir),
-                    )
-        except Exception as e:
-            logger.debug(f'Hallucination verifier init failed: {e}')
-        try:
-            from refchecker.checkers.web_search import create_web_search_checker
-
-            web_search_provider = hallucination_provider or llm_provider
-            web_search_api_key = hallucination_api_key or api_key
-            web_search_endpoint = hallucination_endpoint or endpoint
-            searcher = create_web_search_checker(
-                preferred_provider=web_search_provider,
-                api_key=web_search_api_key,
-                endpoint=web_search_endpoint,
-            )
-            if searcher.available:
-                self.web_searcher = searcher
-                logger.info(
-                    'Web searcher configured for web UI (provider=%s, key=%s)',
-                    searcher._provider_name,
-                    'present' if web_search_api_key else 'resolved-from-env',
-                )
-            else:
-                logger.info('Web searcher not available for web UI')
-        except Exception as e:
-            logger.debug(f'Web searcher init failed: {e}')
         # Web UI Semantic Scholar keys are supplied per request from the browser.
         ss_api_key = semantic_scholar_api_key
         if ss_api_key:
@@ -1367,28 +1222,6 @@ class ProgressRefChecker:
         )
         if db_path:
             logger.info(f"Using local Semantic Scholar database at {db_path}")
-
-        # R04: dedicated, bounded thread pool for the hallucination LLM
-        # checks. Previously these ran on the default (shared) executor,
-        # which could saturate and let a hung LLM request wedge the whole
-        # check. A small private pool isolates them and bounds concurrency.
-        self._ha_executor = ThreadPoolExecutor(
-            max_workers=8, thread_name_prefix="halluc",
-        )
-
-    def close(self) -> None:
-        """Release the dedicated hallucination executor.
-
-        Best-effort: safe to call multiple times. Not strictly required
-        (worker threads are daemonic and the process tears them down), but
-        lets long-lived callers reclaim threads deterministically.
-        """
-        ex = getattr(self, '_ha_executor', None)
-        if ex is not None:
-            try:
-                ex.shutdown(wait=False)
-            except Exception:
-                pass
 
     def _format_verification_result(
         self,
@@ -1553,12 +1386,6 @@ class ProgressRefChecker:
             else:
                 formatted_errors.append(err_obj)
 
-        # Run hallucination check via the shared unified logic
-        # NOTE: Hallucination check is deferred to the async layer
-        # (_check_single_reference_with_limit) so that the initial result
-        # can be streamed to the UI immediately without waiting for the
-        # slow Anthropic web-search API call.
-        hallucination_assessment = None
 
         matched_database = (verified_data or {}).get('_matched_database') or (
             'Web page' if verified_via_webpage else None
@@ -1677,8 +1504,6 @@ class ProgressRefChecker:
                 (verified_data or {}).get('_publication_year_assessment')
             ),
             "corrected_reference": None,
-            "hallucination_assessment": hallucination_assessment,
-            "_raw_errors": errors,  # Stashed for deferred hallucination check
             # Carry inline citation contexts ("which paper sentences cite
             # this ref") through to the FE result. Without these the
             # _attach_citation_contexts pass earlier in the pipeline was
@@ -1751,7 +1576,7 @@ class ProgressRefChecker:
         title key) BEFORE emitting. Every code path that surfaces a
         verified ref to the UI flows through here, so this single hook
         guarantees the cache stays in sync no matter which downstream
-        rewriter (hallucination resolver / context attacher / etc.) was
+        rewriter or context attacher was
         the last to touch the result.
         """
         if event_type == "reference_result" and isinstance(data, dict):
@@ -1993,9 +1818,6 @@ class ProgressRefChecker:
         except Exception:
             pass
 
-        # Concurrent AI-detection task handle — declared before the try so the
-        # finally can always reap it, no matter where the body exits.
-        ai_detection_task = None
 
         try:
             # NOTE: do NOT reset the process-wide backend.usage_tracker here.
@@ -2109,14 +1931,14 @@ class ProgressRefChecker:
                         set_extraction_method('cache')
                         await maybe_update_title_from_direct_pdf(paper_source)
                         # A cache hit gives us the bibliography but NOT the
-                        # manuscript body — yet inline citation contexts AND
-                        # AI-text detection both need it. If the PDF was
+                        # manuscript body — yet inline citation contexts need
+                        # it. If the PDF was
                         # downloaded on a prior run it's still on disk, so
                         # extract the body locally (no network) here. Before this
                         # fix paper_text stayed empty on every cache hit, so
                         # _attach_citation_contexts had nothing to scan and the
                         # references silently lost their "cited in: …" context.
-                        # (The _fetch_body_text_for_ai_detection recovery further
+                        # (The _fetch_body_text recovery further
                         # down is the network fallback for when the PDF is gone.)
                         try:
                             cached_pdf = get_cached_artifact_path(self.cache_dir, paper_source, 'paper.pdf')
@@ -2124,7 +1946,7 @@ class ProgressRefChecker:
                                 paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, cached_pdf)
                                 if paper_text:
                                     pdf_path_for_fallback = cached_pdf
-                                    logger.info("Cache hit: recovered %d chars of body text from the cached PDF for citation contexts / AI detection", len(paper_text))
+                                    logger.info("Cache hit: recovered %d chars of body text from the cached PDF for citation contexts", len(paper_text))
                         except Exception as _body_e:  # noqa: BLE001
                             logger.debug("Cache-hit body extraction skipped: %s", _body_e)
 
@@ -2433,8 +2255,8 @@ class ProgressRefChecker:
                         # References came from the .bbl/.bib source files, so LLM
                         # reference extraction is skipped — but we still need the
                         # manuscript BODY for inline citation contexts AND the
-                        # opt-in AI detector. Always extract the PDF (cached);
-                        # NOT gated on AI detection (contexts are a core feature).
+                        # downstream body-text processing. Always extract the PDF (cached);
+                        # Citation contexts are a core feature.
                         # This does not change the reference-extraction method.
                         try:
                             pdf_path = get_cached_artifact_path(self.cache_dir, paper_source, 'paper.pdf', create_dir=True)
@@ -2443,7 +2265,7 @@ class ProgressRefChecker:
                             pdf_path_for_fallback = pdf_path
                             paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
                             logger.info(
-                                "Extracted PDF body text for citation contexts / AI detection after %s source extraction (%d chars)",
+                                "Extracted PDF body text for citation contexts after %s source extraction (%d chars)",
                                 extraction_method,
                                 len(paper_text or ""),
                             )
@@ -2616,17 +2438,15 @@ class ProgressRefChecker:
             # .bbl/.bib) so paper_text is empty, but the manuscript PDF is still
             # fetchable (e.g. an open-access PDF URL), download + extract the body
             # now — so the inline citation CONTEXTS below get the article text.
-            # NOT gated on AI detection: contexts are a core feature and a
-            # URL/DOI check (references via Crossref) otherwise has no body, so
-            # the "▶ Context" expandable silently disappeared when AI detection
-            # was off. The fetch is cached, so the cost is paid once.
+            # URL/DOI checks may otherwise have no body text for citation
+            # contexts. The fetch is cached, so the cost is paid once.
             if not (paper_text or "").strip():
-                fetched_body = await self._fetch_body_text_for_ai_detection(paper_source)
+                fetched_body = await self._fetch_body_text(paper_source)
                 if fetched_body:
                     paper_text = fetched_body
                     logger.info("Recovered %d chars of body text for citation contexts (source=%s)", len(fetched_body), extraction_method)
                 else:
-                    # No body text anywhere → contexts/AI detection can't run.
+                    # No body text anywhere → citation contexts can't run.
                     # Make it visible instead of silently dropping every context.
                     logger.warning("No body text available for citation contexts (source=%s, refs=%d) — inline 'cited in' contexts will be empty for this article", extraction_method, len(references or []))
             _attach_citation_contexts(references, paper_text)
@@ -2665,12 +2485,6 @@ class ProgressRefChecker:
             except Exception as e:
                 logger.debug("LLM citation-context fallback skipped: %s", e)
 
-            # AI-only detection mode: the user asked to skip reference checking
-            # entirely. Drop any extracted references and route through the
-            # body-text-only path below — it already runs AI detection on
-            # paper_text and emits a completion with an empty reference list.
-            if self.detection_mode == "ai_only":
-                references = []
 
             if not references:
                 # Diagnostic: log every signal that helps explain why
@@ -2688,34 +2502,17 @@ class ProgressRefChecker:
                     bool(self.llm),
                     len(arxiv_source_references) if arxiv_source_references else None,
                 )
-                if self.detection_mode == "ai_only":
-                    detail_msg = "AI-text detection only — reference checking was skipped for this run."
-                else:
-                    detail_msg = "No references could be extracted from this paper."
-                    if not self.llm and extraction_method in ('pdf', 'file', 'text'):
-                        detail_msg += " No LLM is configured — set one up in Settings → LLM provider to enable LLM-assisted extraction."
-                    elif not paper_text or len(paper_text or "") < 200:
-                        detail_msg += " The file's text content looks empty or too short."
-                # Still run AI-text detection on the body even when no
-                # references were found — a bibliography-less manuscript with
-                # real prose is exactly the case the feature is wanted for.
-                # paper_text is live here; it is dropped from the return dict.
-                # Explicit gate (mirrors the with-references path) so the intent
-                # is clear; _run_ai_detection also self-gates internally.
-                no_ref_detection = None
-                if self.ai_detection_enabled and self.detection_mode != "references":
-                    try:
-                        no_ref_detection = await self._run_ai_detection(paper_text, paper_title)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("AI detection (no-refs path) failed (non-fatal): %s", e)
-                        no_ref_detection = None
+                detail_msg = "No references could be extracted from this paper."
+                if not self.llm and extraction_method in ('pdf', 'file', 'text'):
+                    detail_msg += " No LLM is configured — set one up in Settings → LLM provider to enable LLM-assisted extraction."
+                elif not paper_text or len(paper_text or "") < 200:
+                    detail_msg += " The file's text content looks empty or too short."
                 await self.emit_progress("completed", {
                     "total_refs": 0,
                     "errors_count": 0,
                     "warnings_count": 0,
                     "suggestions_count": 0,
                     "unverified_count": 0,
-                    "hallucination_count": 0,
                     "verified_count": 0,
                     "extraction_method": extraction_method,
                     "message": detail_msg,
@@ -2736,8 +2533,6 @@ class ProgressRefChecker:
                         "verified_count": 0
                     }
                 }
-                if no_ref_detection is not None:
-                    no_ref_result["ai_detection"] = no_ref_detection
                 return no_ref_result
 
             # Step 3: Check references in parallel (like CLI)
@@ -2769,22 +2564,6 @@ class ProgressRefChecker:
                 "message": f"Checking {total_refs} references..."
             })
 
-            # AI-generated-text detection runs CONCURRENTLY with reference
-            # checking when both are enabled (the user asked for parallel
-            # execution). Launch it now — paper_text is final at this point —
-            # and await it after reference checking so reference results still
-            # stream first and the terminal "completed" event fires only once
-            # BOTH have finished. The two tasks share no mutable state that
-            # races: detection emits only 'progress'/'ai_detection_result'
-            # (never 'reference_result'), so it doesn't touch the Seen-Refs
-            # upsert path or the reference accumulators; usage records are
-            # tracked under a distinct flow and the tracker is lock-guarded.
-            # Gate on the mode too: "references" mode never runs AI detection,
-            # even if the flag is somehow set (contradictory input).
-            if self.ai_detection_enabled and self.detection_mode != "references":
-                ai_detection_task = asyncio.create_task(
-                    self._run_ai_detection(paper_text, paper_title)
-                )
 
             # Process references in parallel.
             # `extraction_method` is the bibliography-extraction stage we
@@ -2793,16 +2572,11 @@ class ProgressRefChecker:
             # Regex-vs-LLM split. Pass it explicitly — earlier the method
             # read it as a closure-free free name and crashed with
             # NameError on every text-paste run.
-            results, errors_count, warnings_count, suggestions_count, unverified_count, verified_count, refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified, hallucination_count = \
+            results, errors_count, warnings_count, suggestions_count, unverified_count, verified_count, refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified = \
                 await self._check_references_parallel(references, total_refs, extraction_method=extraction_method)
 
-            # Per-stage extraction counts for the Summary chip
-            # (Regex / LLM / Hallucination LLM). The deterministic
-            # parsers ('bbl', 'bib') count as regex; the LLM extractor
-            # counts as llm; cache and pdf-only paths report zeros for
-            # both since we don't know the split. Hallucination LLM
-            # invocations are counted from refs whose assessment came
-            # back via the LLM path (assessment carries 'source').
+            # Per-stage extraction counts for the Summary chip. Deterministic
+            # parsers count as regex and the LLM extractor counts as llm.
             # Deterministic / structural extraction stages all bucket as
             # "regex" for the Summary chip. The LLM bucket is reserved for
             # paths that actually invoke the LLM extractor.
@@ -2818,12 +2592,6 @@ class ProgressRefChecker:
                 # regex so the chip isn't a confusing all-zero display.
                 regex_count = total_refs
                 llm_count = 0
-            hallucination_llm_count = sum(
-                1 for r in results
-                if isinstance(r, dict)
-                and isinstance(r.get("hallucination_assessment"), dict)
-                and r["hallucination_assessment"].get("source")
-            )
 
             # Step 4: Return final results
             # Reconcile the reported total to the REAL final reference count.
@@ -2846,10 +2614,8 @@ class ProgressRefChecker:
                     "warnings_count": warnings_count,
                     "suggestions_count": suggestions_count,
                     "unverified_count": unverified_count,
-                    "hallucination_count": hallucination_count,
                     "regex_count": regex_count,
                     "llm_count": llm_count,
-                    "hallucination_llm_count": hallucination_llm_count,
                     "verified_count": verified_count,
                     "refs_with_errors": refs_with_errors,
                     "refs_with_warnings_only": refs_with_warnings_only,
@@ -2860,18 +2626,6 @@ class ProgressRefChecker:
                 }
             }
 
-            # Await the concurrently-running AI-detection task (launched before
-            # reference checking) and attach its result. It usually finished
-            # while references were being checked; if detection is disabled the
-            # task is None and this is a no-op.
-            if ai_detection_task is not None:
-                try:
-                    ai_detection = await ai_detection_task
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("AI detection task failed (non-fatal): %s", e)
-                    ai_detection = None
-                if ai_detection is not None:
-                    final_result["ai_detection"] = ai_detection
 
             await self.emit_progress("completed", {**final_result["summary"], "check_id": self.check_id, "paper_title": paper_title})
 
@@ -2884,20 +2638,6 @@ class ProgressRefChecker:
                 "details": type(e).__name__
             })
             raise
-        finally:
-            # Never let the concurrent AI-detection task outlive the check.
-            # On the success path it was already awaited (done()); on an
-            # exception OR cancellation (CancelledError is a BaseException, so
-            # the except above does NOT catch it) we cancel and reap it here so
-            # there is no orphaned task, no stray late 'ai_detection_result'
-            # event, and no paid API call lingering past a cancelled check.
-            if ai_detection_task is not None and not ai_detection_task.done():
-                ai_detection_task.cancel()
-                try:
-                    await ai_detection_task
-                except BaseException:  # noqa: BLE001 — reaping a cancelled task
-                    pass
-
     async def _download_and_extract_pdf_body(self, url: str) -> str:
         """Download a single URL and, if it is a PDF, extract its text.
 
@@ -2909,7 +2649,7 @@ class ProgressRefChecker:
             src = str(url or "").strip()
             if not src.lower().startswith(("http://", "https://")):
                 return ""
-            pdf_path = get_cached_artifact_path(self.cache_dir, src, "ai_body.pdf", create_dir=True)
+            pdf_path = get_cached_artifact_path(self.cache_dir, src, "paper_body.pdf", create_dir=True)
             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
                 import requests as _req
                 resp = await asyncio.to_thread(
@@ -2937,10 +2677,10 @@ class ProgressRefChecker:
                 with open(pdf_path, "wb") as fh:
                     fh.write(content)
             text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
-            logger.info("AI-detection body fetch: extracted %d chars from %s", len(text or ""), src)
+            logger.info("Document body fetch: extracted %d chars from %s", len(text or ""), src)
             return text or ""
         except Exception as exc:  # noqa: BLE001
-            logger.warning("AI-detection body fetch failed for %s: %s", url, exc)
+            logger.warning("Document body fetch failed for %s: %s", url, exc)
             return ""
 
     async def _resolve_doi_to_pdf_urls(self, doi: str) -> List[str]:
@@ -2995,7 +2735,7 @@ class ProgressRefChecker:
                 ordered.append(u)
         return ordered
 
-    async def _fetch_body_text_for_ai_detection(self, paper_source: Optional[str]) -> str:
+    async def _fetch_body_text(self, paper_source: Optional[str]) -> str:
         """Best-effort fetch of the manuscript body when references came from a
         structured source (Crossref DOI / .bbl) so paper_text is empty.
 
@@ -3028,132 +2768,12 @@ class ProgressRefChecker:
                 for pdf_url in await self._resolve_doi_to_pdf_urls(doi):
                     text = await self._download_and_extract_pdf_body(pdf_url)
                     if text.strip():
-                        logger.info("AI-detection body: resolved DOI %s -> %s", doi, pdf_url)
+                        logger.info("Document body: resolved DOI %s -> %s", doi, pdf_url)
                         return text
             return ""
         except Exception as exc:  # noqa: BLE001
-            logger.warning("AI-detection body fallback failed: %s", exc)
+            logger.warning("Document body fallback failed: %s", exc)
             return ""
-
-    async def _run_ai_detection(self, paper_text: str, paper_title: Optional[str]) -> Optional[Dict[str, Any]]:
-        """Analyze the manuscript body for AI-generated-text likelihood.
-
-        Opt-in and best-effort: a detection failure or timeout never fails the
-        check. Emits a dedicated ``ai_detection_result`` WS event and returns
-        the result dict so the caller can persist it. The honest "unavailable"
-        / "inconclusive" states are surfaced to the UI (e.g. no body text on
-        .bbl/.bib source paths, model not downloaded, input too short).
-        """
-        if not self.ai_detection_enabled:
-            return None
-
-        from refchecker.ai_detection import run_detection, DEFAULT_BACKEND
-
-        backend = self.ai_detection_backend or DEFAULT_BACKEND
-        device = getattr(self, "ai_detection_device", "cpu") or "cpu"
-        selected_detectors = getattr(self, "ai_detection_detectors", None) or []
-        opts: Dict[str, Any] = {}
-        if backend == "local":
-            opts = {"device": device}
-        elif backend in ("llm-judge", "llm"):
-            opts = {
-                "provider": self.hallucination_provider or self.llm_provider,
-                "api_key": self.hallucination_api_key or self.api_key,
-                "model": self.hallucination_model or self.llm_model,
-                "endpoint": self.hallucination_endpoint or self.endpoint,
-            }
-        elif backend == "api":
-            opts = {
-                "service": self.ai_detection_service,
-                "api_key": self.ai_detection_api_key,
-                "consent": self.ai_detection_consent,
-            }
-
-        # Use a 'phase' event (message-only) rather than 'progress' so it never
-        # touches the numeric progress bar — a bare 'progress' with no
-        # current/total/percent would compute NaN% in the UI. Best-effort: an
-        # emit failure on the detection path must never fail the reference
-        # check (this runs as a concurrent task whose exception would propagate).
-        try:
-            await self.emit_progress("phase", {
-                "message": "Analyzing manuscript for AI-generated text…",
-            })
-        except Exception as e:  # noqa: BLE001
-            logger.debug("ai_detection phase emit skipped: %s", e)
-
-        # Multi-detector compare path (R61): only for the local backend and only
-        # when >1 detector was explicitly selected. A single selected detector
-        # (or none) falls through to the existing single-detector path so the
-        # default behaviour is byte-for-byte unchanged.
-        run_multi = (
-            backend == "local"
-            and len(selected_detectors) > 1
-        )
-
-        try:
-            # The local engine serializes inference behind a process-wide lock,
-            # so in a BULK run every child's detection queues on the same lock.
-            # A tight 150s budget meant the later children in a large batch
-            # timed out before their turn — surfacing as "AI detection didn't
-            # load for some articles". Give serialized batch inference real
-            # headroom (it's best-effort and runs concurrently with reference
-            # checking, so it never blocks the reference results from streaming).
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    run_detection,
-                    paper_text or "",
-                    title=paper_title,
-                    backend=backend,
-                    check_id=self.check_id,
-                    **opts,
-                ),
-                timeout=480,
-            )
-            payload = result.to_dict()
-            if run_multi:
-                # Attach the side-by-side comparison under ``multi`` — the
-                # top-level result stays the single configured detector for
-                # full backward compatibility. Best-effort: a failure here
-                # never affects the primary result.
-                try:
-                    from refchecker.ai_detection import run_detectors
-                    multi_args = [paper_text or "", selected_detectors]
-                    if device != "cpu":
-                        multi_args.append(device)
-                    multi = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            run_detectors,
-                            *multi_args,
-                        ),
-                        timeout=480,
-                    )
-                    payload["multi"] = multi
-                except Exception as me:  # noqa: BLE001
-                    logger.warning("multi-detector compare failed for check %s: %s",
-                                   self.check_id, me)
-        except asyncio.TimeoutError:
-            # The asyncio wrapper is cancelled, but the underlying OS worker
-            # thread keeps running run_detection() to completion (threads can't
-            # be force-killed). For the API/LLM backends the request was already
-            # billed, so when that thread finishes it records the real usage/cost
-            # into the per-check meter even though we report 'timeout' here — the
-            # cost was genuinely incurred, so attributing it is correct.
-            logger.warning("AI detection timed out for check %s", self.check_id)
-            from refchecker.ai_detection.base import make_unavailable
-            payload = make_unavailable("timeout", backend).to_dict()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("AI detection failed for check %s: %s", self.check_id, e)
-            from refchecker.ai_detection.base import make_unavailable
-            payload = make_unavailable("detection_error", backend).to_dict()
-
-        try:
-            await self.emit_progress("ai_detection_result", {
-                **payload,
-                "check_id": self.check_id,
-            })
-        except Exception as e:  # noqa: BLE001
-            logger.debug("ai_detection_result emit skipped: %s", e)
-        return payload
 
     def _parse_llm_reference(self, ref_string: str) -> Optional[Dict[str, Any]]:
         """Parse a single LLM reference string into a structured dict.
@@ -3722,16 +3342,6 @@ class ProgressRefChecker:
         )
         return verified_data, errors, url
 
-    def _standard_refcheck_for_hallucination(self, reference: Dict[str, Any]):
-        """Run the normal WebUI verifier for LLM-found metadata.
-
-        The shared hallucination policy expects the CLI tuple order
-        ``(errors, url, verified_data)``; WebUI's internal verifier returns
-        ``(verified_data, errors, url)``.
-        """
-        verified_data, errors, url = self._verify_reference(dict(reference))
-        return errors, url, verified_data
-
     def _check_reference_sync(self, reference: Dict[str, Any], index: int) -> Dict[str, Any]:
         """Synchronous version of reference checking for thread pool"""
         try:
@@ -3747,151 +3357,42 @@ class ProgressRefChecker:
             logger.error(f"Error checking reference {index}: {e}")
             return self._format_error_result(reference, index, e)
 
-    def _pre_screen_hallucination(
-        self, result: Dict[str, Any], reference: Dict[str, Any]
-    ) -> tuple:
-        """Run instant deterministic hallucination checks (no network/LLM).
-
-        Delegates to the shared ``pre_screen_hallucination`` in
-        hallucination_policy so all three code paths (CLI, Batch, WebUI)
-        use identical filtering and deterministic verdict logic.
-
-        Returns
-        -------
-        ('resolved', updated_result)
-            Deterministic verdict — apply immediately, no async task needed.
-        ('skip', None)
-            No hallucination check needed — leave result as-is.
-        ('needs_async', None)
-            Needs LLM and/or ArXiv version check — create async task.
-        """
-        auth_urls = result.get('authoritative_urls') or []
-        verified_url = auth_urls[0]['url'] if auth_urls else ''
-        error_entry = build_hallucination_error_entry(
-            result.get('_raw_errors', []), reference, verified_url=verified_url,
-        )
-        if error_entry is None:
-            return ('skip', None)
-
-        outcome, assessment = pre_screen_hallucination(error_entry)
-        if outcome == 'resolved':
-            if should_defer_likely_to_llm(assessment, verified_url):
-                # Defer to async LLM check instead of applying immediately
-                return ('needs_async', None)
-            updated = apply_hallucination_verdict(
-                result,
-                assessment,
-                reference=reference,
-                standard_refchecker=self._standard_refcheck_for_hallucination,
-                llm_client=self.hallucination_verifier,
-                web_searcher=getattr(self, 'web_searcher', None),
-            )
-            return ('resolved', updated)
-        elif outcome == 'skip':
-            return ('skip', None)
-        else:
-            return ('needs_async', None)
 
     @staticmethod
     def _compute_ref_stats(result: Dict[str, Any], is_complete: bool = True) -> Dict[str, int]:
-        """Compute the stat contribution of a single reference result.
-
-        Returns a dict of stat counters (all non-negative) representing
-        what this ref contributes to the aggregate totals.
-        """
-        # Use the shared count_raw_errors for the error count so all
-        # modes (CLI, Bulk, WebUI) apply the same filtering rules.
-        # The sanitized errors list only contains error_type entries
-        # (warnings/suggestions are in separate lists), so we only
-        # take the error_count from count_raw_errors.
-        llm_match_overrides = _llm_found_metadata_matches_citation(result)
+        """Compute one reference's contribution to aggregate counters."""
         num_errors, _, _ = count_raw_errors(result.get('errors', []))
         num_warnings = len(result.get('warnings', []))
-        if llm_match_overrides:
-            num_errors = 0
-            num_warnings = 0
         num_suggestions = len(result.get('suggestions', []))
-
-        d: Dict[str, int] = {
+        status = result.get('status', '')
+        has_unverified_error = any(
+            issue.get('error_type') == 'unverified'
+            for issue in result.get('errors', [])
+        )
+        is_unverified = status == 'unverified' or has_unverified_error
+        is_verified = (
+            status in {'verified', 'suggestion'}
+            or (not is_unverified and num_errors == 0 and num_warnings == 0)
+        )
+        return {
             'errors_count': num_errors,
             'warnings_count': num_warnings,
             'suggestions_count': num_suggestions,
-            'hallucination_count': 0,
-            'hallucination_llm_count': 0,
-            'unverified_count': 0,
-            'verified_count': 0,
-            'refs_verified': 0,
-            'refs_with_errors': 0,
-            'refs_with_warnings_only': 0,
-            'refs_with_suggestions_only': 0,
+            'unverified_count': int(is_unverified),
+            'verified_count': int(is_verified),
+            'refs_verified': int(is_verified),
+            'refs_with_errors': int(num_errors > 0),
+            'refs_with_warnings_only': int(num_errors == 0 and num_warnings > 0),
+            'refs_with_suggestions_only': int(
+                num_errors == 0 and num_warnings == 0 and num_suggestions > 0
+            ),
         }
-        # An assessment with a `source` field means the LLM (or web
-        # search) was invoked. pre-screen-only assessments have no
-        # source — they're deterministic.
-        ha = result.get('hallucination_assessment')
-        if isinstance(ha, dict) and ha.get('source'):
-            d['hallucination_llm_count'] = 1
-
-        status = result.get('status', '')
-        has_unverified_error = any(
-            e.get('error_type') == 'unverified' for e in result.get('errors', [])
-        )
-        has_pending_hallucination_check = (
-            result.get('hallucination_check_pending')
-            and not result.get('hallucination_assessment')
-        )
-        is_transient_unverified = (
-            status == 'unverified'
-            and not result.get('hallucination_assessment')
-            and not is_complete
-        )
-        can_count_unverified = not has_pending_hallucination_check and not is_transient_unverified
-
-        if status == 'hallucination' and not llm_match_overrides:
-            d['hallucination_count'] = 1
-        if (
-            not llm_match_overrides
-            and can_count_unverified
-            and (status in ('unverified', 'hallucination') or has_unverified_error)
-        ):
-            d['unverified_count'] = 1
-        if (
-            llm_match_overrides
-            or status in ('verified', 'suggestion')
-            or (status not in ('unverified', 'hallucination') and num_errors == 0 and num_warnings == 0)
-        ):
-            d['verified_count'] = 1
-            d['refs_verified'] = 1
-
-        if num_errors > 0:
-            d['refs_with_errors'] = 1
-        elif num_warnings > 0:
-            d['refs_with_warnings_only'] = 1
-        elif num_suggestions > 0:
-            d['refs_with_suggestions_only'] = 1
-
-        return d
-
-    @staticmethod
-    def _compute_deferred_ref_deltas(result: Dict[str, Any], old_result: Dict[str, Any] = None, is_complete: bool = True) -> Dict[str, int]:
-        """Compute stat counter deltas for a ref whose status changed.
-
-        When ``old_result`` is provided, returns the *difference* between
-        the new and old stat contributions (new − old) so callers can
-        adjust running totals incrementally.  When ``old_result`` is None,
-        returns the absolute contribution of *result* (legacy behaviour).
-        """
-        new_d = ProgressRefChecker._compute_ref_stats(result, is_complete=is_complete)
-        if old_result is None:
-            return new_d
-        old_d = ProgressRefChecker._compute_ref_stats(old_result, is_complete=is_complete)
-        return {k: new_d[k] - old_d.get(k, 0) for k in new_d}
 
     @staticmethod
     def _can_reuse_cached_result(cached_result: Dict[str, Any]) -> bool:
         """Only reuse settled cache entries.
 
-        Unverified / pending / hallucination-inconclusive entries must be
+        Unverified and in-progress entries must be
         reprocessed so newer verification logic (for example direct website
         rechecks) can upgrade them and refresh the cache.
         """
@@ -3899,11 +3400,9 @@ class ProgressRefChecker:
             return False
 
         status = str(cached_result.get('status') or '').strip().lower()
-        if status in {'', 'pending', 'checking', 'checked', 'unchecked', 'unverified', 'hallucination'}:
+        if status in {'', 'pending', 'checking', 'checked', 'unchecked', 'unverified'}:
             return False
 
-        if cached_result.get('hallucination_check_pending'):
-            return False
 
         if any(
             str(error.get('error_type') or '').strip().lower() == 'unverified'
@@ -3931,67 +3430,6 @@ class ProgressRefChecker:
             return False
 
         return True
-
-    def _run_hallucination_check_sync(self, result: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str, Any]:
-        """Run hallucination check synchronously and return updated result.
-
-        Called from a thread pool *after* the initial result has already
-        been streamed to the UI, so the user sees the reference immediately.
-        Deterministic checks (author overlap, name order) are already handled
-        by _pre_screen_hallucination. ArXiv version-update normalization lives
-        in the shared EnhancedHybridReferenceChecker postprocess path.
-        """
-        auth_urls = result.get('authoritative_urls') or []
-        verified_url = auth_urls[0]['url'] if auth_urls else ''
-        error_entry = build_hallucination_error_entry(
-            result.get('_raw_errors', []), reference, verified_url=verified_url,
-        )
-        if error_entry is None:
-            return result
-
-        # Tag any LLM calls made by the hallucination verifier under the
-        # "hallucination" flow so the $ badge breakdown attributes
-        # correctly. asyncio.to_thread runs us on a fresh worker, so the
-        # check id + flow must be (re)bound here.
-        from refchecker.llm import usage_tracker as _usage_tracker
-        if self.check_id is not None:
-            _usage_tracker.set_current_check(str(self.check_id))
-        with _usage_tracker.FlowScope("hallucination"):
-            assessment = run_hallucination_check(
-                error_entry,
-                llm_client=self.hallucination_verifier,
-                web_searcher=getattr(self, 'web_searcher', None),
-            )
-        if not assessment:
-            return result
-
-        # Match single-paper CLI behaviour: when a ref has the
-        # "url references paper" pattern and the LLM says UNLIKELY,
-        # the CLI returns early without recording the ref as an error.
-        # Here we drop the assessment so the ref stays verified with
-        # no hallucination verdict — identical to the CLI path.
-        raw_errors = result.get('_raw_errors') or []
-        has_url_refs_paper = any(
-            'url references paper' in (e.get('error_details') or '').lower()
-            for e in raw_errors
-        )
-        if (
-            has_url_refs_paper
-            and assessment.get('verdict') == 'UNLIKELY'
-            and not str(assessment.get('link') or '').startswith('http')
-        ):
-            return result
-
-        with _usage_tracker.FlowScope("hallucination"):
-            result = apply_hallucination_verdict(
-                result,
-                assessment,
-                reference=reference,
-                standard_refchecker=self._standard_refcheck_for_hallucination,
-                llm_client=self.hallucination_verifier,
-                web_searcher=getattr(self, 'web_searcher', None),
-            )
-        return result
 
     async def _check_single_reference_with_limit(
         self,
@@ -4184,7 +3622,7 @@ class ProgressRefChecker:
         # author surname, venue). Catches inconsistencies across
         # uploads — the same paper cited with wrong author/year in a
         # newer document — which is a strong tell for typos, swapped
-        # citations, or LLM hallucinations. Soft-fails: errors here
+        # citations, or inconsistent metadata. Soft-fails: errors here
         # never block the verification result.
         try:
             from .database import db as _db
@@ -4243,18 +3681,16 @@ class ProgressRefChecker:
         warnings_count = 0
         suggestions_count = 0
         unverified_count = 0
-        hallucination_count = 0
-        hallucination_llm_count = 0  # Refs where the hallucination LLM was actually invoked.
         verified_count = 0
         refs_with_errors = 0
         refs_with_warnings_only = 0
         refs_with_suggestions_only = 0
         refs_verified = 0
         processed_count = 0
-        checked_count = 0  # Tracks refs that finished verification (including deferred ones)
+        checked_count = 0  # Tracks references that finished verification.
 
         # Per-stage extraction counts surfaced in the Summary chip
-        # (Regex / LLM / Hallucination LLM). Deterministic / structural
+        # (Regex / LLM). Deterministic / structural
         # parsers (bbl, bib, grobid, regex, raw pdf/file/text) bucket as
         # "regex"; only the LLM extractor counts as "llm".
         _regex_methods = {"bbl", "bib", "regex", "grobid", "text", "pdf", "file"}
@@ -4362,16 +3798,6 @@ class ProgressRefChecker:
                     result['year'] = None
 
                 # Count individual issues (not just references)
-                # If hallucination verifier is enabled, refs with real errors
-                # (not just suggestions/info) are deferred — they'll get a
-                # deterministic or LLM check after all refs are processed.
-                # Stats are always counted immediately so the UI updates in
-                # real-time; the hallucination phase will adjust them later
-                # (subtract old contribution, add new) when status changes.
-                is_pending_hallucination_check = (
-                    self.hallucination_verifier
-                    and has_real_raw_errors(result.get('_raw_errors'))
-                )
 
                 # Always count stats for all refs so the UI updates progressively.
                 # Use the shared _compute_ref_stats to avoid duplicated logic.
@@ -4381,8 +3807,6 @@ class ProgressRefChecker:
                 errors_count += d['errors_count']
                 warnings_count += d['warnings_count']
                 suggestions_count += d['suggestions_count']
-                hallucination_count += d['hallucination_count']
-                hallucination_llm_count += d.get('hallucination_llm_count', 0)
                 unverified_count += d['unverified_count']
                 verified_count += d['verified_count']
                 refs_verified += d['refs_verified']
@@ -4406,10 +3830,8 @@ class ProgressRefChecker:
                     "warnings_count": warnings_count,
                     "suggestions_count": suggestions_count,
                     "unverified_count": unverified_count,
-                    "hallucination_count": hallucination_count,
                     "regex_count": regex_count,
                     "llm_count": llm_count,
-                    "hallucination_llm_count": hallucination_llm_count,
                     "verified_count": verified_count,
                     "refs_with_errors": refs_with_errors,
                     "refs_with_warnings_only": refs_with_warnings_only,
@@ -4432,235 +3854,14 @@ class ProgressRefChecker:
         # This prevents the 'completed' event from arriving before final progress updates
         await asyncio.sleep(0.1)
 
-        # ── Deferred hallucination checks ──
-        # Run hallucination checks AFTER all refs are verified and streamed
-        # to the UI, so users see results immediately.
-        if self.hallucination_verifier:
-            # Collect refs that were deferred (real errors, not suggestion-only)
-            ha_candidates = [
-                (idx, results[idx], references[idx])
-                for idx in range(total_refs)
-                if results.get(idx) and has_real_raw_errors(results[idx].get('_raw_errors'))
-            ]
-            if ha_candidates:
-                debug_log(f"[TIMING] Running deferred hallucination checks for {len(ha_candidates)} refs")
-                await self.emit_progress("phase", {"message": "Running hallucination detection..."})
-
-                # ── Phase 1: deterministic pre-screen (instant, no network/LLM) ──
-                needs_async = []
-                for c_idx, c_result, c_ref in ha_candidates:
-                    outcome, resolved = self._pre_screen_hallucination(c_result, c_ref)
-                    if outcome == 'resolved':
-                        resolved['hallucination_check_pending'] = False
-                        # Adjust stats: subtract old contribution, add new
-                        d = self._compute_deferred_ref_deltas(resolved, c_result, is_complete=False)
-                        errors_count += d['errors_count']
-                        warnings_count += d['warnings_count']
-                        suggestions_count += d['suggestions_count']
-                        hallucination_count += d['hallucination_count']
-                        hallucination_llm_count += d.get('hallucination_llm_count', 0)
-                        unverified_count += d['unverified_count']
-                        verified_count += d['verified_count']
-                        refs_verified += d['refs_verified']
-                        refs_with_errors += d['refs_with_errors']
-                        refs_with_warnings_only += d['refs_with_warnings_only']
-                        refs_with_suggestions_only += d['refs_with_suggestions_only']
-                        results[c_idx] = resolved
-                        await self.emit_progress("reference_result", resolved)
-                    elif outcome == 'skip':
-                        # No hallucination check needed — no stat change
-                        c_result['hallucination_check_pending'] = False
-                        await self.emit_progress("reference_result", c_result)
-                    else:
-                        # needs_async — will go to LLM/ArXiv pool
-                        needs_async.append((c_idx, c_result, c_ref))
-
-                det_count = len(ha_candidates) - len(needs_async)
-                if det_count:
-                    debug_log(f"[TIMING] {det_count} refs resolved deterministically, {len(needs_async)} need LLM/ArXiv")
-                    # Emit summary after deterministic phase so stats update in UI
-                    await self.emit_progress("summary_update", {
-                        "total_refs": total_refs,
-                        "processed_refs": checked_count,
-                        "errors_count": errors_count,
-                        "warnings_count": warnings_count,
-                        "suggestions_count": suggestions_count,
-                        "unverified_count": unverified_count,
-                        "hallucination_count": hallucination_count,
-                    "regex_count": regex_count,
-                    "llm_count": llm_count,
-                    "hallucination_llm_count": hallucination_llm_count,
-                        "verified_count": verified_count,
-                        "refs_with_errors": refs_with_errors,
-                        "refs_with_warnings_only": refs_with_warnings_only,
-                        "refs_with_suggestions_only": refs_with_suggestions_only,
-                        "refs_verified": refs_verified,
-                        "progress_percent": round((checked_count / total_refs) * 100, 1),
-                    })
-
-                # ── Phase 2: async tasks for refs needing LLM/ArXiv (smaller pool) ──
-                if needs_async:
-                    # Mark only async refs as pending
-                    for c_idx, c_result, _c_ref in needs_async:
-                        c_result['hallucination_check_pending'] = True
-                        await self.emit_progress("reference_result", c_result)
-
-                    ha_tasks = []
-                    for c_idx, c_result, c_ref in needs_async:
-                        ha_task = asyncio.create_task(
-                            asyncio.wait_for(
-                                loop.run_in_executor(
-                                    # R04: dedicated bounded pool (not the
-                                    # shared default executor) so a hung LLM
-                                    # request can't saturate everything else.
-                                    self._ha_executor,
-                                    self._run_hallucination_check_sync, c_result, c_ref
-                                ),
-                                # R04: lowered from 150s → 90s. The verifier's
-                                # own per-client timeouts (60–90s) bound each
-                                # request; this outer wall-clock cap guarantees
-                                # the ref can never stay pending much longer.
-                                # Read from an instance attr so tests can inject
-                                # a tiny budget without monkeypatching the loop.
-                                timeout=getattr(self, '_ha_task_timeout', 90.0),
-                            ),
-                            name=f"hallucination-{c_idx}",
-                        )
-                        ha_tasks.append((c_idx, ha_task))
-
-                    ha_pending = {t for _, t in ha_tasks}
-                    ha_task_to_idx = {t: i for i, t in ha_tasks}
-
-                    while ha_pending:
-                        try:
-                            await self._check_cancelled()
-                        except asyncio.CancelledError:
-                            for t in ha_pending:
-                                t.cancel()
-                            # Don't leave the not-yet-finished refs spinning on
-                            # "Checking for hallucination with LLM…" forever.
-                            for _c_idx, _t in ha_tasks:
-                                if results.get(_c_idx) and results[_c_idx].get('hallucination_check_pending'):
-                                    results[_c_idx]['hallucination_check_pending'] = False
-                            raise
-
-                        ha_done, ha_pending = await asyncio.wait(
-                            ha_pending, return_when=asyncio.FIRST_COMPLETED
-                        )
-
-                        for ha_task in ha_done:
-                            ha_idx = ha_task_to_idx[ha_task]
-                            old_result = results.get(ha_idx, {})
-
-                            try:
-                                updated = ha_task.result()
-                            except Exception as ha_err:
-                                logger.debug(f"Hallucination check failed for ref {ha_idx + 1}: {ha_err}")
-                                # Clear pending flag — no stat change since result unchanged
-                                if results.get(ha_idx):
-                                    results[ha_idx]['hallucination_check_pending'] = False
-                                    await self.emit_progress("reference_result", results[ha_idx])
-                                    await self.emit_progress("summary_update", {
-                                        "total_refs": total_refs,
-                                        "processed_refs": checked_count,
-                                        "errors_count": errors_count,
-                                        "warnings_count": warnings_count,
-                                        "suggestions_count": suggestions_count,
-                                        "unverified_count": unverified_count,
-                                        "hallucination_count": hallucination_count,
-                    "regex_count": regex_count,
-                    "llm_count": llm_count,
-                    "hallucination_llm_count": hallucination_llm_count,
-                                        "verified_count": verified_count,
-                                        "refs_with_errors": refs_with_errors,
-                                        "refs_with_warnings_only": refs_with_warnings_only,
-                                        "refs_with_suggestions_only": refs_with_suggestions_only,
-                                        "refs_verified": refs_verified,
-                                        "progress_percent": round((checked_count / total_refs) * 100, 1),
-                                    })
-                                continue
-
-                            updated['hallucination_check_pending'] = False
-
-                            # Adjust stats: subtract old contribution, add new
-                            d = self._compute_deferred_ref_deltas(updated, old_result, is_complete=False)
-                            errors_count += d['errors_count']
-                            warnings_count += d['warnings_count']
-                            suggestions_count += d['suggestions_count']
-                            hallucination_count += d['hallucination_count']
-                            hallucination_llm_count += d.get('hallucination_llm_count', 0)
-                            unverified_count += d['unverified_count']
-                            verified_count += d['verified_count']
-                            refs_verified += d['refs_verified']
-                            refs_with_errors += d['refs_with_errors']
-                            refs_with_warnings_only += d['refs_with_warnings_only']
-                            refs_with_suggestions_only += d['refs_with_suggestions_only']
-
-                            results[ha_idx] = updated
-                            # Emit ref update and summary so the UI updates progressively.
-                            await self.emit_progress("reference_result", updated)
-                            await self.emit_progress("summary_update", {
-                                "total_refs": total_refs,
-                                "processed_refs": checked_count,
-                                "errors_count": errors_count,
-                                "warnings_count": warnings_count,
-                                "suggestions_count": suggestions_count,
-                                "unverified_count": unverified_count,
-                                "hallucination_count": hallucination_count,
-                    "regex_count": regex_count,
-                    "llm_count": llm_count,
-                    "hallucination_llm_count": hallucination_llm_count,
-                                "verified_count": verified_count,
-                                "refs_with_errors": refs_with_errors,
-                                "refs_with_warnings_only": refs_with_warnings_only,
-                                "refs_with_suggestions_only": refs_with_suggestions_only,
-                                "refs_verified": refs_verified,
-                                "progress_percent": round((checked_count / total_refs) * 100, 1),
-                            })
-                            await asyncio.sleep(0)
-
-                # Emit a final summary_update after all hallucination checks complete
-                await self.emit_progress("summary_update", {
-                    "total_refs": total_refs,
-                    "processed_refs": checked_count,
-                    "errors_count": errors_count,
-                    "warnings_count": warnings_count,
-                    "suggestions_count": suggestions_count,
-                    "unverified_count": unverified_count,
-                    "hallucination_count": hallucination_count,
-                    "regex_count": regex_count,
-                    "llm_count": llm_count,
-                    "hallucination_llm_count": hallucination_llm_count,
-                    "verified_count": verified_count,
-                    "refs_with_errors": refs_with_errors,
-                    "refs_with_warnings_only": refs_with_warnings_only,
-                    "refs_with_suggestions_only": refs_with_suggestions_only,
-                    "refs_verified": refs_verified,
-                    "progress_percent": round((checked_count / total_refs) * 100, 1),
-                })
-
-                debug_log(f"[TIMING] Hallucination checks completed in {time.time() - total_time - start_time:.3f}s")
-
-        # Clean up _raw_errors from final results (internal field)
-        for idx in range(total_refs):
-            if results.get(idx):
-                results[idx].pop('_raw_errors', None)
-                # Never persist a reference stuck on "Checking for hallucination
-                # with LLM…": by the time we build the final list the check is
-                # over, so any lingering pending flag (e.g. the hallucination
-                # phase was interrupted/skipped) must be cleared so the card
-                # doesn't show a spinner forever on reload.
-                if results[idx].get('hallucination_check_pending'):
-                    results[idx]['hallucination_check_pending'] = False
-
+        # Build the final ordered reference list.
         # Convert dict to ordered list
         results_list = [results.get(i) for i in range(total_refs)]
 
         # Final aggregates should be derived from the settled reference objects,
         # not only from incremental deltas emitted during streaming.
         errors_count = warnings_count = suggestions_count = 0
-        unverified_count = verified_count = hallucination_count = 0
-        hallucination_llm_count = 0
+        unverified_count = verified_count = 0
         refs_with_errors = refs_with_warnings_only = refs_with_suggestions_only = refs_verified = 0
         for result in results_list:
             if not result:
@@ -4669,8 +3870,6 @@ class ProgressRefChecker:
             errors_count += d['errors_count']
             warnings_count += d['warnings_count']
             suggestions_count += d['suggestions_count']
-            hallucination_count += d['hallucination_count']
-            hallucination_llm_count += d.get('hallucination_llm_count', 0)
             unverified_count += d['unverified_count']
             verified_count += d['verified_count']
             refs_verified += d['refs_verified']
@@ -4678,4 +3877,5 @@ class ProgressRefChecker:
             refs_with_warnings_only += d['refs_with_warnings_only']
             refs_with_suggestions_only += d['refs_with_suggestions_only']
         
-        return results_list, errors_count, warnings_count, suggestions_count, unverified_count, verified_count, refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified, hallucination_count
+        return results_list, errors_count, warnings_count, suggestions_count, unverified_count, verified_count, refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified
+

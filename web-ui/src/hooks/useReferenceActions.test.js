@@ -4,14 +4,13 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../utils/api', () => ({
   addReferenceToCheck: vi.fn(),
   removeReferenceFromCheck: vi.fn(),
-  suggestAlternativeReference: vi.fn(),
   startReferenceSearch: vi.fn(),
   startReferenceVerification: vi.fn(),
   cancelReferenceSearch: vi.fn(),
 }))
 
 import useReferenceActions from './useReferenceActions'
-import { startReferenceSearch, startReferenceVerification, suggestAlternativeReference } from '../utils/api'
+import { startReferenceSearch, startReferenceVerification } from '../utils/api'
 import { referenceRowIdentity } from '../utils/referenceIdentity'
 import { useCheckStore } from '../stores/useCheckStore'
 import { useHistoryStore } from '../stores/useHistoryStore'
@@ -98,37 +97,6 @@ describe('useReferenceActions re-verification', () => {
       status: 'queued',
     })
     expect(startReferenceVerification).not.toHaveBeenCalled()
-  })
-
-  it('keeps duplicate citation indexes on separate action identities', async () => {
-    const duplicateRows = [
-      { ref_uid: 'row-first', index: 26, title: 'First work', status: 'unverified' },
-      { ref_uid: 'row-second', index: 26, title: 'Second work', status: 'unverified' },
-    ]
-    useHistoryStore.setState({
-      selectedCheckId: 17,
-      selectedCheck: { id: 17, status: 'completed', results: duplicateRows },
-    })
-    let finishSuggestion
-    suggestAlternativeReference.mockImplementation(() => new Promise(resolve => {
-      finishSuggestion = resolve
-    }))
-    const { result } = renderHook(() => useReferenceActions())
-
-    let request
-    await act(async () => {
-      request = result.current.handleSuggestAlt(duplicateRows[1], 1)
-      await Promise.resolve()
-    })
-
-    expect(suggestAlternativeReference).toHaveBeenCalledWith(17, 'uid:row-second')
-    expect(result.current.isSuggesting(referenceRowIdentity(duplicateRows[0], 0))).toBe(false)
-    expect(result.current.isSuggesting(referenceRowIdentity(duplicateRows[1], 1))).toBe(true)
-
-    await act(async () => {
-      finishSuggestion({ data: { suggestions: [] } })
-      await request
-    })
   })
 
   it('sends manual metadata edits as fresh verification overrides', async () => {

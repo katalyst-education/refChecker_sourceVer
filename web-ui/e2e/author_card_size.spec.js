@@ -109,7 +109,7 @@ async function runCheckWithAuthors(page, emit, sessionId, checkId) {
   });
   const counts = {
     total_refs: 1, processed_refs: 1, errors_count: 0, warnings_count: 0, suggestions_count: 0,
-    unverified_count: 0, hallucination_count: 0, verified_count: 1,
+    unverified_count: 0, verified_count: 1,
     refs_with_errors: 0, refs_with_warnings_only: 0, refs_verified: 1, extraction_method: 'llm',
   };
   await emit(sessionId, { type: 'summary_update', ...counts });

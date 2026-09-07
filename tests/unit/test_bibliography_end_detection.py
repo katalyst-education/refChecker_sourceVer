@@ -491,7 +491,7 @@ class TestBibliographyEndDetection:
         sample_text = """
         References
         Zhang, T., Qiu, L., Guo, Q., Deng, C., and Zhou, T. Enhancing uncertainty-based
-        hallucination detection with stronger focus. In Proceedings of EMNLP, 2023.
+        citation verification with stronger focus. In Proceedings of EMNLP, 2023.
 
         Zhu, Q., Duan, J., Chen, C., Liu, S., and Li, X. Near-lossless acceleration
         of long context llm inference with adaptive sparse attention. arXiv:2406.15486, 2024.
@@ -1208,7 +1208,7 @@ class TestBibliographyEndDetectionRegression:
         must stop before these.
         """
         refs = (
-            "Sara Abdali and Jia He. Detecting ai text. In KDD, pp. 6428, 2024.\n"
+            "Sara Abdali and Jia He. Detecting citation errors. In KDD, pp. 6428, 2024.\n"
             "Xianjun Yang and Haifeng Chen. DNA-GPT: Divergent n-gram analysis. "
             "In ICLR, 2024.\n"
         )

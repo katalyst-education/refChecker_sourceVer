@@ -2,7 +2,6 @@ import { useMemo, useRef, useEffect, useState, lazy, Suspense } from 'react'
 import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import { fetchCitationGraph, expandPaper } from '../../utils/api'
 import { openExternal } from '../../utils/tauriBridge'
-import { useAiDetectionStore } from '../../stores/useAiDetectionStore'
 import { referenceRowIdentity } from '../../utils/referenceIdentity'
 
 // Lazy-load the heavy graph lib so the rest of the app stays light when
@@ -14,7 +13,6 @@ const STATUS_COLOR = {
   warning: '#f59e0b',
   error: '#ef4444',
   unverified: '#94a3b8',
-  hallucinated: '#a855f7',
   suggestion: '#3b82f6',
   pending: '#64748b',
 }
@@ -73,7 +71,6 @@ function graphToCanvasPoint(transform, x, y) {
  * that paper's top outgoing references and add them as new nodes).
  */
 export default function GraphView({ references, paperTitle }) {
-  const aiDetectionDevice = useAiDetectionStore((state) => state.device)
   const containerRef = useRef(null)
   const fgRef = useRef(null)
   const autoFittingRef = useRef(false)
@@ -91,8 +88,6 @@ export default function GraphView({ references, paperTitle }) {
   // abstract, free/offline). Declared up here (not near the auto-expand
   // controls) so the citation-graph fetch effect can re-run when it toggles,
   // letting first-degree nodes pick up their AI ring too.
-  const [aiGenMode, setAiGenMode] = useState(false)
-  const [hoveredAiGenMode, setHoveredAiGenMode] = useState(null)
   const [graphTheme, setGraphTheme] = useState(() => ({
     background: '#f7f7f8',
     text: '#0d0d0d',
@@ -145,7 +140,7 @@ export default function GraphView({ references, paperTitle }) {
       doi: r.doi,
       arxiv_id: r.arxiv_id,
     }))
-    fetchCitationGraph({ references: payload, paper_title: paperTitle, ai_detection: aiGenMode })
+    fetchCitationGraph({ references: payload, paper_title: paperTitle })
       .then(res => {
         if (cancelled) return
         const byId = {}
@@ -157,7 +152,7 @@ export default function GraphView({ references, paperTitle }) {
       .catch(() => { if (!cancelled) setServerGraph(null) })
       .finally(() => { if (!cancelled) setLoadingGraph(false) })
     return () => { cancelled = true }
-  }, [references, paperTitle, aiGenMode])
+  }, [references, paperTitle])
 
   const graphData = useMemo(() => {
     const refs = (references || []).filter(Boolean)
@@ -211,20 +206,12 @@ export default function GraphView({ references, paperTitle }) {
       const fallbackPaperId = r.doi ? `DOI:${r.doi}`
         : r.arxiv_id ? `arXiv:${r.arxiv_id}`
         : null
-      // First-degree AI-gen band (when the AI-gen toggle re-fetched the
-      // graph with ai_detection=true and the local model is installed). This
-      // is what lets the ring render on the bibliography nodes, not only on
-      // expanded ones. Mirror the score onto ref for the detail panel.
-      const aiBand = serverNode?.ai_detection_band || null
-      const refWithAi = (typeof serverNode?.ai_detection_score === 'number' && r && typeof r === 'object')
-        ? { ...r, ai_detection_score: serverNode.ai_detection_score }
-        : r
       const node = {
         id,
         label: (r.title || '(no title)').slice(0, 80),
         type: 'reference',
         status,
-        ref: refWithAi,
+        ref: r,
         paperId: serverNode?.paperId || fallbackPaperId,
         citationCount,
         inDegree,
@@ -232,7 +219,6 @@ export default function GraphView({ references, paperTitle }) {
         isOrphan,
         val,
         color: STATUS_COLOR[status] || STATUS_COLOR.pending,
-        aiBand,
       }
       nodes.push(node)
       localById[id] = node
@@ -276,7 +262,6 @@ export default function GraphView({ references, paperTitle }) {
         citationCount: ex.citationCount,
         val: Math.max(4, Math.log10((ex.citationCount || 0) + 1) * 4.5 + 4),
         color: expColor,
-        aiBand: ex.ai_detection_band || null,
       })
       if (ex.parent) edges.push({ source: ex.parent, target: ex.id, expanded: true })
     }
@@ -285,9 +270,8 @@ export default function GraphView({ references, paperTitle }) {
   }, [references, paperTitle, serverGraph, expandedNodes, hideSourceSpokes])
 
   // Tune the force-graph engine: orphans (refs with no co-citation
-  // edges) should drift outward so they cluster at the rim — that's the
-  // visual cue the user asked for ("hallucinated refs land there
-  // visually"). We do this by overriding the charge force per-node so
+  // edges) should drift outward so they cluster at the rim. We do this by
+  // overriding the charge force per-node so
   // orphans repel everyone harder than well-connected nodes.
   useEffect(() => {
     const fg = fgRef.current
@@ -335,7 +319,7 @@ export default function GraphView({ references, paperTitle }) {
       // Pass title so the backend can fall back to title-search when
       // the DOI/arXiv-keyed /references lookup returns empty.
       const refTitle = node.ref?.title || node.label || null
-      const res = await expandPaper({ paper_id: node.paperId, limit: 6, title: refTitle, ai_detection: aiGenMode, ai_detection_device: aiDetectionDevice })
+      const res = await expandPaper({ paper_id: node.paperId, limit: 6, title: refTitle })
       const items = res.data?.items || []
       const additions = items
         .filter(it => it.paperId)
@@ -349,8 +333,6 @@ export default function GraphView({ references, paperTitle }) {
           citationCount: it.citationCount,
           doi: it.doi,
           arxiv_id: it.arxiv_id,
-          ai_detection_band: it.ai_detection_band,
-          ai_detection_score: it.ai_detection_score,
           // 2nd-degree verify status (from Seen-Refs cache probe on the
           // backend). Lets the graph colour expanded nodes by their
           // verification result instead of a uniform cyan.
@@ -390,8 +372,6 @@ export default function GraphView({ references, paperTitle }) {
   // an explicit toggle.
   const [autoExpanding, setAutoExpanding] = useState(false)
   const [autoExpanded, setAutoExpanded] = useState(false)
-  // (aiGenMode is declared near the top so the citation-graph fetch effect
-  // can depend on it — toggling it re-fetches first-degree AI bands.)
   // Eligible-for-expansion: prefer serverGraph nodes (already paperId-
   // keyed) but fall back to any ref with a DOI / arxiv id so the
   // 2nd-degree toggle still shows up for bibliographies where the S2
@@ -448,7 +428,7 @@ export default function GraphView({ references, paperTitle }) {
           try {
             // Pass title so the backend can fall back to title-search
             // when /references comes back empty for this DOI/arXiv.
-            const res = await expandPaper({ paper_id: node.paperId, limit: 8, title: node.title, ai_detection: aiGenMode, ai_detection_device: aiDetectionDevice })
+            const res = await expandPaper({ paper_id: node.paperId, limit: 8, title: node.title })
             const items = res.data?.items || []
             const additions = items
               .filter(it => it.paperId)
@@ -462,8 +442,6 @@ export default function GraphView({ references, paperTitle }) {
                 citationCount: it.citationCount,
                 doi: it.doi,
                 arxiv_id: it.arxiv_id,
-                ai_detection_band: it.ai_detection_band,
-                ai_detection_score: it.ai_detection_score,
                 // 2nd-degree verify status carried over from the backend
                 // Seen-Refs probe — without this, auto-expanded nodes
                 // rendered uniformly cyan and masked the verification
@@ -541,41 +519,10 @@ export default function GraphView({ references, paperTitle }) {
           }}
           title={eligibleNodes.length === 0
             ? '2nd-degree expansion needs refs with a DOI, arXiv ID, or Semantic Scholar paperId. None of the refs in this paper carry one.'
-            : `Pull each ref's own bibliography (2nd-degree). ${eligibleNodes.length} refs eligible. Each new node is coloured by its check status (verified / unverified / hallucinated).`}
+            : `Pull each ref's own bibliography (2nd-degree). ${eligibleNodes.length} refs eligible. Each new node is coloured by its verification status.`}
         >
           {autoExpanding ? 'Expanding…' : autoExpanded ? '✓ Showing 2nd-degree refs' : '⊕ Show 2nd-degree refs + status'}
         </button>
-        {/* 2nd-degree mode: reference check only vs also AI-gen status. AI-gen
-            on expanded refs is computed locally from each article's abstract
-            (free, offline, advisory) — most come back inconclusive. */}
-        <span className="inline-flex items-center rounded overflow-hidden" style={{ border: '1px solid var(--color-border)' }}>
-          {[['refs', 'Refs only'], ['ai', '+ AI-gen']].map(([val, label]) => {
-            const active = (val === 'ai') === aiGenMode
-            return (
-              <button
-                key={val}
-                type="button"
-                onClick={() => setAiGenMode(val === 'ai')}
-                onMouseEnter={() => setHoveredAiGenMode(val)}
-                onMouseLeave={() => setHoveredAiGenMode(prev => (prev === val ? null : prev))}
-                className="px-2 py-0.5 transition-colors"
-                style={{
-                  background: active
-                    ? 'var(--color-bg-tertiary)'
-                    : hoveredAiGenMode === val
-                      ? 'var(--color-bg-hover)'
-                      : 'transparent',
-                  color: active ? 'var(--color-text-primary)' : 'var(--color-text-muted)',
-                }}
-                title={val === 'ai'
-                  ? 'Also estimate an AI-generated-text band for each expanded article, from its abstract via the free offline local model. Advisory only (most abstracts are too short → inconclusive); needs the local model downloaded in Settings → AI Detection.'
-                  : 'Only check the reference/verification status of expanded articles.'}
-              >
-                {label}
-              </button>
-            )
-          })}
-        </span>
         {expandedNodes.length > 0 && (
           <button
             onClick={() => setExpandedNodes([])}
@@ -604,9 +551,7 @@ export default function GraphView({ references, paperTitle }) {
         <LegendDot color={STATUS_COLOR.warning} label="warning" />
         <LegendDot color={STATUS_COLOR.error} label="error" />
         <LegendDot color={STATUS_COLOR.unverified} label="unverified" />
-        <LegendDot color={STATUS_COLOR.hallucinated} label="hallucinated" />
         <LegendDot color="#0ea5e9" label="expanded · no S2 metadata" />
-        {aiGenMode && <LegendDot color="#ef4444" label="◯ AI-gen ring (high/amber=med)" />}
       </div>
       <Suspense fallback={
         <div className="p-6 text-center text-sm" style={{ color: 'var(--color-text-secondary)' }}>
@@ -720,15 +665,15 @@ export default function GraphView({ references, paperTitle }) {
             ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false)
             ctx.fill()
             // Status-aware emphasis rings. Orphan refs that also carry a
-            // problem status (hallucinated, error, unverified) get a
+            // problem status (error or unverified) get a
             // ring in the node's own status colour — the rim position
             // already conveys "isolated", the ring layers on top to
             // call attention to the refs reviewers should look at
-            // first. Verified orphans intentionally get no ring so we
-            // don't visually conflate them with hallucinated colour.
+            // first. Verified orphans intentionally get no ring so valid
+            // isolated references are not visually over-emphasized.
             // Expanded (one-hop) nodes get a faint white ring to mark
             // them as 2nd-degree.
-            const problemStatuses = new Set(['hallucinated', 'error', 'unverified'])
+            const problemStatuses = new Set(['error', 'unverified'])
             if (node.isOrphan && node.type === 'reference' && problemStatuses.has(node.status)) {
               ctx.strokeStyle = node.color || 'rgba(168, 85, 247, 0.8)'
               ctx.lineWidth = Math.max(1.4, 1.8 / globalScale)
@@ -740,16 +685,6 @@ export default function GraphView({ references, paperTitle }) {
               ctx.lineWidth = Math.max(1, 1.2 / globalScale)
               ctx.beginPath()
               ctx.arc(node.x, node.y, radius + 1.5, 0, 2 * Math.PI, false)
-              ctx.stroke()
-            }
-            // AI-generated-text ring (2nd-degree AI-gen mode). High = red,
-            // medium = amber — an outer ring layered over the status disc so
-            // it never hides the verification colour. Advisory only.
-            if (node.aiBand === 'high' || node.aiBand === 'medium') {
-              ctx.strokeStyle = node.aiBand === 'high' ? '#ef4444' : '#f59e0b'
-              ctx.lineWidth = Math.max(1.4, 2 / globalScale)
-              ctx.beginPath()
-              ctx.arc(node.x, node.y, radius + 3.5, 0, 2 * Math.PI, false)
               ctx.stroke()
             }
           }}
@@ -783,17 +718,6 @@ export default function GraphView({ references, paperTitle }) {
               {selected.status && (
                 <div className="mt-1" style={{ color: STATUS_COLOR[selected.status] || STATUS_COLOR.pending }}>
                   Status: {selected.status}
-                </div>
-              )}
-              {(selected.aiBand === 'high' || selected.aiBand === 'medium') && (
-                <div
-                  className="mt-1"
-                  style={{ color: selected.aiBand === 'high' ? 'var(--color-error)' : 'var(--color-warning)' }}
-                  title="AI-generated-text likelihood estimated locally from the abstract. The score is a model score, NOT a probability that a human wrote this. Advisory only — not proof, and unreliable on short/technical text."
-                >
-                  AI-likelihood: {selected.aiBand}
-                  {typeof selected.ref.ai_detection_score === 'number' ? ` · score ${Math.round(selected.ref.ai_detection_score * 100)}` : ''}
-                  {' · from abstract'}
                 </div>
               )}
               {(selected.ref.verified_url || selected.ref.cited_url) && (

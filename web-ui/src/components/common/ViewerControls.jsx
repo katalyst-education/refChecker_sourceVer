@@ -1,6 +1,5 @@
 /**
- * Shared zoom + find controls for the document viewers (the AI-detection
- * flagged-text viewer and the PDF page thumbnail viewer). Pure presentational
+ * Shared zoom + find controls for the document and PDF page viewers. Pure presentational
  * — the parent owns the zoom level / find query state and the match list.
  */
 
