@@ -1225,6 +1225,54 @@ def _maybe_convert_to_text(source_path: Path) -> Optional[Path]:
         return None
 
 
+_TEXT_CONVERTIBLE_SUFFIXES = {".docx", ".odt", ".rtf", ".md", ".markdown", ".html", ".htm"}
+_DIRECT_TEXT_SUFFIXES = {".txt", ".tex", ".bib", ".bbl"}
+
+
+def _resolve_readable_text_source_path(paper_source: str) -> Optional[str]:
+    """Return a readable text path for a source file, converting when needed.
+
+    Handles normal text-like files and recovery for legacy rows where
+    ``paper_source`` points to a missing converted sibling like ``.docx.txt``
+    while the original ``.docx`` file still exists.
+    """
+    if not paper_source:
+        return None
+
+    source_path = Path(paper_source)
+
+    def _existing_file(path: Path) -> bool:
+        return path.exists() and path.is_file()
+
+    def _convert_if_needed(path: Path) -> Optional[str]:
+        suffix = path.suffix.lower()
+        if suffix in _DIRECT_TEXT_SUFFIXES:
+            return str(path)
+        if suffix in _TEXT_CONVERTIBLE_SUFFIXES:
+            converted = _maybe_convert_to_text(path)
+            if converted is not None and _existing_file(converted):
+                return str(converted)
+            # Markdown/HTML remain readable as plain text even without conversion.
+            if suffix in {".md", ".markdown", ".html", ".htm"}:
+                return str(path)
+            return None
+        return str(path)
+
+    if _existing_file(source_path):
+        if source_path.suffix.lower() == ".pdf":
+            return None
+        return _convert_if_needed(source_path)
+
+    # Recovery path: missing converted sibling (e.g. `paper.docx.txt`) but
+    # original source still exists next to it.
+    if source_path.suffix.lower() == ".txt":
+        original = source_path.with_suffix("")
+        if _existing_file(original):
+            return _convert_if_needed(original)
+
+    return None
+
+
 def _extract_zip_batch_files(zip_path: Path, uploads_dir: Path, batch_id: str, max_batch_size: int) -> list[dict[str, str]]:
     """Extract supported files from a ZIP archive with strict file-count and byte caps."""
     import zipfile
@@ -3279,25 +3327,21 @@ async def _extract_paper_text_for_check(
     paper_source = check.get("paper_source", "") or ""
     from backend.refchecker_wrapper import _extract_pdf_text_cli_style
     text = ""
-    if source_type == "file" and paper_source and os.path.exists(paper_source):
-        if paper_source.lower().endswith(".pdf"):
+    if source_type == "file" and paper_source:
+        if paper_source.lower().endswith(".pdf") and os.path.exists(paper_source):
             text = await asyncio.to_thread(_extract_pdf_text_cli_style, paper_source, None)
         else:
-            try:
-                with open(paper_source, "r", encoding="utf-8", errors="replace") as fh:
-                    text = fh.read()
-            except Exception:
-                text = ""
+            readable_path = await asyncio.to_thread(_resolve_readable_text_source_path, paper_source)
+            if readable_path:
+                text = await asyncio.to_thread(_read_source_text_file, readable_path)
     if not (text or "").strip() and source_type == "text" and paper_source:
         if os.path.exists(paper_source):
             if paper_source.lower().endswith(".pdf"):
                 text = await asyncio.to_thread(_extract_pdf_text_cli_style, paper_source, None)
             else:
-                try:
-                    with open(paper_source, "r", encoding="utf-8", errors="replace") as fh:
-                        text = fh.read()
-                except Exception:
-                    text = ""
+                readable_path = await asyncio.to_thread(_resolve_readable_text_source_path, paper_source)
+                if readable_path:
+                    text = await asyncio.to_thread(_read_source_text_file, readable_path)
         elif len(paper_source) > 200:
             # Short text sources are paths/identifiers; long values are the
             # originally pasted document body stored directly in the record.
@@ -4008,12 +4052,13 @@ async def get_thumbnail(check_id: int, current_user: UserInfo = Depends(require_
         elif source_type == 'file':
             # For non-PDF file uploads, generate thumbnail with file content
             logger.info(f"Generating text content thumbnail for uploaded file check {check_id}")
-            if os.path.exists(paper_source):
+            readable_path = await asyncio.to_thread(_resolve_readable_text_source_path, paper_source)
+            if readable_path and os.path.exists(readable_path):
                 thumbnail_path = await get_text_thumbnail_async(
                     check_id,
                     "",
-                    paper_source,
-                    source_identifier=paper_source,
+                    readable_path,
+                    source_identifier=readable_path,
                     cache_dir=cache_dir,
                 )
             else:
@@ -4026,10 +4071,10 @@ async def get_thumbnail(check_id: int, current_user: UserInfo = Depends(require_
         elif source_type == 'text':
             # Generate thumbnail with actual text content for pasted text
             logger.info(f"Generating text content thumbnail for check {check_id}")
-            # paper_source is now a file path for text sources
+            text_preview = paper_source if (paper_source and not os.path.exists(paper_source) and len(paper_source) > 200) else ""
             thumbnail_path = await get_text_thumbnail_async(
                 check_id,
-                "",
+                text_preview,
                 paper_source,
                 source_identifier=paper_source,
                 cache_dir=cache_dir,
@@ -4149,9 +4194,10 @@ async def get_preview(check_id: int, current_user: UserInfo = Depends(require_us
         # For text sources, generate a high-resolution text preview for overlay display
         if source_type == 'text':
             logger.info(f"Generating text preview for check {check_id}")
+            text_preview = paper_source if (paper_source and not os.path.exists(paper_source) and len(paper_source) > 200) else ""
             preview_path = await get_text_preview_async(
                 check_id,
-                "",
+                text_preview,
                 paper_source,
                 source_identifier=paper_source,
                 cache_dir=cache_dir,
@@ -4166,12 +4212,13 @@ async def get_preview(check_id: int, current_user: UserInfo = Depends(require_us
         # For non-PDF file uploads, also generate a text preview
         if source_type == 'file' and not paper_source.lower().endswith('.pdf'):
             logger.info(f"Generating text preview for uploaded file check {check_id}")
-            if os.path.exists(paper_source):
+            readable_path = await asyncio.to_thread(_resolve_readable_text_source_path, paper_source)
+            if readable_path and os.path.exists(readable_path):
                 preview_path = await get_text_preview_async(
                     check_id,
                     "",
-                    paper_source,
-                    source_identifier=paper_source,
+                    readable_path,
+                    source_identifier=readable_path,
                     cache_dir=cache_dir,
                 )
             else:
@@ -4475,6 +4522,15 @@ def _read_cached_paper_text(path: str) -> str:
         return ""
 
 
+def _read_source_text_file(path: str) -> str:
+    """Read local source text with lossy UTF-8 fallback for mixed encodings."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            return fh.read()
+    except Exception:
+        return ""
+
+
 def _write_cached_paper_text(path: str, text: str) -> None:
     """Atomically persist extracted paper text (blocking; call via to_thread)."""
     try:
@@ -4620,22 +4676,17 @@ async def get_paper_text(check_id: int, current_user: UserInfo = Depends(require
         except Exception as _e:
             logger.debug("paper-text cache read skipped: %s", _e)
 
-        def _read_textfile(path):
-            try:
-                with open(path, 'r', encoding='utf-8', errors='replace') as fh:
-                    return fh.read()
-            except Exception:
-                return ""
-
         from backend.refchecker_wrapper import _extract_pdf_text_cli_style
 
         # 1) Uploaded local file (pdf / txt / bib / tex).
-        if source_type == 'file' and paper_source and os.path.exists(paper_source):
-            if paper_source.lower().endswith('.pdf'):
+        if source_type == 'file' and paper_source:
+            if paper_source.lower().endswith('.pdf') and os.path.exists(paper_source):
                 text = await asyncio.to_thread(_extract_pdf_text_cli_style, paper_source, None)
                 fmt = "pdf"
             else:
-                text = _read_textfile(paper_source)
+                readable_path = await asyncio.to_thread(_resolve_readable_text_source_path, paper_source)
+                if readable_path:
+                    text = await asyncio.to_thread(_read_source_text_file, readable_path)
 
         # 1b) Pasted text / .bib / .bbl / .tex (source_type == 'text'). The body
         #     is saved to a temp file (read it) — or, for an inline paste, IS the
@@ -4648,7 +4699,9 @@ async def get_paper_text(check_id: int, current_user: UserInfo = Depends(require
                     text = await asyncio.to_thread(_extract_pdf_text_cli_style, paper_source, None)
                     fmt = "pdf"
                 else:
-                    text = _read_textfile(paper_source)
+                    readable_path = await asyncio.to_thread(_resolve_readable_text_source_path, paper_source)
+                    if readable_path:
+                        text = await asyncio.to_thread(_read_source_text_file, readable_path)
             elif len(paper_source) > 200:
                 # The pasted content was stored inline rather than as a file path.
                 text = paper_source
@@ -10042,11 +10095,6 @@ class _ExpandRequest(BaseModel):
     # by title to resolve the canonical paperId and retry. Without this
     # the graph view shows lots of central refs with no spokes.
     title: Optional[str] = None
-    # expanded article from its ABSTRACT, using the free offline local model.
-    # Abstracts are short, so most come back "inconclusive" — this is an
-    # advisory signal, never proof, and it never incurs API/LLM cost.
-
-
 @app.post("/api/papers/expand")
 async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(require_user)):
     """One-hop expansion for the graph view: list a paper's most-cited
@@ -10060,8 +10108,6 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
     if not pid:
         raise HTTPException(status_code=400, detail="paper_id required")
 
-    # Pull abstracts too when the caller wants a per-expanded-article AI-gen
-    # band (computed locally from the abstract below).
     _fields = (
         "citedPaper.paperId,citedPaper.title,citedPaper.year,citedPaper.authors,"
         "citedPaper.externalIds,citedPaper.citationCount"

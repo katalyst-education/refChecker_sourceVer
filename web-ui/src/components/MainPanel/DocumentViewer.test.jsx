@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DocumentViewer, { CITE_FOCUS_ZOOM } from './DocumentViewer'
 
 // NativePdfViewer pulls in pdfjs + the worker; stub it so the test isolates the
@@ -9,9 +9,11 @@ vi.mock('./NativePdfViewer', () => ({
   default: ({ zoom }) => <div data-testid="pdf-zoom">{String(zoom)}</div>,
 }))
 
+const getPaperTextMock = vi.fn()
+
 // Keep the text-fallback path quiet; the PDF stub is what we assert on.
 vi.mock('../../utils/api', () => ({
-  getPaperText: vi.fn(() => Promise.resolve({ data: { text: '', available: false } })),
+  getPaperText: (...args) => getPaperTextMock(...args),
 }))
 
 vi.mock('../../utils/tauriBridge', () => ({
@@ -20,6 +22,11 @@ vi.mock('../../utils/tauriBridge', () => ({
 }))
 
 const zoomShown = () => Number(screen.getByTestId('pdf-zoom').textContent)
+
+beforeEach(() => {
+  getPaperTextMock.mockReset()
+  getPaperTextMock.mockResolvedValue({ data: { text: '', available: false } })
+})
 
 // R12 (S7) — opening a citation must ALWAYS land at the deterministic focus
 // zoom regardless of prior zoom/open, and re-targeting while open must reset
@@ -60,5 +67,25 @@ describe('DocumentViewer focus zoom (R12)', () => {
     ]
     rerender(<DocumentViewer checkId={1} spans={nextSpans} focusSpanIndex={0} onClose={vi.fn()} />)
     expect(zoomShown()).toBe(CITE_FOCUS_ZOOM)
+  })
+
+  it('opens DOCX/file non-PDF sources directly in text mode', async () => {
+    getPaperTextMock.mockResolvedValueOnce({
+      data: { text: 'Recovered DOCX text is visible here.', available: true },
+    })
+
+    render(
+      <DocumentViewer
+        checkId={2}
+        spans={[]}
+        focusSpanIndex={null}
+        sourceType="file"
+        paperSource="C:\\uploads\\paper.docx.txt"
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByTestId('pdf-zoom')).toBeNull()
+    expect(await screen.findByText(/Recovered DOCX text is visible here\./)).toBeInTheDocument()
   })
 })

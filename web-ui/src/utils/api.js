@@ -253,7 +253,7 @@ export const findAuthorProfile = ({ name, title = null, year = null } = {}) =>
 export const fetchReferenceLibraryGraph = ({ limit = 400, min_times_seen = 1, edge_strategy = 'shared-authors' } = {}) =>
   api.get('/references/library/graph', { params: { limit, min_times_seen, edge_strategy }, timeout: 60000 })
 
-// Locate target texts (AI-flagged passages / citation contexts) in the native
+// Locate target texts (citation contexts / find queries) in the native
 // PDF -> per-target page + normalized rects, for highlight overlays.
 export const locatePdfSpans = (checkId, targets) =>
   api.post(`/preview/${checkId}/locate`, { targets }, { timeout: 30000 })
@@ -504,5 +504,4 @@ export default {
   clearCache,
   clearCachedFiles,
 }
-
 

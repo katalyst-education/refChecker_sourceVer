@@ -3,8 +3,8 @@ import { useState } from 'react'
 /**
  * Reusable button component with variants — the SINGLE SOURCE OF TRUTH for the
  * article-level action controls (BUTTON_DESIGN §1.2). The five action panels
- * (RetractionCheck, GapFinder, CitationIntegrity, ArticleAssistant, the
- * AI-likelihood row) all render through this component plus its IconButton /
+ * (RetractionCheck, GapFinder, CitationIntegrity, ArticleAssistant, etc.) all
+ * render through this component plus its IconButton /
  * SplitButton siblings, so they read as ONE family.
  *
  * Click-state stability (R52 / BUTTON_DESIGN §1.3): no state changes a control's

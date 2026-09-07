@@ -83,11 +83,8 @@ export default function GraphView({ references, paperTitle }) {
   const [expandedNodes, setExpandedNodes] = useState([]) // [{id, paperId, title, authors, year, citationCount, parent}]
   const [expanding, setExpanding] = useState(null)
   const [hasUserNavigated, setHasUserNavigated] = useState(false)
-  // When on, 2nd-degree expansion also asks the backend for an AI-generated
-  // -text likelihood band per expanded article (computed locally from the
-  // abstract, free/offline). Declared up here (not near the auto-expand
-  // controls) so the citation-graph fetch effect can re-run when it toggles,
-  // letting first-degree nodes pick up their AI ring too.
+  // Keep theme colours in local state so the graph updates with app theme
+  // changes while preserving stable node/edge data.
   const [graphTheme, setGraphTheme] = useState(() => ({
     background: '#f7f7f8',
     text: '#0d0d0d',

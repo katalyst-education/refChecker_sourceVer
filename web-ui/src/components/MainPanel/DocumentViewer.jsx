@@ -15,7 +15,7 @@ import NativePdfViewer from './NativePdfViewer'
  * Passages that can't be located are listed so nothing is hidden.
  *
  * `focusSpanIndex` (optional): scroll to + flash the passage for that span on
- * open — used by the "click a flagged passage → see it in the document" flow.
+ * open — used by the "click a citation passage → see it in the document" flow.
  */
 
 const ESC = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -92,10 +92,28 @@ function mergeRanges(ranges) {
 // is opened with no focus target it opens at fit-width (1).
 const CITE_FOCUS_ZOOM = 1
 
-export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = null, onClose, onJumpToReference }) {
-  // Native PDF first; fall back to the extracted-text view when there's no
-  // source PDF (pasted text / .bib / .tex) or pdf.js can't render it.
-  const [mode, setMode] = useState('pdf') // 'pdf' | 'text'
+function shouldPreferTextMode(sourceType, paperSource) {
+  const st = String(sourceType || '').toLowerCase()
+  const src = String(paperSource || '').toLowerCase()
+  if (st === 'text') return true
+  if (st === 'file' && src && !src.endsWith('.pdf')) return true
+  return false
+}
+
+export default function DocumentViewer({
+  checkId,
+  spans = [],
+  focusSpanIndex = null,
+  onClose,
+  onJumpToReference,
+  sourceType = null,
+  paperSource = '',
+}) {
+  // Prefer extracted-text mode for known non-PDF sources (docx/html/txt/bib/...).
+  // This avoids blank native-PDF canvases when a generated fallback PDF has
+  // unusable fonts on a given platform/runtime.
+  const preferTextMode = shouldPreferTextMode(sourceType, paperSource)
+  const [mode, setMode] = useState(preferTextMode ? 'text' : 'pdf') // 'pdf' | 'text'
   const [pdfLocated, setPdfLocated] = useState(0)
   const [state, setState] = useState({ loading: true, text: '', error: null, available: true, truncated: false })
   // R12: start at the focus zoom whenever a citation/passage is focused so the
@@ -132,6 +150,10 @@ export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = n
     setZoom(CITE_FOCUS_ZOOM)
   }, [focusKey])
 
+  useEffect(() => {
+    setMode(preferTextMode ? 'text' : 'pdf')
+  }, [checkId, preferTextMode])
+
   // Back-link from a clicked PDF highlight to its reference card. NativePdfViewer
   // calls this with the span it drew. We dispatch the `refchecker:focus-reference`
   // event the reference list (and MainPanel) listens for FIRST — that switches to
@@ -143,11 +165,6 @@ export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = n
   useEffect(() => { closeRef.current = onClose }, [onClose])
   const jumpToReference = (span) => {
     const refId = span?.refId != null ? span.refId : span?.refIndex
-    // R29: AI/flagged sentences use a self-referential `ai:<i>` id (so the hover
-    // bar + link engage for every span). They don't map to a reference card, so
-    // never switch tabs / tear down the viewer for them — NativePdfViewer
-    // re-centers on the span itself.
-    if (typeof refId === 'string' && refId.startsWith('ai:')) return
     if (onJumpToReference) {
       onJumpToReference(span)
     } else if (refId != null) {
@@ -335,7 +352,7 @@ export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = n
   }
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Flagged passages in document" onClick={onClose}
+    <div role="dialog" aria-modal="true" aria-label="Passages in document" onClick={onClose}
       style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center',
                justifyContent: 'center', padding: 16, background: 'rgba(0,0,0,0.5)' }}>
       <div onClick={(e) => e.stopPropagation()}
@@ -353,7 +370,7 @@ export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = n
                       padding: '10px 14px', borderBottom: '1px solid var(--color-border)',
                       background: 'var(--color-bg-tertiary)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <strong style={{ fontSize: 14 }}>Flagged passages in document</strong>
+            <strong style={{ fontSize: 14 }}>Passages in document</strong>
             {((mode === 'pdf') || (!state.loading && state.available)) && spans.length > 0 && (
               <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 <mark style={{ backgroundColor: 'var(--color-mark-bg, rgba(239,68,68,0.22))', padding: '0 4px', borderRadius: 3 }}>highlighted</mark>
@@ -425,7 +442,7 @@ export default function DocumentViewer({ checkId, spans = [], focusSpanIndex = n
               {missing > 0 && (
                 <div style={{ marginBottom: 12, padding: '8px 10px', borderRadius: 6,
                               background: 'var(--color-bg-tertiary)', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                  {missing} flagged passage{missing === 1 ? '' : 's'} couldn’t be located (PDF layout differences):
+                  {missing} passage{missing === 1 ? '' : 's'} couldn’t be located (PDF layout differences):
                   <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
                     {spans.filter((sp) => !findRange(state.text, sp?.quote || '')).slice(0, 6).map((sp, i) => (
                       <li key={i} style={{ marginBottom: 2 }}>“{(sp.quote || '').slice(0, 120)}…”</li>

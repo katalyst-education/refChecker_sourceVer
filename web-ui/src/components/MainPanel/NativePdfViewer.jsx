@@ -9,10 +9,6 @@ import { usePdfFind } from '../../utils/usePdfFind'
 // Vite resolves `?url` to the emitted worker asset; pdfjs needs it set once.
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
-// AI-flagged spans carry no verification status, so they keep a dedicated red
-// highlight; every status-bearing span is colored via the shared R14 map
-// (utils/statusColors) so this viewer agrees with StatusSection + ReferenceCard.
-const AI_COLORS = { fill: 'rgba(239,68,68,0.24)', stroke: 'rgba(239,68,68,0.8)' }
 // R28: the located reference-list ENTRY (the in-PDF jump target of an inline
 // citation) gets a distinct blue so it never reads as a verification verdict.
 const REF_ENTRY_COLORS = { fill: 'rgba(59,130,246,0.26)', stroke: 'rgba(37,99,235,0.85)' }
@@ -98,13 +94,13 @@ function computeHighlights(rawPage, spans) {
     const boxes = items.filter((it) => it.end > qs && it.start < qe && it.w > 0)
     if (!boxes.length) return
     located += 1
-    // Status-bearing spans use the shared R14 map; the reference-list entry gets
-    // the distinct blue (R28); status-less AI spans keep the dedicated red.
+    // Status-bearing spans use the shared R14 map; reference-list entries use
+    // the distinct blue (R28); status-less spans use the neutral default token.
     const colors = sp.kind === 'ref-entry'
       ? REF_ENTRY_COLORS
       : (sp.status
         ? getStatusColors(sp.status)
-        : (sp.kind === 'ai' ? AI_COLORS : getStatusColors('default')))
+        : getStatusColors('default'))
     boxes.forEach((b, bi) => highlights.push({
       spanIndex: si, key: `${n}-${si}-${bi}`,
       x: b.x, y: b.y, w: b.w, h: b.h,
@@ -278,13 +274,6 @@ export default function NativePdfViewer({ checkId, spans = [], focusSpanIndex = 
     // scrolls + flashes that entry IN-DOCUMENT instead of switching a React tab.
     if (span?.refEntryIndex != null && flashSpanInDoc(span.refEntryIndex)) return
     const refId = span?.refId != null ? span.refId : span?.refIndex
-    // R29: AI/flagged sentences carry a self-referential `ai:<i>` id so the hover
-    // bar + click work for every span. These don't map to a bibliography card, so
-    // re-center on the span's own highlight in-document rather than switch tabs.
-    if (typeof refId === 'string' && refId.startsWith('ai:')) {
-      flashSpanInDoc(span?._i)
-      return
-    }
     if (onJumpToReference) { onJumpToReference(span); return }
     if (refId == null) return
     try {
@@ -531,10 +520,9 @@ export default function NativePdfViewer({ checkId, spans = [], focusSpanIndex = 
             // The reference-list entry is a jump TARGET, not itself clickable.
             const isRefEntry = h.span.kind === 'ref-entry'
             // R28: a citation that resolved its reference-list entry in-PDF, or
-            // (R29) an `ai:<i>` self-reference, or any span with a real refId.
-            // Only advertise the in-PDF jump when the entry was actually located.
+            // any span with a real refId. Only advertise the in-PDF jump when
+            // the entry was actually located.
             const canJumpInPdf = h.span.refEntryIndex != null && locatedSpanSet.has(h.span.refEntryIndex)
-            const isAiRef = typeof refId === 'string' && refId.startsWith('ai:')
             const clickable = !isRefEntry && (canJumpInPdf || refId != null)
             return (
               <div
@@ -542,7 +530,7 @@ export default function NativePdfViewer({ checkId, spans = [], focusSpanIndex = 
                 data-span={h.spanIndex}
                 data-ref={refId != null ? String(refId) : undefined}
                 onClick={clickable ? (e) => { e.stopPropagation(); jumpToReference({ ...h.span, _i: h.spanIndex }) } : undefined}
-                onMouseEnter={() => setHover({ pageNumber: p.pageNumber, x: h.x, y: h.y, h: h.h, span: h.span, stroke: h.stroke, clickable, isAiRef, canJumpInPdf })}
+                onMouseEnter={() => setHover({ pageNumber: p.pageNumber, x: h.x, y: h.y, h: h.h, span: h.span, stroke: h.stroke, clickable, canJumpInPdf })}
                 onMouseLeave={() => setHover((cur) => (cur && cur.span === h.span && cur.x === h.x ? null : cur))}
                 style={{
                   position: 'absolute', left: h.x * SCALE, top: h.y * SCALE, width: h.w * SCALE, height: h.h * SCALE,
@@ -576,7 +564,7 @@ export default function NativePdfViewer({ checkId, spans = [], focusSpanIndex = 
               />
             ))
           })}
-          {/* Solid, opaque hover card describing the cited/flagged passage.
+          {/* Solid, opaque hover card describing the cited/highlighted passage.
               Positioned above the hovered highlight; uses themed surface +
               readable text + a subtle shadow, and sits above the page (z-index).
               Replaces the easy-to-miss native title tooltip. */}
@@ -613,7 +601,7 @@ export default function NativePdfViewer({ checkId, spans = [], focusSpanIndex = 
                 <div style={{ marginTop: 5, fontSize: 11, fontWeight: 600, color: 'var(--color-accent, #10a37f)' }}>
                   {hover.canJumpInPdf
                     ? 'Click to jump to the reference-list entry in this PDF ↓'
-                    : (hover.isAiRef ? 'Click to center this passage →' : 'Click to view this reference →')}
+                    : 'Click to view this reference →'}
                 </div>
               )}
             </div>

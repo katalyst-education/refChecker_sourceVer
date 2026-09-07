@@ -27,11 +27,6 @@ const extractionValueStyle = { color: 'var(--color-text-secondary)', fontWeight:
  *     usable overlay.
  *   - Page jump strip: top-left chip "Page N / total" plus prev/next.
  */
-// AI-band highlight fill (translucent) for native-page overlays.
-const _BAND_HL = {
-  high: 'rgba(239,68,68,0.30)', medium: 'rgba(245,158,11,0.30)', low: 'rgba(34,197,94,0.22)',
-}
-
 // R28: build the locatable spans handed to the native document viewer for the
 // "view this citation in the document" flow.
 //   - Span 0 is the cited sentence (focused + colored by `status`).
@@ -72,9 +67,7 @@ function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount,
     typeof initialPageCount === 'number' ? initialPageCount : null
   )
   const [activePage, setActivePage] = useState(0)
-  const [highlights, setHighlights] = useState({}) // pageIndex -> [{rects,band,score,reason,key}]
   const [findHl, setFindHl] = useState({})         // pageIndex -> [rects] for the query
-  const [hoverHl, setHoverHl] = useState(null)
   const [zoom, setZoom] = useState(1)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
@@ -370,38 +363,6 @@ function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount,
                   style={{ display: 'block', width: '100%', height: 'auto' }}
                   className="rounded-lg shadow-2xl bg-white"
                 />
-                {/* Native-page AI highlight overlay (normalized rects -> %). */}
-                {(highlights[i] || []).flatMap((hl) =>
-                  (hl.rects || []).map(([x0, y0, x1, y1], ri) => (
-                    <div
-                      key={`${hl.key}-${ri}`}
-                      onMouseEnter={() => setHoverHl(hl)}
-                      onMouseLeave={() => setHoverHl((h) => (h === hl ? null : h))}
-                      title="AI-flagged passage"
-                      style={{
-                        position: 'absolute', left: `${x0 * 100}%`, top: `${y0 * 100}%`,
-                        width: `${(x1 - x0) * 100}%`, height: `${(y1 - y0) * 100}%`,
-                        background: _BAND_HL[(hl.band || '').toLowerCase()] || _BAND_HL.medium,
-                        borderRadius: 2, cursor: 'help', mixBlendMode: 'multiply',
-                      }}
-                    >
-                      {hoverHl === hl && ri === 0 && (
-                        <div style={{
-                          // R30: fully opaque so the banner is always legible over
-                          // any underlying page content.
-                          position: 'absolute', bottom: '100%', left: 0, marginBottom: 4, zIndex: 30,
-                          background: 'rgb(17,24,39)', color: '#fff', fontSize: 11,
-                          padding: '6px 8px', borderRadius: 6, width: 240, lineHeight: 1.4,
-                          pointerEvents: 'none', boxShadow: '0 6px 20px rgba(0,0,0,0.4)',
-                        }}>
-                          <strong style={{ color: '#fca5a5' }}>AI-likelihood: {hl.band || 'flagged'}</strong>
-                          {typeof hl.score === 'number' ? ` · ${Math.round(hl.score * 100)}` : ''}
-                          {hl.reason ? <div style={{ color: '#cbd5e1', marginTop: 2 }}>{hl.reason}</div> : null}
-                        </div>
-                      )}
-                    </div>
-                  ))
-                )}
                 {/* Find-query highlight overlay (yellow) — shows where it is. */}
                 {(findHl[i] || []).map(([x0, y0, x1, y1], ri) => (
                   <div key={`find-${ri}`} title="Search match"
@@ -884,6 +845,7 @@ export default function StatusSection() {
       setPreviewUrl(null)
       setPreviewPageCount(null)
       setThumbnailError(false)
+      setShowThumbnailOverlay(false)
       return
     }
     
@@ -893,6 +855,7 @@ export default function StatusSection() {
     setPreviewPageCount(null)
     setThumbnailError(false)
     setThumbnailLoading(true)
+    setShowThumbnailOverlay(false)
     
     // Set the thumbnail URL - let the img element handle loading
     const url = `${API_BASE}/api/thumbnail/${selectedCheckId}?phase=${thumbnailRetryPhase}`
@@ -1562,6 +1525,8 @@ export default function StatusSection() {
           checkId={selectedCheckId}
           spans={citationSpans}
           focusSpanIndex={0}
+          sourceType={displaySourceType}
+          paperSource={displaySource || ''}
           onClose={closeCitationViewer}
         />
       )}
