@@ -1,7 +1,25 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
-import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue, exportReferenceAsBibtex, normalizeAuthors, isEtAlSentinel, hasEtAlSentinel, plural, countLabel } from './formatters'
+import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue, exportReferenceAsBibtex, exportResultsAsMarkdown, normalizeAuthors, isEtAlSentinel, hasEtAlSentinel, plural, countLabel } from './formatters'
 
 describe('formatters', () => {
+  describe('exportResultsAsMarkdown', () => {
+    it('marks website-verified references as verified', () => {
+      const markdown = exportResultsAsMarkdown({
+        paperTitle: 'Test paper',
+        stats: {},
+        references: [{
+          title: 'Website-verified reference',
+          status: 'verified',
+          verified_via_website: true,
+          verified_url: 'https://example.org/source',
+        }],
+      })
+
+      expect(markdown).toContain('Website-verified reference ✅')
+      expect(markdown).not.toContain('Website-verified reference ❓')
+    })
+  })
+
   describe('plural / countLabel', () => {
     it('uses the singular at exactly 1 and the plural everywhere else', () => {
       expect(plural(1, 'reference')).toBe('reference')

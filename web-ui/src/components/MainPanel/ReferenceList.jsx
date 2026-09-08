@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import ReferenceCard from '../ReferenceCard/ReferenceCard'
 import { useCheckStore } from '../../stores/useCheckStore'
-import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
+import { applyStatusFilter, getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import useReferenceActions from '../../hooks/useReferenceActions'
 import { useStyleStore } from '../../stores/useStyleStore'
 import {
@@ -62,8 +62,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
 
   // Memoize all derived data to ensure consistency within a render
   const { sortedReferences, filteredReferences } = useMemo(() => {
-    const filters = statusFilter.map(f => f.toLowerCase())
-
     const sorted = (references || []).slice().sort((a, b) => {
       const aIndex = typeof a?.index === 'number' ? a.index : Number.MAX_SAFE_INTEGER
       const bIndex = typeof b?.index === 'number' ? b.index : Number.MAX_SAFE_INTEGER
@@ -93,37 +91,10 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
       warnings: Array.isArray(ref.warnings) ? ref.warnings : [],
     }))
 
-    const filtered = normalized.filter(ref => {
-      const status = (ref.status || '').toLowerCase()
-      // If no filter, show all references including pending/checking/unchecked
-      if (filters.length === 0) {
-        return true
-      }
-
-      // Inclusive filtering: show refs that HAVE the selected issue type
-      // (even if they also have other issues)
-      return filters.some(filter => {
-        switch (filter) {
-          case 'verified':
-            // Verified includes both pure verified AND those with only suggestions
-            // (suggestions are for verified papers that could be improved)
-            return status === 'verified' || status === 'suggestion'
-          case 'error':
-            return ref.errors?.some(e => e.error_type !== 'unverified')
-          case 'warning':
-            return ref.warnings?.length > 0
-          case 'suggestion':
-            // Has any suggestion
-            return ref.suggestions?.length > 0
-          case 'unverified':
-            if (status === 'checking') return false
-            return status === 'unverified' || ref.errors?.some(e => e.error_type === 'unverified')
-          default:
-            // For other statuses (pending, checking, unchecked), match exactly
-            return status === filter
-        }
-      })
-    })
+    // Keep the list filter and the Summary chips on the same shared status
+    // contract. In particular, a reference verified from a website is part of
+    // the verified bucket even though it has a distinct display icon.
+    const filtered = applyStatusFilter(normalized, statusFilter, isCheckComplete)
 
     return { sortedReferences: sorted, filteredReferences: filtered }
   }, [references, statusFilter, isCheckComplete, activeStyle])

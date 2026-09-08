@@ -2674,23 +2674,25 @@ class Database:
         recomputing the rolled-up counters in lockstep so the history
         sidebar / Seen Refs tab don't drift from the actual results."""
         results = ensure_reference_uids(results)
-        total = len(results)
-        refs_with_errors = sum(1 for r in results if (r.get("errors") or []))
-        refs_with_warnings_only = sum(1 for r in results if not (r.get("errors") or []) and (r.get("warnings") or []))
-        refs_with_suggestions_only = sum(1 for r in results if not (r.get("errors") or []) and not (r.get("warnings") or []) and (r.get("suggestions") or []))
-        refs_verified = sum(1 for r in results if (r.get("status") == "verified"))
-        errors_count = sum(len(r.get("errors") or []) for r in results)
-        warnings_count = sum(len(r.get("warnings") or []) for r in results)
-        suggestions_count = sum(len(r.get("suggestions") or []) for r in results)
-        unverified_count = sum(1 for r in results if r.get("status") == "unverified")
+        buckets = _compute_reference_buckets_from_results(
+            results,
+            is_complete=True,
+            stored_total_refs=len(results),
+        )
 
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout=5000")
             params = [
                 json.dumps(results, default=str),
-                total, errors_count, warnings_count, suggestions_count, unverified_count,
-                refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only,
-                refs_verified,
+                buckets["total_refs"],
+                buckets["errors_count"],
+                buckets["warnings_count"],
+                buckets["suggestions_count"],
+                buckets["unverified_count"],
+                buckets["refs_with_errors"],
+                buckets["refs_with_warnings_only"],
+                buckets["refs_with_suggestions_only"],
+                buckets["refs_verified"],
                 check_id,
             ]
             if user_id is None:

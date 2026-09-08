@@ -1,22 +1,7 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { useCheckStore } from '../../stores/useCheckStore'
 import { useStyleStore } from '../../stores/useStyleStore'
-import {
-  exportResultsAsMarkdown,
-  exportResultsAsPlainText,
-  exportResultsAsBibtex,
-  exportResultsAsJsonl,
-  exportResultsAsCsv,
-  exportResultsAsRIS,
-  exportDiffAsMarkdown,
-  exportDiffAsCsv,
-  sortReferencesForExport,
-  REFERENCE_SORT_MODES,
-  filterIssuesForStyle,
-  downloadAsFile,
-  plural,
-  countLabel
-} from '../../utils/formatters'
+import { filterIssuesForStyle, plural, countLabel } from '../../utils/formatters'
 import { buildReferenceSummary } from '../../utils/referenceStatus'
 
 /**
@@ -67,31 +52,13 @@ function PerStageChip({ stats, references }) {
  * Stats section showing reference check summary with clickable filters
  * Compact design with refs summary and individual issue counts
  */
-export default function StatsSection({ stats, isComplete, references, paperTitle, paperSource, healthBadge, usageChip }) {
+export default function StatsSection({ stats, isComplete, references, healthBadge, usageChip }) {
   const statusFilter = useCheckStore(s => s.statusFilter)
   const setStatusFilter = useCheckStore(s => s.setStatusFilter)
-  const [showExportMenu, setShowExportMenu] = useState(false)
-  const [sortMode, setSortMode] = useState('citation')
-  // 'original' = export references as RefChecker saw them (the "report" view)
-  // 'corrected' = apply every verifier suggestion before exporting
-  // 'diff' = side-by-side original-vs-corrected listing
-  const [exportMode, setExportMode] = useState('original')
   // Hovered filter chip id. Tracked in state (not imperative DOM writes) so a
   // chip never keeps a stale hover fill when the selection changes under the
   // cursor.
   const [hoveredChip, setHoveredChip] = useState(null)
-  const exportMenuRef = useRef(null)
-
-  // Close export menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
-        setShowExportMenu(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
 
   const handleFilterClick = (filterId) => {
     setStatusFilter(filterId)
@@ -169,81 +136,6 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
   const isSuggestionSelected = statusFilter.includes('suggestion')
   const isUnverifiedSelected = statusFilter.includes('unverified')
 
-  // Base filename for exports
-  const baseFilename = `refchecker-${(paperTitle || 'report').replace(/[^a-z0-9]/gi, '_').substring(0, 50)}`
-
-  // Export handlers
-  const handleExport = (format) => {
-    setShowExportMenu(false)
-    // Export from the SAME style-filtered reference view that powers the GUI
-    // chips/cards so exported issue counts and rows match what users saw.
-    const sortedRefs = sortReferencesForExport(styleFilteredReferences, sortMode)
-    const exportStats = {
-      total_refs: summaryCounts.totalRefs ?? 0,
-      refs_verified: summaryCounts.references?.verified ?? 0,
-      refs_with_errors: summaryCounts.references?.errors ?? 0,
-      refs_with_warnings_only: summaryCounts.references?.warnings ?? 0,
-      refs_with_suggestions_only: summaryCounts.references?.suggestions ?? 0,
-      unverified_count: summaryCounts.references?.unverified ?? 0,
-      errors_count: summaryCounts.issues?.errors ?? 0,
-      warnings_count: summaryCounts.issues?.warnings ?? 0,
-      suggestions_count: summaryCounts.issues?.suggestions ?? 0,
-    }
-
-    // 'diff' mode short-circuits format: there are only two file shapes
-    // (markdown and csv) that make sense for a side-by-side report.
-    if (exportMode === 'diff') {
-      if (format === 'csv') {
-        downloadAsFile(exportDiffAsCsv({ references: sortedRefs }), `${baseFilename}-diff.csv`, 'text/csv')
-      } else {
-        downloadAsFile(exportDiffAsMarkdown({ paperTitle, references: sortedRefs }), `${baseFilename}-diff.md`, 'text/markdown')
-      }
-      return
-    }
-
-    // 'corrected' mode rewrites each ref with the verifier's accepted
-    // suggestion before formatting in the chosen style.
-    const correctedRefs = exportMode === 'corrected'
-      ? sortedRefs.map(r => {
-          const c = r.corrected_reference
-          if (!c || typeof c !== 'object') return r
-          const next = { ...r }
-          for (const k of ['title', 'authors', 'year', 'venue', 'doi', 'arxiv_id']) {
-            if (c[k] != null && c[k] !== '') next[k] = c[k]
-          }
-          return next
-        })
-      : sortedRefs
-    const data = {
-      paperTitle,
-      paperSource,
-      stats: exportStats,
-      references: correctedRefs,
-      isCheckComplete: isComplete,
-    }
-
-    switch (format) {
-      case 'markdown':
-        downloadAsFile(exportResultsAsMarkdown(data), `${baseFilename}.md`, 'text/markdown')
-        break
-      case 'text':
-        downloadAsFile(exportResultsAsPlainText(data), `${baseFilename}.txt`, 'text/plain')
-        break
-      case 'bibtex':
-        downloadAsFile(exportResultsAsBibtex(data), `${baseFilename}.bib`, 'application/x-bibtex')
-        break
-      case 'ris':
-        downloadAsFile(exportResultsAsRIS(data), `${baseFilename}.ris`, 'application/x-research-info-systems')
-        break
-      case 'jsonl':
-        downloadAsFile(exportResultsAsJsonl(data), `${baseFilename}.jsonl`, 'application/x-ndjson')
-        break
-      case 'csv':
-        downloadAsFile(exportResultsAsCsv(data), `${baseFilename}.csv`, 'text/csv')
-        break
-    }
-  }
-
   return (
     <div 
       className="rounded-lg border p-3"
@@ -252,13 +144,8 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
         borderColor: 'var(--color-border)',
       }}
     >
-      {/* Header row. The right-hand controls are anchored: the left group takes
-          the slack and wraps within itself, and the right group never shrinks
-          or wraps to its own line. Without this, activating a filter widened
-          the right group enough to wrap it below the title (where
-          justify-between left-aligns it), so the Export button jumped. Items
-          are top-aligned so the button also can't drift vertically when the
-          left group wraps to a second line. */}
+      {/* Header row. The summary details wrap within the left group while the
+          filter reset remains anchored at the right. */}
       <div className="flex items-start justify-between mb-3 gap-2">
         <div className="flex items-center gap-3 flex-wrap min-w-0 flex-1">
           <h3
@@ -305,128 +192,6 @@ export default function StatsSection({ stats, isComplete, references, paperTitle
               </svg>
             </button>
           )}
-          {/* Export dropdown - only enabled when check is complete */}
-          <div className="relative" ref={exportMenuRef}>
-            <button
-              onClick={() => isComplete && setShowExportMenu(!showExportMenu)}
-              disabled={!isComplete}
-              className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium transition-all ${
-                isComplete 
-                  ? 'cursor-pointer hover:opacity-80' 
-                  : 'cursor-not-allowed opacity-40'
-              }`}
-              style={{ 
-                backgroundColor: isComplete ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: isComplete ? 'white' : 'var(--color-text-muted)',
-                // Reserve the same 1px top/bottom border box the bordered
-                // "Filtered:" chip occupies so the header row height is constant
-                // whether or not a filter is active — otherwise selecting a
-                // filter makes that chip (the tallest header element) appear and
-                // shifts the whole Summary box down ~1px. Transparent so the
-                // button's own look is unchanged.
-                border: '1px solid transparent',
-              }}
-              title={isComplete ? 'Export results' : 'Export available when check completes'}
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" strokeLinecap="round" strokeLinejoin="round" />
-                <polyline points="7,10 12,15 17,10" strokeLinecap="round" strokeLinejoin="round" />
-                <line x1="12" y1="15" x2="12" y2="3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span>Export</span>
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            {showExportMenu && (
-              <div
-                className="absolute right-0 top-full mt-1 py-1 rounded-lg border shadow-lg z-50"
-                style={{
-                  backgroundColor: 'var(--color-bg-primary)',
-                  borderColor: 'var(--color-border)',
-                  minWidth: '220px',
-                }}
-              >
-                <div className="px-3 py-1 border-b space-y-2" style={{ borderColor: 'var(--color-border)' }}>
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: 'var(--color-text-muted)' }}>
-                      What to export
-                    </div>
-                    <select
-                      value={exportMode}
-                      onChange={(e) => setExportMode(e.target.value)}
-                      onClick={(e) => e.stopPropagation()}
-                      className="w-full px-2 py-1 rounded text-xs border"
-                      style={{ background: 'var(--color-bg-secondary)', borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }}
-                    >
-                      <option value="original">Original bibliography (as cited)</option>
-                      <option value="corrected">Corrected bibliography (verifier-fixed)</option>
-                      <option value="diff">Side-by-side diff (cited vs corrected)</option>
-                    </select>
-                  </div>
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wide mb-1" style={{ color: 'var(--color-text-muted)' }}>
-                      Sort
-                    </div>
-                    <select
-                      value={sortMode}
-                      onChange={(e) => setSortMode(e.target.value)}
-                      onClick={(e) => e.stopPropagation()}
-                      className="w-full px-2 py-1 rounded text-xs border"
-                      style={{ background: 'var(--color-bg-secondary)', borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }}
-                    >
-                      {REFERENCE_SORT_MODES.map(m => (
-                        <option key={m.id} value={m.id}>{m.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <button
-                  onClick={() => handleExport('markdown')}
-                  className="w-full px-3 py-1.5 text-xs text-left transition-colors cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                  style={{ color: 'var(--color-text-primary)' }}
-                >
-                  📝 Markdown (.md)
-                </button>
-                <button
-                  onClick={() => handleExport('text')}
-                  className="w-full px-3 py-1.5 text-xs text-left transition-colors cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                  style={{ color: 'var(--color-text-primary)' }}
-                >
-                  📄 Plain Text (.txt)
-                </button>
-                <button
-                  onClick={() => handleExport('bibtex')}
-                  className="w-full px-3 py-1.5 text-xs text-left transition-colors cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                  style={{ color: 'var(--color-text-primary)' }}
-                >
-                  📚 BibTeX (.bib)
-                </button>
-                <button
-                  onClick={() => handleExport('ris')}
-                  className="w-full px-3 py-1.5 text-xs text-left transition-colors cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                  style={{ color: 'var(--color-text-primary)' }}
-                  title="Imports directly into Zotero, EndNote, Mendeley, Rayyan, Papers, RefWorks"
-                >
-                  🔖 RIS (.ris) — Zotero / EndNote / Rayyan
-                </button>
-                <button
-                  onClick={() => handleExport('jsonl')}
-                  className="w-full px-3 py-1.5 text-xs text-left transition-colors cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                  style={{ color: 'var(--color-text-primary)' }}
-                >
-                  🧾 JSONL (.jsonl)
-                </button>
-                <button
-                  onClick={() => handleExport('csv')}
-                  className="w-full px-3 py-1.5 text-xs text-left transition-colors cursor-pointer hover:bg-[var(--color-bg-tertiary)]"
-                  style={{ color: 'var(--color-text-primary)' }}
-                >
-                  📊 CSV (.csv)
-                </button>
-              </div>
-            )}
-          </div>
         </div>
       </div>
 

@@ -449,9 +449,19 @@ export default function MainPanel() {
                 // "AJNR Am J Neuroradiol") shows as "Corrections 1" while
                 // the page itself reads "No corrections needed", which
                 // confuses the user.
+                // Count from the same style-aware reference projection used by
+                // the Summary and References list. A style-suppressed issue
+                // must not turn an otherwise website-verified reference into
+                // an excluded error here.
+                const styleFilteredRefs = (displayRefs || []).map(ref => {
+                  const filteredErrors = filterIssuesForStyle(ref.errors, ref, activeStyle)
+                  const filteredWarnings = filterIssuesForStyle(ref.warnings, ref, activeStyle)
+                  if (filteredErrors === ref.errors && filteredWarnings === ref.warnings) return ref
+                  return { ...ref, errors: filteredErrors, warnings: filteredWarnings }
+                })
                 const refsForCount = (statusFilter || []).length
-                  ? applyStatusFilter(displayRefs, statusFilter, isComplete)
-                  : (displayRefs || [])
+                  ? applyStatusFilter(styleFilteredRefs, statusFilter, isComplete)
+                  : styleFilteredRefs
                 const correctionsCount = (refsForCount || []).filter((r, index) => {
                   const filteredErrors = filterIssuesForStyle(r.errors, r, activeStyle)
                   const filteredWarnings = filterIssuesForStyle(r.warnings, r, activeStyle)

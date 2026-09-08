@@ -193,8 +193,8 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
           <h2 className="text-lg font-bold" style={{ color: 'var(--color-text-primary)' }}>{isBatch ? 'Share this batch' : 'Share this document'}</h2>
           <p className="text-sm mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
             {isBatch
-              ? 'Export one report: an overview of every paper, then each paper in detail.'
-              : 'Export a self-contained report, or publish a link anyone can view.'}
+              ? 'Download one report: an overview of every paper, then each paper in detail.'
+              : 'Download a self-contained report, or publish a link anyone can view.'}
           </p>
         </div>
 

@@ -3,19 +3,11 @@ import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import { fetchCitationGraph, expandPaper } from '../../utils/api'
 import { openExternal } from '../../utils/tauriBridge'
 import { referenceRowIdentity } from '../../utils/referenceIdentity'
+import { STATUS_COLOR } from './graphStatusColors'
 
 // Lazy-load the heavy graph lib so the rest of the app stays light when
 // the user never opens the Graph tab.
 const ForceGraph2D = lazy(() => import('react-force-graph-2d'))
-
-const STATUS_COLOR = {
-  verified: '#22c55e',
-  warning: '#f59e0b',
-  error: '#ef4444',
-  unverified: '#94a3b8',
-  suggestion: '#3b82f6',
-  pending: '#64748b',
-}
 
 const GRAPH_LABEL_MAX_WIDTH = 280
 const GRAPH_LABEL_MAX_LINES = 3
@@ -545,6 +537,7 @@ export default function GraphView({ references, paperTitle }) {
         title="Node colours map to verification status. Expanded 2nd-degree refs inherit their status from your Seen References cache when present; otherwise S2's index decides — items with a paperId + DOI/arXiv read as verified, items with only a paperId read as unverified, and only nodes that resolved to neither stay cyan."
       >
         <LegendDot color={STATUS_COLOR.verified} label="verified" />
+        <LegendDot color={STATUS_COLOR.website_verified} label="verified from website" />
         <LegendDot color={STATUS_COLOR.warning} label="warning" />
         <LegendDot color={STATUS_COLOR.error} label="error" />
         <LegendDot color={STATUS_COLOR.unverified} label="unverified" />

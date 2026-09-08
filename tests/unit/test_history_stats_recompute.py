@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 
 from backend.database import (
     Database,
@@ -48,4 +49,43 @@ def test_summary_counts_every_row_when_citation_indexes_are_duplicated():
     assert buckets["processed_refs"] == 2
     assert buckets["refs_verified"] == 1
     assert buckets["unverified_count"] == 1
+
+
+def test_replacing_references_persists_canonical_status_buckets(tmp_path):
+    db_path = tmp_path / "history.db"
+    db = Database(str(db_path))
+    _run(db.init_db())
+    check_id = _run(db.create_pending_check(
+        paper_title="Status bucket regression",
+        paper_source="https://example.org/paper",
+        source_type="url",
+    ))
+
+    results = [
+        {"index": 1, "title": "Verified", "status": "verified"},
+        {
+            "index": 2,
+            "title": "Not found",
+            "status": "unverified",
+            "errors": [{"error_type": "unverified", "error_details": "Not found"}],
+        },
+        {
+            "index": 3,
+            "title": "Suggestion only",
+            "status": "suggestion",
+            "suggestions": [{"error_type": "possible_alternative"}],
+        },
+    ]
+
+    assert _run(db.replace_check_references(check_id, results)) is True
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """SELECT errors_count, unverified_count, refs_with_errors,
+                      refs_with_suggestions_only, refs_verified
+                 FROM check_history WHERE id = ?""",
+            (check_id,),
+        ).fetchone()
+
+    assert row == (0, 1, 0, 1, 2)
 

@@ -114,7 +114,7 @@ async function runCheckWithAuthors(page, emit, sessionId, checkId) {
   };
   await emit(sessionId, { type: 'summary_update', ...counts });
   await emit(sessionId, { type: 'completed', check_id: checkId, ...counts });
-  await expect(page.getByTitle('Export results')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Share results' })).toBeVisible();
 }
 
 async function openCard(page, name) {

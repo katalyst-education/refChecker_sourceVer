@@ -65,9 +65,19 @@ describe('referenceStatus', () => {
   it('filters errors and abstentions explicitly', () => {
     const references = [
       { index: 1, status: 'verified', errors: [], warnings: [] },
+      {
+        index: 4,
+        status: 'verified',
+        verified_via_website: true,
+        matched_database: 'Web page',
+        authoritative_urls: [{ type: 'verified_url', url: 'https://example.org/reference' }],
+        errors: [],
+        warnings: [],
+      },
       { index: 2, status: 'error', errors: [{ error_type: 'title' }], warnings: [] },
       { index: 3, status: 'unverified', errors: [{ error_type: 'unverified' }], warnings: [] },
     ]
+    expect(applyStatusFilter(references, ['verified'], true).map(ref => ref.index)).toEqual([1, 4])
     expect(applyStatusFilter(references, ['error'], true).map(ref => ref.index)).toEqual([2])
     expect(applyStatusFilter(references, ['unverified'], true).map(ref => ref.index)).toEqual([3])
   })

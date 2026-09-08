@@ -840,6 +840,7 @@ export function exportResultsAsMarkdown({ paperTitle, paperSource, stats, refere
       const status = (getEffectiveReferenceStatus(ref, isCheckComplete) || 'unknown').toLowerCase()
       const statusEmoji = {
         verified: '✅',
+        website_verified: '✅',
         warning: '⚠️',
         error: '❌',
         suggestion: '💡',

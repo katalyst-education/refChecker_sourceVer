@@ -1318,7 +1318,7 @@ export default function StatusSection() {
                 onClick={() => setShowShare(true)}
                 className="flex-shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold shadow-sm transition-all hover:brightness-110 active:scale-[0.98]"
                 style={{ background: 'var(--color-accent)', color: '#fff', border: 'none' }}
-                title="Share or export these results — HTML, PDF, Markdown or Word; or a public link"
+                title="Share or download these results — HTML, PDF, Markdown or Word; or a public link"
               >
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" />
