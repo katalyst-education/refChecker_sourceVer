@@ -4380,6 +4380,127 @@ async def locate_preview_spans(
     return {"available": True, "results": results}
 
 
+def _correction_targets_for_check(check: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Per flagged reference that carries a verified ``corrected_reference``, build
+    a locate target whose ``text`` is the ORIGINAL cited line (so it can be found
+    in the PDF) and whose ``corrected`` is the verified should-be line.
+
+    Honesty contract: a target is produced ONLY when a real ``corrected_reference``
+    exists AND it actually differs from the cited line — never a fabricated
+    correction, never a no-op strikeout. Returns [] when nothing should change."""
+    from backend import export as _export
+    refs = _export._as_list(check.get("results")) or _export._as_list(check.get("references"))
+    targets: List[Dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict) or not isinstance(ref.get("corrected_reference"), dict):
+            continue
+        corrected = _export._corrected_str(ref)
+        if not corrected:
+            continue
+        cited = _export._cited_str(ref)
+        if not cited or cited.strip() == corrected.strip():
+            # No baseline to strike, or an identical "correction" — skip (no
+            # fabricated annotation).
+            continue
+        # Locate the cited TITLE in the PDF (the most reliably present anchor),
+        # but carry the full corrected line as the inserted note.
+        anchor = (ref.get("title") or cited).strip()
+        if len(anchor) < 8:
+            anchor = cited
+        targets.append({
+            "text": anchor,
+            "ref_id": ref.get("index") or ref.get("ref_num"),
+            "cited": cited,
+            "corrected": corrected,
+        })
+    return targets
+
+
+def _annotate_pdf_corrections(pdf_path, targets, marker_shifts, cache_dir, check_id):
+    """R19: render the tracked was→should-be changes as REAL PDF annotations.
+
+    For each correction target, locate the cited text via
+    ``locate_text_spans_in_pdf`` (the same locator the highlight path uses),
+    strike it out (``page.add_strikeout_annot``) and attach a text note
+    (``page.add_text_annot``) carrying the verified corrected line. For inline
+    renumber, each ``marker_shifts`` row's OLD marker (e.g. ``[9]``) is located on
+    its page and annotated with its NEW form (e.g. ``[10]``).
+
+    Never fabricates a position: a target/marker that can't be located is simply
+    skipped. Returns the annotated PDF path, or None when nothing was annotated."""
+    try:
+        import fitz
+        from backend.thumbnail import locate_text_spans_in_pdf
+        added = 0
+        doc = fitz.open(pdf_path)
+        try:
+            located = locate_text_spans_in_pdf(pdf_path, targets) if targets else []
+            by_index = {i: t for i, t in enumerate(targets)}
+            for i, r in enumerate(located):
+                if not r.get("found"):
+                    continue
+                t = by_index.get(i, {})
+                corrected = (t.get("corrected") or "").strip()
+                page = doc.load_page(r["page"])
+                pw, ph = float(page.rect.width), float(page.rect.height)
+                note_pt = None
+                for nx0, ny0, nx1, ny1 in r["rects"]:
+                    rect = fitz.Rect(nx0 * pw, ny0 * ph, nx1 * pw, ny1 * ph)
+                    try:
+                        page.add_strikeout_annot(rect)
+                    except Exception:
+                        pass
+                    if note_pt is None:
+                        note_pt = fitz.Point(rect.x1, rect.y0)
+                    added += 1
+                # Attach the corrected line as a sticky text note anchored at the
+                # end of the struck text (the should-be side of the change).
+                if corrected and note_pt is not None:
+                    try:
+                        annot = page.add_text_annot(note_pt, f"Should be: {corrected}")
+                        annot.set_info(title="RefChecker correction")
+                        annot.update()
+                    except Exception:
+                        pass
+            # Inline renumber: annotate each OLD marker with its NEW form.
+            for sm in (marker_shifts or []):
+                if not isinstance(sm, dict):
+                    continue
+                old_m = (sm.get("marker") or "").strip()
+                new_m = (sm.get("new_marker") or "").strip()
+                if not old_m or not new_m or old_m == new_m:
+                    continue
+                for page in doc:
+                    try:
+                        hits = page.search_for(old_m)
+                    except Exception:
+                        hits = []
+                    if not hits:
+                        continue
+                    rect = hits[0]
+                    try:
+                        page.add_strikeout_annot(rect)
+                        annot = page.add_text_annot(
+                            fitz.Point(rect.x1, rect.y0), f"Renumber: {old_m} -> {new_m}")
+                        annot.set_info(title="RefChecker renumber")
+                        annot.update()
+                        added += 1
+                    except Exception:
+                        pass
+                    break  # annotate the first occurrence only (the marker's offset)
+            if not added:
+                return None
+            out_dir = os.path.join(cache_dir or os.path.dirname(pdf_path), "annotated")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{check_id}-corrections.pdf")
+            doc.save(out_path, garbage=3, deflate=True)
+            return out_path
+        finally:
+            doc.close()
+    except Exception as e:
+        logger.warning("PDF correction annotation failed: %s", e)
+        return None
+
 @app.get("/api/preview/{check_id}/corrections-annotated-pdf")
 async def get_corrections_annotated_pdf(
     check_id: int,
@@ -9047,6 +9168,303 @@ async def verify_single_reference(
     return {"reference": updated, "from_cache": False}
 
 
+@app.post("/api/history/{check_id}/references/{ref_id}/suggest-alternative")
+async def suggest_alternative_reference(
+    check_id: int,
+    ref_id: str,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Find real papers that may match an unverified or incorrect citation."""
+    user_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=user_id)
+    if refs is None:
+        raise HTTPException(status_code=404, detail="Check not found")
+    idx = _find_ref_index(refs, ref_id)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+    target = refs[idx]
+    title = (target.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Reference has no title to search on")
+
+    import httpx
+
+    api_key = await _resolve_semantic_scholar_api_key(None)
+    headers = {"x-api-key": api_key} if api_key else {}
+    semantic_scholar_data: Dict[str, Any] = {"data": []}
+    semantic_scholar_rate_limited = False
+    semantic_scholar_error: Optional[str] = None
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for attempt in range(3):
+            try:
+                response = await client.get(
+                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    params={
+                        "query": title,
+                        "limit": 5,
+                        "fields": "paperId,title,authors,year,externalIds,url",
+                    },
+                    headers=headers,
+                )
+                if response.status_code == 429:
+                    semantic_scholar_rate_limited = True
+                    try:
+                        wait_seconds = float(response.headers.get("Retry-After", "1.5"))
+                    except (TypeError, ValueError):
+                        wait_seconds = 1.5
+                    await asyncio.sleep(min(8.0, max(0.5, wait_seconds)) * (2 ** attempt))
+                    continue
+                if response.status_code >= 400:
+                    semantic_scholar_error = (
+                        f"Semantic Scholar search failed with HTTP {response.status_code}"
+                    )
+                    break
+                payload = response.json()
+                semantic_scholar_data = payload if isinstance(payload, dict) else {"data": []}
+                semantic_scholar_error = None
+                break
+            except httpx.HTTPError as error:
+                semantic_scholar_error = str(error)
+                await asyncio.sleep(0.4 * (2 ** attempt))
+    if semantic_scholar_error:
+        logger.debug("Suggest-alternative Semantic Scholar search failed: %s", semantic_scholar_error)
+
+    candidates: List[Dict[str, Any]] = []
+    for paper in (semantic_scholar_data.get("data") or [])[:5]:
+        external_ids = paper.get("externalIds") or {}
+        candidates.append({
+            "title": paper.get("title"),
+            "authors": [
+                author.get("name")
+                for author in (paper.get("authors") or [])
+                if author.get("name")
+            ],
+            "year": paper.get("year"),
+            "doi": external_ids.get("DOI"),
+            "arxiv_id": external_ids.get("ArXiv"),
+            "url": paper.get("url"),
+            "paperId": paper.get("paperId"),
+            "source": "semantic_scholar",
+        })
+
+    # Crossref improves coverage in medicine and the humanities.
+    if len(candidates) < 3:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://api.crossref.org/works",
+                    params={
+                        "query.bibliographic": title,
+                        "rows": 5,
+                        "select": "DOI,title,author,issued,container-title",
+                    },
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    for item in (payload.get("message", {}).get("items") or [])[:5]:
+                        candidate_title = (item.get("title") or [None])[0]
+                        if not candidate_title:
+                            continue
+                        authors = []
+                        for author in (item.get("author") or [])[:8]:
+                            full_name = f"{author.get('given') or ''} {author.get('family') or ''}".strip()
+                            if full_name:
+                                authors.append(full_name)
+                        date_parts = item.get("issued", {}).get("date-parts")
+                        year = date_parts[0][0] if date_parts and date_parts[0] else None
+                        doi = item.get("DOI")
+                        candidates.append({
+                            "title": candidate_title,
+                            "authors": authors,
+                            "year": year,
+                            "doi": doi,
+                            "arxiv_id": None,
+                            "url": f"https://doi.org/{doi}" if doi else None,
+                            "venue": (item.get("container-title") or [None])[0],
+                            "source": "crossref",
+                        })
+        except Exception as error:
+            logger.debug("Crossref suggest-alternative fallback failed: %s", error)
+
+    # OpenAlex provides a broad final metadata fallback.
+    if len(candidates) < 3:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://api.openalex.org/works",
+                    params={
+                        "search": title,
+                        "per-page": 5,
+                        "select": "id,title,doi,publication_year,authorships",
+                    },
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    for work in (payload.get("results") or [])[:5]:
+                        candidate_title = work.get("title")
+                        if not candidate_title:
+                            continue
+                        candidates.append({
+                            "title": candidate_title,
+                            "authors": [
+                                authorship.get("author", {}).get("display_name")
+                                for authorship in (work.get("authorships") or [])
+                                if authorship.get("author", {}).get("display_name")
+                            ],
+                            "year": work.get("publication_year"),
+                            "doi": (work.get("doi") or "").replace("https://doi.org/", "") or None,
+                            "arxiv_id": None,
+                            "url": work.get("id"),
+                            "source": "openalex",
+                        })
+        except Exception as error:
+            logger.debug("OpenAlex suggest-alternative fallback failed: %s", error)
+
+    # Crossref and OpenAlex commonly return the same work.
+    seen_candidate_keys = set()
+    deduplicated_candidates = []
+    for candidate in candidates:
+        candidate_key = (
+            (candidate.get("doi") or "").lower()
+            or (candidate.get("title") or "").strip().lower()[:80]
+        )
+        if not candidate_key or candidate_key in seen_candidate_keys:
+            continue
+        seen_candidate_keys.add(candidate_key)
+        deduplicated_candidates.append(candidate)
+    candidates = deduplicated_candidates[:8]
+
+    # Prefer candidates that cite works also cited by the checked paper.
+    try:
+        other_paper_ids: set[str] = set()
+        for reference in refs:
+            if reference is target:
+                continue
+            for url_entry in (reference.get("authoritative_urls") or []):
+                match = re.search(
+                    r"semanticscholar\.org/paper/([0-9a-f]+)",
+                    url_entry.get("url") or "",
+                    re.IGNORECASE,
+                )
+                if match:
+                    other_paper_ids.add(match.group(1).lower())
+        if other_paper_ids and candidates:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for candidate in candidates:
+                    paper_id = candidate.get("paperId")
+                    if not paper_id:
+                        candidate["overlap"] = 0
+                        continue
+                    try:
+                        response = await client.get(
+                            f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}/references",
+                            params={"fields": "citedPaper.paperId", "limit": 100},
+                            headers=headers,
+                        )
+                        if response.status_code != 200:
+                            candidate["overlap"] = 0
+                            continue
+                        cited_ids = {
+                            (entry.get("citedPaper", {}) or {}).get("paperId", "").lower()
+                            for entry in (response.json().get("data") or [])
+                        }
+                        candidate["overlap"] = len(cited_ids & other_paper_ids)
+                    except Exception:
+                        candidate["overlap"] = 0
+            candidates.sort(key=lambda candidate: candidate.get("overlap", 0), reverse=True)
+            if candidates and candidates[0].get("overlap", 0) > 0:
+                candidates[0]["overlap_winner"] = True
+    except Exception as error:
+        logger.debug("Suggest-alternative overlap pass skipped: %s", error)
+
+    llm_candidates: List[Dict[str, Any]] = []
+    try:
+        default_config = await db.get_default_llm_config(user_id=user_id)
+        if default_config and default_config.get("provider"):
+            from refchecker.llm.base import create_llm_provider
+
+            llm_config = {
+                key: default_config[key]
+                for key in (
+                    "model", "api_key", "endpoint", "reasoning_effort",
+                    "max_tokens", "context_length", "timeout_seconds",
+                )
+                if default_config.get(key) not in (None, "")
+            }
+            provider = create_llm_provider(default_config["provider"], llm_config)
+            if provider and (not hasattr(provider, "is_available") or provider.is_available()):
+                authors = target.get("authors")
+                authors_text = (
+                    ", ".join(str(author) for author in authors[:10])
+                    if isinstance(authors, list)
+                    else str(authors or "")
+                )
+                prompt = (
+                    "You are helping resolve an unverified or incorrect academic citation.\n"
+                    "Given the possibly inaccurate reference below, identify up to 3 REAL papers "
+                    "the author may have meant. Return a strict JSON array with fields: title, "
+                    "authors (array of strings), year (integer), venue, doi (or null), "
+                    "arxiv_id (or null), and reason (one short sentence).\n\n"
+                    f"Title: {title}\nAuthors: {authors_text}\n"
+                    f"Year: {target.get('year') or 'unknown'}\n"
+                    f"Venue: {target.get('venue') or 'unknown'}\n\n"
+                    "Respond with only the JSON array, without prose or Markdown."
+                )
+
+                def run_llm_suggestion():
+                    try:
+                        from refchecker.llm import usage_tracker
+                        usage_tracker.set_current_check(str(check_id))
+                        with usage_tracker.FlowScope("suggest"):
+                            return provider._call_llm(prompt)
+                    except Exception:
+                        return provider._call_llm(prompt)
+
+                try:
+                    raw_response = await asyncio.to_thread(run_llm_suggestion)
+                except Exception as error:
+                    logger.debug("LLM suggest-alternative call failed: %s", error)
+                    raw_response = None
+                if raw_response:
+                    match = re.search(r"\[.*\]", raw_response.strip(), re.DOTALL)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group(0))
+                        except (TypeError, ValueError):
+                            parsed = []
+                        if isinstance(parsed, list):
+                            for item in parsed[:3]:
+                                if not isinstance(item, dict) or not item.get("title"):
+                                    continue
+                                doi = item.get("doi")
+                                arxiv_id = item.get("arxiv_id")
+                                llm_candidates.append({
+                                    "title": item["title"],
+                                    "authors": item.get("authors") or [],
+                                    "year": item.get("year"),
+                                    "venue": item.get("venue"),
+                                    "doi": doi,
+                                    "arxiv_id": arxiv_id,
+                                    "url": (
+                                        f"https://doi.org/{doi}" if doi
+                                        else f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id
+                                        else None
+                                    ),
+                                    "reason": item.get("reason"),
+                                    "source": "llm",
+                                })
+    except Exception as error:
+        logger.debug("LLM suggest-alternative augmentation skipped: %s", error)
+
+    return {
+        "reference_id": ref_id,
+        "cited_title": title,
+        "candidates": llm_candidates + candidates,
+        "rate_limited": semantic_scholar_rate_limited,
+    }
+
+
 class _SimilarPapersRequest(BaseModel):
     references: list  # list of {title, doi?, arxiv_id?, authors?}
     paper_title: Optional[str] = None
@@ -9969,8 +10387,6 @@ async def _find_similar_papers_impl(req: _SimilarPapersRequest, current_user: Us
 class _CitationGraphRequest(BaseModel):
     references: list  # list of {id?, title, doi?, arxiv_id?, authors?}
     paper_title: Optional[str] = None
-    # When true (and the local model is installed) attach a per-reference
-    # ring renders on the bibliography itself, not just expanded nodes.
 
 
 @app.post("/api/papers/citation-graph")
@@ -10050,7 +10466,7 @@ async def citation_graph(req: _CitationGraphRequest, current_user: UserInfo = De
                 "paperId": pid,
                 "citationCount": citation_count,
                 "references": references_list,
-                    "title": ref.get("title") or (paper or {}).get("title") or "",
+                "title": ref.get("title") or (paper or {}).get("title") or "",
             }
 
         # return_exceptions so one ref's failure can't sink the whole graph.

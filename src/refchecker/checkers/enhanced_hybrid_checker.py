@@ -2660,8 +2660,8 @@ class EnhancedHybridReferenceChecker:
         if not cited_authors or not correct_authors:
             return None
 
-            from refchecker.core.issue_policy import compute_author_overlap
-            overlap = compute_author_overlap(cited_authors, correct_authors)
+        from refchecker.core.issue_policy import compute_author_overlap
+        overlap = compute_author_overlap(cited_authors, correct_authors)
 
         # Trigger re-verification when:
         # 1. Catastrophic mismatch (≤10% overlap — wrong paper matched), OR

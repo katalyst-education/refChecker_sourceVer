@@ -54,7 +54,7 @@ if _pkg_src.exists():
 datas += collect_data_files("uvicorn")
 datas += collect_data_files("fastapi")
 # reportlab ships its fonts (Vera.ttf, embedded into generated PDFs) as package
-# data â€” required for the textâ†’PDF conversion the native document viewer uses
+# data — required for the text→PDF conversion the native document viewer uses
 # for non-PDF sources. Without this the conversion fails (graceful: text view).
 datas += collect_data_files("reportlab")
 
@@ -143,5 +143,3 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
-
-

@@ -325,6 +325,8 @@ export const addReferenceToCheck = (checkId, payload) =>
   api.post(`/history/${checkId}/references`, payload)
 export const removeReferenceFromCheck = (checkId, refId) =>
   api.delete(`/history/${checkId}/references/${encodeURIComponent(refId)}`)
+export const suggestAlternativeReference = (checkId, refId) =>
+  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/suggest-alternative`)
 export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
   api.post(
     `/history/${checkId}/references/${encodeURIComponent(refId)}/verify`,

@@ -749,7 +749,7 @@ export const useCheckStore = create((set, get) => ({
           store.setStatusMessage(data.message)
         }
         break
-        
+
       case 'completed':
         store.completeCheck(data.check_id || store.currentCheckId)
         useHistoryStore.getState().updateHistoryProgress(store.currentCheckId, {

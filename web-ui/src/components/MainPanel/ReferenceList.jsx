@@ -4,10 +4,15 @@ import { useCheckStore } from '../../stores/useCheckStore'
 import { getEffectiveReferenceStatus } from '../../utils/referenceStatus'
 import useReferenceActions from '../../hooks/useReferenceActions'
 import { useStyleStore } from '../../stores/useStyleStore'
-import { filterIssuesForStyle } from '../../utils/formatters'
+import {
+  CITATION_STYLES,
+  filterIssuesForStyle,
+  listCustomCitationStyles,
+} from '../../utils/formatters'
 import { referenceRowIdentity } from '../../utils/referenceIdentity'
 import {
   AddReferencePanel,
+  SuggestAltPanel,
   ReferenceRowActions,
 } from './ReferenceActionsBar'
 
@@ -33,8 +38,11 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     setShowAdd,
     newRef,
     setNewRef,
+    suggestFor,
+    setSuggestFor,
     handleAddRef,
     handleRemoveRef,
+    handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
     getReferenceSearchOperation,
@@ -46,6 +54,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     clearRemovedRefs,
     getReverifyAction,
     isReverifying,
+    isSuggesting,
     isRemoving,
   } = useReferenceActions()
 
@@ -215,6 +224,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
               Showing {filteredReferences.length} ({statusFilter.join(', ')})
             </span>
             )}
+            {selectedCheckId && <SuggestionStylePicker />}
             {selectedCheckId && (
                 <button
                     onClick={() => setShowAdd(v => !v)}
@@ -241,6 +251,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                 onCancel={() => setShowAdd(false)}
             />
         )}
+
+        <SuggestAltPanel suggestFor={suggestFor} onClose={() => setSuggestFor(null)} />
 
         <RemovedRefsStrip
             removedRefs={removedRefs}
@@ -269,6 +281,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           reference={ref}
                           displayIndex={displayIndex}
                           selectedCheckId={selectedCheckId}
+                          onSuggest={handleSuggestAlt}
                           onRemove={handleRemoveRef}
                           onReverify={handleReverify}
                           onReverifyAllDatabases={handleReverifyAllDatabases}
@@ -278,6 +291,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           onRestoreExtractedMetadata={handleRestoreExtractedMetadata}
                           reverifyBusy={isReverifying(ident)}
                           reverifyAction={getReverifyAction(ident)}
+                          suggestBusy={isSuggesting(ident)}
                           removeBusy={isRemoving(ident)}
                           globalBusy={!!globalBusy}
                       />
@@ -287,6 +301,39 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
           ))}
         </div>
       </div>
+  )
+}
+
+function SuggestionStylePicker() {
+  const format = useStyleStore(s => s.format)
+  const setFormat = useStyleStore(s => s.setFormat)
+  const customs = listCustomCitationStyles()
+
+  return (
+      <select
+          value={format}
+          onChange={(event) => setFormat(event.target.value, { userSelected: true })}
+          className="text-xs px-2 py-1 rounded border"
+          style={{
+            background: 'var(--color-bg-tertiary)',
+            borderColor: 'var(--color-border)',
+            color: 'var(--color-text-secondary)',
+          }}
+          title="Citation style used to render suggested alternatives"
+      >
+        {CITATION_STYLES.map(style => (
+            <option key={style.id} value={style.id}>{style.label}</option>
+        ))}
+        {customs.length > 0 && (
+            <optgroup label="Custom">
+              {customs.map(style => (
+                  <option key={style.id} value={`custom:${style.id}`}>
+                    {style.label || style.id}
+                  </option>
+              ))}
+            </optgroup>
+        )}
+      </select>
   )
 }
 

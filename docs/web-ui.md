@@ -44,6 +44,10 @@ Each extracted reference is checked through the shared source pipeline. The UI d
 
 Provider credentials can be stored through Settings or supplied as environment variables. Local and hosted modes share the same request schema and core defaults. API keys are optional unless a selected provider requires one.
 
+Settings includes separate model choices for extraction, chat, and summarization.
+
+For a selected history result, unresolved references can use **Suggest alternative reference**. The References header controls the citation style used to render those candidates.
+
 ## API behavior
 
 Long-running checks return progress over WebSockets. Completed records store the canonical reference list, summary counts, configuration, and timing information. Export endpoints consume the same stored results; they do not recompute an alternative verdict model.

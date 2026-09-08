@@ -7,10 +7,15 @@ vi.mock('../utils/api', () => ({
   startReferenceSearch: vi.fn(),
   startReferenceVerification: vi.fn(),
   cancelReferenceSearch: vi.fn(),
+  suggestAlternativeReference: vi.fn(),
 }))
 
 import useReferenceActions from './useReferenceActions'
-import { startReferenceSearch, startReferenceVerification } from '../utils/api'
+import {
+  startReferenceSearch,
+  startReferenceVerification,
+  suggestAlternativeReference,
+} from '../utils/api'
 import { referenceRowIdentity } from '../utils/referenceIdentity'
 import { useCheckStore } from '../stores/useCheckStore'
 import { useHistoryStore } from '../stores/useHistoryStore'
@@ -180,6 +185,54 @@ describe('useReferenceActions re-verification', () => {
       expected_title: 'Bad extracted title',
       manual_edit: true,
     }))
+  })
+})
+
+describe('useReferenceActions alternative suggestions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    useHistoryStore.setState({
+      selectedCheckId: null,
+      selectedCheck: null,
+    })
+  })
+
+  it('tracks duplicate citation indexes by stable row identity', async () => {
+    const duplicateRows = [
+      { ref_uid: 'row-first', index: 26, title: 'First work', status: 'unverified' },
+      { ref_uid: 'row-second', index: 26, title: 'Second work', status: 'unverified' },
+    ]
+    useHistoryStore.setState({
+      selectedCheckId: 17,
+      selectedCheck: { id: 17, status: 'completed', results: duplicateRows },
+    })
+
+    let finishSuggestion
+    suggestAlternativeReference.mockImplementation(() => new Promise(resolve => {
+      finishSuggestion = resolve
+    }))
+
+    const { result } = renderHook(() => useReferenceActions())
+    let request
+    await act(async () => {
+      request = result.current.handleSuggestAlt(duplicateRows[1], 1)
+      await Promise.resolve()
+    })
+
+    expect(suggestAlternativeReference).toHaveBeenCalledWith(17, 'uid:row-second')
+    expect(result.current.isSuggesting('uid:row-first')).toBe(false)
+    expect(result.current.isSuggesting('uid:row-second')).toBe(true)
+
+    await act(async () => {
+      finishSuggestion({ data: { candidates: [] } })
+      await request
+    })
+
+    expect(result.current.isSuggesting('uid:row-second')).toBe(false)
+    expect(result.current.suggestFor).toEqual({
+      ref_id: 'uid:row-second',
+      candidates: [],
+    })
   })
 })
 

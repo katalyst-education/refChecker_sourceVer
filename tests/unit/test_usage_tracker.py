@@ -171,4 +171,3 @@ def test_chat_without_check_id_does_not_pollute_default_bucket():
     assistant = _chat_assistant(resp, None)
     assistant.summarize("text", source="pdf")
     assert usage_tracker.snapshot("default")["calls"] == 0
-

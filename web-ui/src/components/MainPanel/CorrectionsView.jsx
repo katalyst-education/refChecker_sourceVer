@@ -17,6 +17,7 @@ import {
 import { useHistoryStore } from '../../stores/useHistoryStore'
 import { useStyleStore } from '../../stores/useStyleStore'
 import useReferenceActions from '../../hooks/useReferenceActions'
+import { SuggestAltPanel } from './ReferenceActionsBar'
 import { wordDiff } from '../../utils/wordDiff'
 import { useCheckStore } from '../../stores/useCheckStore'
 import {
@@ -213,6 +214,10 @@ export default function CorrectionsView({ references, isCheckComplete = false })
     handleRestoreRef,
     clearRemovedRefs,
     isRemoving,
+    suggestFor,
+    setSuggestFor,
+    handleSuggestAlt,
+    isSuggesting,
   } = useReferenceActions()
 
   const statusFilter = useCheckStore(s => s.statusFilter)
@@ -793,6 +798,11 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         </div>
       )}
 
+      <SuggestAltPanel
+        suggestFor={suggestFor}
+        onClose={() => setSuggestFor(null)}
+      />
+
       {/* Undo strip — appears after the user removes a ref from this
           tab. Mirrors the strip in the References tab so the same
           stash is visible regardless of which view did the remove. */}
@@ -965,19 +975,33 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                   {(() => {
                     const ident = referenceRowIdentity(ref, i)
                     const removing = isRemoving(ident)
-                    const disabled = removing || !!globalBusy || !selectedCheckId
+                    const suggesting = isSuggesting(ident)
+                    const disabled = removing || suggesting || !!globalBusy || !selectedCheckId
                     return (
-                      <button onClick={() => handleRemoveRef(ref, i)} disabled={disabled}
-                        className="px-2 py-0.5 rounded text-xs"
-                        style={{
-                          backgroundColor: 'var(--color-bg-primary)',
-                          color: 'var(--color-error, #ef4444)',
-                          border: '1px solid var(--color-border)',
-                          opacity: disabled ? 0.5 : 1,
-                        }}
-                        type="button"
-                        title="Drop this reference from the check (counters update live)"
-                      >{removing ? '…' : 'Remove'}</button>
+                      <>
+                        <button onClick={() => handleSuggestAlt(ref, i)} disabled={disabled}
+                          className="px-2 py-0.5 rounded text-xs"
+                          style={{
+                            backgroundColor: 'var(--color-bg-primary)',
+                            color: 'var(--color-accent, #3b82f6)',
+                            border: '1px solid var(--color-border)',
+                            opacity: disabled ? 0.5 : 1,
+                          }}
+                          type="button"
+                          title="Search for real papers that may match this citation"
+                        >{suggesting ? '…' : 'Suggest alternative'}</button>
+                        <button onClick={() => handleRemoveRef(ref, i)} disabled={disabled}
+                          className="px-2 py-0.5 rounded text-xs"
+                          style={{
+                            backgroundColor: 'var(--color-bg-primary)',
+                            color: 'var(--color-error, #ef4444)',
+                            border: '1px solid var(--color-border)',
+                            opacity: disabled ? 0.5 : 1,
+                          }}
+                          type="button"
+                          title="Drop this reference from the check (counters update live)"
+                        >{removing ? '…' : 'Remove'}</button>
+                      </>
                     )
                   })()}
                 </div>

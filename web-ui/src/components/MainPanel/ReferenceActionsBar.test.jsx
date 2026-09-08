@@ -27,6 +27,23 @@ const baseProps = {
 }
 
 describe('ReferenceRowActions progress feedback', () => {
+  it('offers an alternative search for an unverified reference', () => {
+    const onSuggest = vi.fn()
+    const reference = { title: 'Questionable citation', status: 'unverified' }
+
+    render(
+      <ReferenceRowActions
+        {...baseProps}
+        reference={reference}
+        displayIndex={0}
+        onSuggest={onSuggest}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest alternative' }))
+    expect(onSuggest).toHaveBeenCalledWith(reference, 0)
+  })
+
   it('opens an authenticated browser and retries with the shared verifier', async () => {
     authApi.begin.mockResolvedValue({ data: { active: true } })
     authApi.complete.mockResolvedValue({ data: { authenticated: true } })

@@ -1,5 +1,11 @@
 import { useState } from 'react'
 import { openExternal } from '../../utils/tauriBridge'
+import { useStyleStore } from '../../stores/useStyleStore'
+import {
+  CITATION_STYLE_DEFAULTS,
+  CITATION_STYLES,
+  exportReferenceAsStyle,
+} from '../../utils/formatters'
 import {
   beginAuthenticatedSourceSession,
   completeAuthenticatedSourceSession,
@@ -264,6 +270,141 @@ export function AddReferencePanel({ newRef, setNewRef, busyKey, onSave, onCancel
   )
 }
 
+
+export function SuggestAltPanel({ suggestFor, onClose }) {
+  const format = useStyleStore(s => s.format)
+  const styleOptions = useStyleStore(s => s.styleOptions)
+  if (!suggestFor) return null
+
+  const styleLabel = CITATION_STYLES.find(s => s.id === format)?.label
+    || (format.startsWith('custom:') ? 'Custom' : format)
+  const effectiveOptions = {
+    ...(CITATION_STYLE_DEFAULTS[format] || {}),
+    ...(styleOptions || {}),
+  }
+  const renderInStyle = (candidate, index) => {
+    try {
+      return exportReferenceAsStyle(candidate, format, index, effectiveOptions)
+    } catch {
+      return candidate.title || ''
+    }
+  }
+  const copyToClipboard = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // Clipboard access may be unavailable outside a secure browser context.
+    }
+  }
+
+  return (
+    <div
+      className="px-4 py-3 border-t text-sm"
+      style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-tertiary)' }}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <strong>Suggested alternatives for ref {suggestFor.ref_id}</strong>
+        <div className="flex items-center gap-2">
+          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+            rendered as {styleLabel}
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs px-2 py-0.5 rounded border"
+            style={{ borderColor: 'var(--color-border)' }}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+      {(!suggestFor.candidates || suggestFor.candidates.length === 0) ? (
+        <div style={{ color: 'var(--color-text-muted)' }}>No alternatives found.</div>
+      ) : (
+        <ul className="space-y-2">
+          {suggestFor.candidates.map((candidate, index) => {
+            const styled = renderInStyle(candidate, index)
+            return (
+              <li
+                key={`${candidate.doi || candidate.arxiv_id || candidate.title || 'candidate'}-${index}`}
+                className="flex flex-col gap-1 rounded-md p-2"
+                style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div
+                    className="flex-1 min-w-0"
+                    style={{
+                      color: 'var(--color-text-primary)',
+                      fontFamily: format === 'bibtex' || format === 'bibitem' ? 'ui-monospace, monospace' : undefined,
+                      fontSize: format === 'bibtex' || format === 'bibitem' ? '0.78rem' : undefined,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {styled}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(styled)}
+                    className="text-xs px-2 py-0.5 rounded flex-shrink-0"
+                    style={{
+                      border: '1px solid var(--color-border)',
+                      background: 'var(--color-bg-primary)',
+                      color: 'var(--color-text-secondary)',
+                    }}
+                    title="Copy this citation"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                  {candidate.source && (
+                    <span
+                      className="px-1.5 py-0.5 rounded"
+                      style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)' }}
+                    >
+                      {candidate.source === 'semantic_scholar' ? 'S2' : candidate.source}
+                    </span>
+                  )}
+                  {typeof candidate.overlap === 'number' && candidate.overlap > 0 && (
+                    <span
+                      className="px-1.5 py-0.5 rounded"
+                      style={{
+                        background: 'rgba(34,197,94,0.12)',
+                        color: 'var(--color-success, #16a34a)',
+                        border: '1px solid rgba(34,197,94,0.35)',
+                      }}
+                      title="Shares references with this paper's bibliography"
+                    >
+                      shares {candidate.overlap} ref{candidate.overlap === 1 ? '' : 's'}
+                      {candidate.overlap_winner ? ' · best match' : ''}
+                    </span>
+                  )}
+                  {candidate.url && (
+                    <a
+                      href={candidate.url}
+                      onClick={event => { event.preventDefault(); openExternal(candidate.url) }}
+                      style={{ color: 'var(--color-accent)' }}
+                    >
+                      {candidate.url.length > 80 ? `${candidate.url.slice(0, 80)}…` : candidate.url}
+                    </a>
+                  )}
+                </div>
+                {candidate.reason && (
+                  <div style={{ color: 'var(--color-text-muted)', fontSize: '0.8em', fontStyle: 'italic' }}>
+                    {candidate.reason}
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+
 function isAuthenticationIssue(issue) {
   if (!issue) return false
   if (
@@ -287,6 +428,7 @@ export function ReferenceRowActions({
                                       reference,
                                       displayIndex,
                                       selectedCheckId,
+                                      onSuggest,
                                       onRemove,
                                       onReverify,
                                       onReverifyAllDatabases,
@@ -299,6 +441,7 @@ export function ReferenceRowActions({
                                       // changes the reference collection.
                                       reverifyBusy = false,
                                       reverifyAction = null,
+                                      suggestBusy = false,
                                       removeBusy = false,
                                       globalBusy = false,
                                     }) {
@@ -510,6 +653,16 @@ export function ReferenceRowActions({
                 {restoringExtracted ? 'Restoring…' : 'Undo metadata edit'}
               </button>
           )}
+          <button
+              type="button"
+              onClick={() => onSuggest?.(reference, displayIndex)}
+              disabled={disableFor(suggestBusy) || !onSuggest}
+              className="px-2.5 py-1 rounded-md font-medium"
+              style={styleFor(suggestBusy)}
+              title="Search for real papers that may match this citation"
+          >
+            {suggestBusy ? '…' : 'Suggest alternative'}
+          </button>
           <button
               type="button"
               onClick={() => onRemove(reference, displayIndex)}

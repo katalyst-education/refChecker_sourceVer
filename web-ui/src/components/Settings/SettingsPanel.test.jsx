@@ -75,7 +75,7 @@ vi.mock('../../stores/useAuthStore', () => ({
 }))
 
 vi.mock('../Sidebar/LLMSelector', () => ({
-  default: () => <div data-testid="llm-selector" />,
+  default: ({ mode }) => <div data-testid={`llm-selector-${mode}`} />,
 }))
 
 vi.mock('../../utils/api', () => ({
@@ -181,6 +181,18 @@ describe('SettingsPanel Semantic Scholar key storage', () => {
 
     expect(await screen.findByText(/You're in single-user mode\./)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save (keep single-user)' })).toBeInTheDocument()
+  })
+
+  it('allows the extraction LLM to be selected independently in the LLM settings', () => {
+    render(<SettingsPanel theme="system" onThemeChange={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'LLM' }))
+
+    expect(screen.getByText('Extraction LLM')).toBeInTheDocument()
+    expect(screen.getByTestId('llm-selector-extraction')).toBeInTheDocument()
+    expect(screen.getByTestId('llm-selector-chat')).toBeInTheDocument()
+    expect(screen.getByTestId('llm-selector-summarize')).toBeInTheDocument()
+    expect(screen.queryByText('Hallucination LLM')).not.toBeInTheDocument()
   })
 
   it('updates the Google Books magazine fallback option', async () => {

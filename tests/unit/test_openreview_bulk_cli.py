@@ -253,4 +253,3 @@ def test_main_openreview_list_only_exits_after_fetch(monkeypatch, tmp_path, caps
     assert exit_code == 0
     assert 'Fetched 2 accepted OpenReview papers for ICLR 2024 into' in captured.out
 
-

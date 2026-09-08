@@ -357,7 +357,7 @@ def _issues_section_html(model: Dict[str, Any]) -> str:
         for detail in row["major"]:
             details += f'<div class="issue warn">! {_e(detail)}</div>'
         if row.get("corrected"):
-            details += (f'<div class="fix"><span class="fix-lbl">was &rarr; should be:</span> '
+            details += (f'<div class="fix"><span class="fix-lbl">was → should be:</span> '
                         f'{_diff_html(row.get("cited"), row["corrected"])}</div>')
         items += f"""
       <li class="ref">
@@ -381,7 +381,7 @@ def _ref_row_html(row: Dict[str, Any]) -> str:
     for detail in row["minor"]:
         issues += f'<div class="issue minor">&middot; {_e(detail)} <span class="tag">minor</span></div>'
     if row.get("corrected"):
-        issues += (f'<div class="fix"><span class="fix-lbl">was &rarr; should be:</span> '
+        issues += (f'<div class="fix"><span class="fix-lbl">was → should be:</span> '
                    f'{_diff_html(row.get("cited"), row["corrected"])}</div>')
     link = (f'<a href="{_e(row["url"])}" target="_blank" rel="noopener">source &nearr;</a>'
             if row.get("url") else "")

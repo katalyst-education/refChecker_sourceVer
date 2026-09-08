@@ -13,7 +13,6 @@ const REPO_URL = 'https://github.com/ArioMoniri/refchecker'
 // Bug reports / feature requests go upstream to Mark Russinovich's repo;
 // release downloads stay on this fork (where the desktop builds are published).
 const ISSUES_URL = 'https://github.com/markrussinovich/refchecker'
-const ACCENT_COLOR = 'var(--color-accent, #3b82f6)'
 
 function formatApiError(detail, fallback) {
   if (typeof detail === 'string' && detail) return detail
@@ -45,7 +44,6 @@ export default function SettingsPanel({ theme, onThemeChange }) {
   const [cacheClearError, setCacheClearError] = useState(null)
   const [authenticatedBrowser, setAuthenticatedBrowser] = useState(null)
   const [authenticatedBrowserBusy, setAuthenticatedBrowserBusy] = useState(false)
-  const accent = ACCENT_COLOR
 
   // Honor deep-links from the onboarding banner (and anywhere else that
   // calls openSettings(section)) by jumping to the requested pane.
@@ -821,6 +819,19 @@ export default function SettingsPanel({ theme, onThemeChange }) {
     setPcIsEditing(false)
     setPcApiKey('')
     setPcError(null)
+  }
+
+  // Accounts & Teams — the single, always-reachable entry point for sign-in
+  // and team management, even in the single-user desktop build. Multi-user mode
+  // (OAuth login + Teams) is enabled server-side via REFCHECKER_MULTIUSER=true
+  // plus OAuth client credentials; the frontend cannot flip that flag, so when
+  // it is off we explain exactly how to turn it on instead of faking a session.
+  const accent = 'var(--color-accent, #3b82f6)'
+
+  const PROVIDER_META = {
+    google: { label: 'Continue with Google', login: loginWithGoogle },
+    github: { label: 'Continue with GitHub', login: loginWithGithub },
+    microsoft: { label: 'Continue with Microsoft', login: loginWithMicrosoft },
   }
 
   const renderAccountsSection = () => {
@@ -1652,6 +1663,27 @@ export default function SettingsPanel({ theme, onThemeChange }) {
 
   const renderLLMSection = () => (
     <div className="space-y-4">
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
+          Configured LLMs
+        </div>
+        <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+          Both selectors use the same configured LLM list. Add, edit, and remove configurations from either selector.
+        </div>
+      </div>
+
+      <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
+          Extraction LLM
+        </div>
+        <div className="text-sm mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+          Used to extract references from PDFs, URLs, and pasted text. Local vLLM and LM Studio are available for extraction in single-user local deployments.
+        </div>
+        <div className="mt-3 max-w-sm">
+          <LLMSelector mode="extraction" />
+        </div>
+      </div>
+
 
       <div className="py-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
         <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>

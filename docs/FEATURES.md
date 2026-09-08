@@ -25,6 +25,7 @@ An unverified reference is not classified beyond the available evidence.
 | Retraction screening | Yes | Yes | Yes | Yes |
 | Structured reports | Yes | Yes | Yes | Yes |
 | Citation corrections and exports | Yes | Yes | Yes | Yes |
+| Suggested alternative references | Yes | Yes | No | Yes |
 | Interactive document views | Yes | Yes | No | No |
 | Citation and library graphs | Yes | Yes | No | API data |
 
@@ -47,6 +48,8 @@ Depending on the reference type and local configuration, RefChecker can query Se
 ## Evidence and enrichment
 
 Resolved references can include normalized identifiers, authoritative URLs, corrected metadata, abstracts, citation counts, open-access links, funding information, and source-by-source diagnostics. Optional enrichments never replace the core verification verdict without recorded evidence.
+
+Unresolved references can request evidence-backed alternative suggestions from scholarly indexes.
 
 ## Reports
 

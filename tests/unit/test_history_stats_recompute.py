@@ -49,4 +49,3 @@ def test_summary_counts_every_row_when_citation_indexes_are_duplicated():
     assert buckets["refs_verified"] == 1
     assert buckets["unverified_count"] == 1
 
-

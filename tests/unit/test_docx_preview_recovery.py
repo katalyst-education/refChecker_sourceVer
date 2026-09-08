@@ -32,8 +32,12 @@ def _client_for(check, monkeypatch, cache_dir: Path):
         cache_dir.mkdir(parents=True, exist_ok=True)
         return str(cache_dir)
 
+    async def _fake_update_thumbnail(*_args, **_kwargs):
+        return True
+
     monkeypatch.setattr(backend_main, "_get_owned_check_or_404", _fake_owned)
     monkeypatch.setattr(backend_main, "_get_configured_cache_dir", _fake_cache_dir)
+    monkeypatch.setattr(backend_main.db, "update_check_thumbnail", _fake_update_thumbnail)
     return TestClient(app)
 
 
