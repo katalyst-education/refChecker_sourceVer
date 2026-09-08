@@ -310,12 +310,7 @@ describe('StatsSection progress count', () => {
   })
 })
 
-// Z3 (BUTTON_DESIGN §1.0/§4.7/§1.3, R33/R52): the "Filter by issue" chips must
-// read as part of the action-control family — the ONE 8px radius (never
-// 9999px / rounded-full), and click-state stability (no scale/shadow/ring that
-// reflows the chip on hover or select). They are toggles, so they expose
-// aria-pressed for assistive tech.
-describe('StatsSection filter chips follow the control design system (Z3)', () => {
+describe('StatsSection issue summary', () => {
   const references = [
     makeRef('error', { errors: [{ error_type: 'author', message: 'author mismatch' }] }),
     makeRef('error', { errors: [{ error_type: 'title', message: 'title mismatch' }] }),
@@ -323,7 +318,7 @@ describe('StatsSection filter chips follow the control design system (Z3)', () =
     makeRef('verified'),
   ]
 
-  it('renders 8px-radius, aria-pressed chips with no scale/shadow hover geometry', () => {
+  it('does not duplicate the reference issue controls in a filter row', () => {
     render(
       <StatsSection
         stats={{ total_refs: 4, processed_refs: 4 }}
@@ -333,19 +328,8 @@ describe('StatsSection filter chips follow the control design system (Z3)', () =
         paperSource="https://example.com/chips"
       />
     )
-    // The toggle filter chips are the buttons carrying aria-pressed.
-    const chips = screen.getAllByRole('button').filter(b => b.hasAttribute('aria-pressed'))
-    expect(chips.length).toBeGreaterThan(0)
-    for (const chip of chips) {
-      // The ONE radius — never the old pill 9999px.
-      expect(chip.style.borderRadius).toBe('var(--control-radius)')
-      expect(chip.className).not.toMatch(/rounded-full/)
-      // No geometry/shadow change on state (R52): only colours transition.
-      expect(chip.className).not.toMatch(/scale-/)
-      expect(chip.className).not.toMatch(/shadow/)
-      // Resting (unselected) toggle state is exposed honestly.
-      expect(chip.getAttribute('aria-pressed')).toBe('false')
-    }
+    expect(screen.queryByText('Filter by issue')).toBeNull()
+    expect(screen.queryAllByRole('button').filter(b => b.hasAttribute('aria-pressed'))).toHaveLength(0)
   })
 })
 
@@ -413,11 +397,8 @@ describe('StatsSection export control stays anchored when a filter is applied', 
   })
 })
 
-// A chip label is a count noun, so it must agree with the number beside it —
-// "1 Suggestion", not "1 Suggestions". Status chips ("Unverified") are
-// adjectives and must NOT gain an "s".
-describe('StatsSection filter chip labels agree with their counts', () => {
-  it('uses singular labels at a count of 1 and plural above it', () => {
+describe('StatsSection issue controls', () => {
+  it('keeps issue filtering available from the reference status buttons', () => {
     const references = [
       makeRef('error', { errors: [{ error_type: 'author', message: 'author mismatch' }] }),
       makeRef('warning', { warnings: [{ message: 'venue differs' }] }),
@@ -434,16 +415,10 @@ describe('StatsSection filter chip labels agree with their counts', () => {
         paperSource="https://example.com/plural"
       />
     )
-    const chipText = screen.getAllByRole('button')
-      .filter(b => b.hasAttribute('aria-pressed'))
-      .map(b => b.textContent)
-
-    expect(chipText).toContain('1Error')
-    expect(chipText).toContain('2Warnings')
-    expect(chipText).toContain('1Suggestion')
-    // Adjectival status chip: never pluralized.
-    expect(chipText).toContain('1Unverified')
-    expect(chipText.join('|')).not.toMatch(/1Suggestions|1Errors|1Unverifieds/)
+    expect(screen.getByTitle('1 reference with an error')).toBeTruthy()
+    expect(screen.getByTitle('2 references with warnings only')).toBeTruthy()
+    expect(screen.getByTitle('1 reference with a suggestion only')).toBeTruthy()
+    expect(screen.getByTitle('1 reference could not be verified')).toBeTruthy()
   })
 })
 
