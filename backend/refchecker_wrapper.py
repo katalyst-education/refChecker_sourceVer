@@ -75,17 +75,6 @@ def download_pdf(url: str, dest_path: str) -> None:
         raise
 
 
-def _process_llm_references_cli_style(references: List[Any]) -> List[Dict[str, Any]]:
-    """Use the CLI's post-processing logic to structure LLM references.
-
-    We intentionally reuse the exact methods from the CLI's ArxivReferenceChecker
-    (without running its heavy __init__) to avoid diverging behavior between
-    CLI and Web extraction.
-    """
-    cli_checker = _make_cli_checker(None)
-    return cli_checker._process_llm_extracted_references(references)
-
-
 def _make_cli_checker(llm_provider, extraction_mode='cascade'):
     """Create a lightweight ArxivReferenceChecker instance for parsing only.
 
