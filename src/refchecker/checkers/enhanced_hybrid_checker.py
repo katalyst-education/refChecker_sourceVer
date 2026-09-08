@@ -2119,6 +2119,36 @@ class EnhancedHybridReferenceChecker:
         successful_evidence = list(seed_evidence or [])
         doi_first = self._should_try_doi_apis_first(reference)
 
+        def is_exact_doi_match(
+            verified_data: Optional[Dict[str, Any]],
+            errors: List[Dict[str, Any]],
+        ) -> bool:
+            """Return whether one provider independently confirmed the cited DOI."""
+            cited_doi = self._candidate_identifiers(reference).get('doi')
+            candidate_doi = self._candidate_identifiers(verified_data).get('doi')
+            return bool(
+                cited_doi
+                and cited_doi == candidate_doi
+                and not self._has_doi_mismatch(errors)
+            )
+
+        def is_decisive_title_author_match(
+            verified_data: Optional[Dict[str, Any]],
+        ) -> bool:
+            """Return whether title and author metadata meet the acceptance threshold."""
+            identity = self._assess_candidate_identity(reference, verified_data)
+            return bool(
+                identity.get('status') == 'same_work'
+                and identity.get('title_similarity') is not None
+                and identity['title_similarity'] >= 0.8
+                and identity.get('author_overlap') is True
+                and not identity.get('conflicting_identifiers')
+            )
+
+        # An exact DOI is decisive on its own. For references without that
+        # identifier, wait for two independent title-and-author matches.
+        decisive_title_author_results: Dict[str, Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]] = {}
+
         # A cited DOI is more authoritative than a title match.  Ask CrossRef
         # for that DOI before Semantic Scholar can select the same work's
         # arXiv record and report the publisher DOI as a mismatch.
@@ -2131,11 +2161,11 @@ class EnhancedHybridReferenceChecker:
                 result = (verified_data, errors, url)
                 successful_evidence.append(self._database_evidence('crossref', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
-                if (
-                    not force_all_databases
-                    and self._is_data_complete(verified_data, reference)
-                    and not self._has_doi_mismatch(errors)
-                ):
+                if not force_all_databases and is_exact_doi_match(verified_data, errors):
+                    logger.info(
+                        "[DATABASE_TRACE] stage=early_doi_match title=%r source=crossref",
+                        reference.get('title'),
+                    )
                     return result, {}
                 last_crossref_result = result
                 if self._has_doi_mismatch(errors):
@@ -2209,40 +2239,58 @@ class EnhancedHybridReferenceChecker:
                 len(fallback_apis),
             )
             futures = {}
-            with ThreadPoolExecutor(max_workers=len(fallback_apis), thread_name_prefix="HybridAPI") as pool:
+            pool = ThreadPoolExecutor(max_workers=len(fallback_apis), thread_name_prefix="HybridAPI")
+            try:
                 for api_name, api_instance in fallback_apis:
                     self._append_attempted_api(attempted_apis, api_name)
-                    futures[api_name] = pool.submit(
+                    futures[pool.submit(
                         self._try_api, api_name, api_instance, reference)
+                    ] = api_name
 
-            priority = [
-                'semantic_scholar', 'crossref', 'openalex', 'dnb', 'tib', 'zdb',
-                'open_library', 'econbiz',
-                'dblp', 'acl_anthology', 'paperclip',
-            ]
-            for api_name in priority:
-                if api_name not in futures:
-                    continue
-                verified_data, errors, url, success, failure_type, failure_detail = futures[api_name].result()
-                if not success and failure_type not in ('none', 'not_found'):
-                    api_inst = dict(fallback_apis)[api_name]
-                    failed_apis.append({
-                        'name': api_name,
-                        'instance': api_inst,
-                        'failure_type': failure_type,
-                        'failure_detail': failure_detail,
-                        'active': True,
-                    })
-                if success:
-                    result = (verified_data, errors, url)
-                    successful_evidence.append(self._database_evidence(api_name, result))
-                    best_result = self._pick_preferred_result(best_result, result, reference)
-                    if api_name == 'crossref':
-                        last_crossref_result = result
-                    elif api_name == 'openalex':
-                        last_openalex_result = result
-                    if doi_first and self._has_doi_mismatch(errors):
-                        last_doi_mismatch_result = last_doi_mismatch_result or result
+                for future in as_completed(futures):
+                    api_name = futures[future]
+                    verified_data, errors, url, success, failure_type, failure_detail = future.result()
+                    if not success and failure_type not in ('none', 'not_found'):
+                        api_inst = dict(fallback_apis)[api_name]
+                        failed_apis.append({
+                            'name': api_name,
+                            'instance': api_inst,
+                            'failure_type': failure_type,
+                            'failure_detail': failure_detail,
+                            'active': True,
+                        })
+                    if success:
+                        result = (verified_data, errors, url)
+                        successful_evidence.append(self._database_evidence(api_name, result))
+                        best_result = self._pick_preferred_result(best_result, result, reference)
+                        if not force_all_databases and is_exact_doi_match(verified_data, errors):
+                            logger.info(
+                                "[DATABASE_TRACE] stage=early_doi_match title=%r source=%s",
+                                reference.get('title'), api_name,
+                            )
+                            return result, {}
+                        if is_decisive_title_author_match(verified_data):
+                            decisive_title_author_results.setdefault(
+                                self._independent_source_group(api_name), result,
+                            )
+                            if not force_all_databases and len(decisive_title_author_results) >= 2:
+                                logger.info(
+                                    "[DATABASE_TRACE] stage=early_identity_consensus title=%r sources=%s",
+                                    reference.get('title'), sorted(decisive_title_author_results),
+                                )
+                                return best_result, {}
+                        if api_name == 'crossref':
+                            last_crossref_result = result
+                        elif api_name == 'openalex':
+                            last_openalex_result = result
+                        if doi_first and self._has_doi_mismatch(errors):
+                            last_doi_mismatch_result = last_doi_mismatch_result or result
+            finally:
+                # Do not turn a fast two-source DOI consensus into a wait for
+                # every optional provider. Running calls cannot be interrupted
+                # safely, but queued calls are cancelled and this verifier can
+                # return immediately.
+                pool.shutdown(wait=False, cancel_futures=True)
 
         # All catalogues above have already run concurrently. Reconcile their
         # responses before returning so a fast but incomplete authority record

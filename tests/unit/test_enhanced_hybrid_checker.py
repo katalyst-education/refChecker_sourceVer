@@ -54,6 +54,71 @@ def test_database_progress_emits_timeout():
     assert [event['status'] for event in events] == ['searching', 'timed_out']
 
 
+def test_one_exact_doi_match_returns_without_waiting_for_slow_catalogue():
+    """A supplementary catalogue must not delay an exact DOI confirmation."""
+    class DoiMatchChecker:
+        def __init__(self, label):
+            self.database_label = label
+
+        def verify_reference(self, reference):
+            return ({
+                'title': reference['title'],
+                'authors': reference['authors'],
+                'year': reference['year'],
+                'doi': reference['doi'],
+            }, [], f"https://example.org/{self.database_label}")
+
+    checker = _catalogue_reconciliation_checker()
+    checker.crossref = DoiMatchChecker('CrossRef')
+    reference = {
+        'title': 'A decisively identified work',
+        'authors': ['Ada Author'],
+        'year': 2024,
+        'doi': '10.1000/example',
+    }
+
+    result, incomplete_results = checker._verify_non_arxiv_parallel(
+        reference, [], [], force_all_databases=False,
+    )
+    data, findings, _ = result
+
+    assert data['doi'] == '10.1000/example'
+    assert findings == []
+    assert incomplete_results == {}
+
+
+def test_two_title_author_matches_are_decisive_without_a_doi():
+    checker = _catalogue_reconciliation_checker()
+    reference = {
+        'title': 'A High Confidence Title And Author Match',
+        'authors': ['Ada Author'],
+        'year': 2024,
+    }
+
+    class TitleAuthorMatch:
+        def __init__(self, label):
+            self.database_label = label
+
+        def verify_reference(self, candidate):
+            return ({
+                'title': candidate['title'],
+                'authors': candidate['authors'],
+                'year': candidate['year'],
+            }, [], f"https://example.org/{self.database_label}")
+
+    checker.semantic_scholar = TitleAuthorMatch('Semantic Scholar')
+    checker.crossref = TitleAuthorMatch('CrossRef')
+
+    result, incomplete_results = checker._verify_non_arxiv_parallel(
+        reference, [], [], force_all_databases=False,
+    )
+    data, findings, _ = result
+
+    assert data['title'] == reference['title']
+    assert findings == []
+    assert incomplete_results == {}
+
+
 def test_database_candidate_summary_includes_display_metadata_and_result_url():
     summary = EnhancedHybridReferenceChecker._database_trace_summary(
         {
