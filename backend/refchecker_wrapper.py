@@ -118,26 +118,43 @@ def _process_llm_references_cli_style(references: List[Any]) -> List[Dict[str, A
     """
     cli_checker = _make_cli_checker(None)
     return cli_checker._process_llm_extracted_references(references)
-
-
+    
 def _make_cli_checker(llm_provider, extraction_mode='cascade'):
     """Create a lightweight ArxivReferenceChecker instance for parsing only.
 
     We bypass __init__ to avoid heavy setup and set just the fields needed for
     bibliography finding and reference parsing so that logic/order matches CLI.
     """
-    cli_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
-    cli_checker.llm_extractor = ReferenceExtractor(llm_provider) if llm_provider else None
+    cli_checker = ArxivReferenceChecker.__new__(
+        ArxivReferenceChecker
+    )
+
+    cli_checker.llm_extractor = (
+        ReferenceExtractor(llm_provider)
+        if llm_provider
+        else None
+    )
+
     cli_checker.llm_enabled = bool(llm_provider)
     cli_checker.debug_mode = False
     cli_checker.used_regex_extraction = False
     cli_checker.used_unreliable_extraction = False
     cli_checker.fatal_error = False
     cli_checker.fatal_error_message = None
-    from refchecker.utils.extraction_policy import normalize_extraction_mode
-    cli_checker.extraction_mode = normalize_extraction_mode(extraction_mode)
+
+    from refchecker.utils.extraction_policy import (
+        normalize_extraction_mode,
+    )
+
+    cli_checker.extraction_mode = (
+        normalize_extraction_mode(extraction_mode)
+    )
+
     cli_checker.last_reference_parser_method = None
     cli_checker.last_bibliography_extraction_method = None
+
+    cli_checker.pdf_processor = PDFProcessor()
+
     return cli_checker
 
 
@@ -1205,6 +1222,7 @@ class ProgressRefChecker:
         self.cache_dir = cache_dir or str(get_data_dir() / "cache")
         Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
 
+        self.pdf_processor = PDFProcessor()
         # AI-generated-text detection (opt-in). The body text of the
         # submitted manuscript is analyzed AFTER reference checking — see
         # `_run_ai_detection`. Off by default; never blocks the check.
@@ -2036,13 +2054,37 @@ class ProgressRefChecker:
 
             def set_extraction_method(method: Optional[str]) -> None:
                 nonlocal extraction_method, bibliography_source_kind
+
                 extraction_method = method
+
                 if not method:
                     return
+
                 normalized = method.lower()
-                if normalized == 'cache':
+
+                if normalized == "cache":
                     return
-                bibliography_source_kind = 'pdf' if normalized in {'file', 'pdf', 'grobid'} else normalized
+
+                # regex / llm describe HOW the bibliography was parsed,
+                # not WHERE the bibliography came from.
+                #
+                # If we already know the original source, preserve it.
+                if (
+                    normalized in {"regex", "llm"}
+                    and bibliography_source_kind is not None
+                ):
+                    return
+
+                if normalized in {
+                    "file",
+                    "pdf",
+                    "grobid",
+                    "pdf_pipeline",
+                    "pdf_legacy",
+                }:
+                    bibliography_source_kind = "pdf"
+                else:
+                    bibliography_source_kind = normalized
 
             bibliography_cache_identity = self._bibliography_cache_identity()
 
@@ -2070,8 +2112,7 @@ class ProgressRefChecker:
                 cached_pdf_path = get_cached_artifact_path(self.cache_dir, pdf_url, 'paper.pdf')
                 if cached_pdf_path and os.path.exists(cached_pdf_path) and os.path.getsize(cached_pdf_path) > 0:
                     try:
-                        pdf_processor = PDFProcessor()
-                        extracted_title = await asyncio.to_thread(pdf_processor.extract_title_from_pdf, cached_pdf_path)
+                        extracted_title = await asyncio.to_thread(self.pdf_processor.extract_title_from_pdf, cached_pdf_path)
                         if extracted_title:
                             paper_title = extracted_title
                             await update_title_if_needed(paper_title)
@@ -2143,14 +2184,13 @@ class ProgressRefChecker:
 
                         pdf_path_for_fallback = pdf_path
                         set_extraction_method('pdf')
-                        pdf_processor = PDFProcessor()
                         paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
 
                         # Try to extract the paper title from the PDF content
                         # (only if we don't already have a title from the API)
                         if paper_title == "Unknown Paper":
                             try:
-                                extracted_title = await asyncio.to_thread(pdf_processor.extract_title_from_pdf, pdf_path)
+                                extracted_title = await asyncio.to_thread(self.pdf_processor.extract_title_from_pdf, pdf_path)
                                 if extracted_title:
                                     paper_title = extracted_title
                                     await update_title_if_needed(paper_title)
@@ -2461,13 +2501,12 @@ class ProgressRefChecker:
 
                 # Handle uploaded file - run PDF processing in thread
                 if paper_source.lower().endswith('.pdf'):
-                    pdf_processor = PDFProcessor()
                     pdf_path_for_fallback = paper_source
                     paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, paper_source)
                     
                     # Try to extract the paper title from the PDF
                     try:
-                        extracted_title = await asyncio.to_thread(pdf_processor.extract_title_from_pdf, paper_source)
+                        extracted_title = await asyncio.to_thread(self.pdf_processor.extract_title_from_pdf, paper_source)
                         if extracted_title:
                             paper_title = extracted_title
                             await update_title_if_needed(paper_title)
@@ -3413,7 +3452,88 @@ class ProgressRefChecker:
                 "details": type(e).__name__
             })
             raise
+    async def _parse_bibliography_text(
+        self,
+        bibliography_text: str,
+        cli_checker=None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Parse bibliography text that has already been isolated.
 
+        This deliberately skips find_bibliography_section().
+
+        cli_checker.parse_references() still provides the existing:
+            deterministic parser
+            -> validation
+            -> targeted LLM repair
+            -> full LLM fallback
+        """
+        if not bibliography_text or not bibliography_text.strip():
+            return []
+
+        if cli_checker is None:
+            cli_checker = _make_cli_checker(
+                self.llm,
+                self.extraction_mode,
+            )
+
+        loop = asyncio.get_running_loop()
+
+        def _chunk_progress(
+            completed: int,
+            total: int,
+            ):
+            if total > 1:
+                asyncio.run_coroutine_threadsafe(
+                    self.emit_progress(
+                        "extracting",
+                        {
+                            "message": (
+                                "Extracting references via LLM "
+                                f"(chunk {completed}/{total})..."
+                            )
+                        },
+                    ),
+                    loop,
+                )
+
+        from refchecker.llm import (
+            usage_tracker as _usage_tracker,
+        )
+
+        check_id = self.check_id
+
+        def _parse():
+            if check_id is not None:
+                _usage_tracker.set_current_check(
+                    str(check_id)
+                )
+
+            with _usage_tracker.FlowScope("extract"):
+                return cli_checker.parse_references(
+                    bibliography_text,
+                    progress_callback=_chunk_progress,
+                )
+
+        refs = await asyncio.to_thread(_parse)
+
+        self._last_reference_parser_method = (
+            cli_checker.last_reference_parser_method
+        )
+
+        if cli_checker.fatal_error:
+            logger.warning(
+                "Reference parser reported a fatal error"
+            )
+            return []
+
+        if not refs:
+            return []
+
+        return [
+            _normalize_reference_fields(ref)
+            for ref in refs
+        ]
     async def _extract_references_from_pdf(
         self,
         pdf_path: str,
@@ -3421,37 +3541,162 @@ class ProgressRefChecker:
         *,
         failure_message: Optional[str] = None,
     ) -> tuple[List[Dict[str, Any]], Optional[str]]:
-        """Run the shared, validated PDF cascade.
-
-        A non-empty GROBID response is only a candidate: it must pass strict
-        per-reference validation and, for numbered bibliographies, match the
-        count visible in the extracted text.  Weak candidates continue through
-        the same deterministic/LLM parser used by CLI and bulk.  If no better
-        parser is available, the GROBID candidate remains a best-effort fallback.
-
-        Both the initial WebUI check and per-reference document re-extraction
-        call this method so they cannot silently choose different PDF parsers.
         """
-        if self.extraction_mode == 'llm-only':
-            references = await self._extract_references(paper_text)
-            return references, self._last_reference_parser_method or 'llm'
+        Extract structured references from a PDF.
 
-        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
-        bibliography_text = await asyncio.to_thread(
-            cli_checker.find_bibliography_section, paper_text
+        Responsibilities:
+
+        pdf_pipeline:
+            PDF -> body text / bibliography text
+
+        RefChecker:
+            bibliography text -> structured references
+
+        GROBID:
+            independent structured-reference candidate
+        """
+
+        # Create lightweight CLI checker.
+        # This gives us the existing RefChecker bibliography parser,
+        # quality validation and LLM fallback logic.
+
+        cli_checker = _make_cli_checker(
+            self.llm,
+            self.extraction_mode,
         )
+
+        document = None
+        bibliography_text = ""
+        full_text = ""
+
+        # 1. Extract the PDF using our new pdf_pipeline
+
+        try:
+            document = await asyncio.to_thread(
+                self.pdf_processor.extract_document,
+                pdf_path,
+            )
+
+            bibliography_text = (
+                document.bibliography or ""
+            )
+
+            full_text = (
+                document.full_text
+                or paper_text
+                or ""
+            )
+
+            logger.info(
+                "PDF pipeline reference input: "
+                "extractor=%s, body=%d chars, "
+                "bibliography=%d chars",
+                document.extractor,
+                len(document.body_text or ""),
+                len(bibliography_text),
+            )
+
+        except Exception as exc:
+            # The custom pipeline failing should not immediately
+            # kill reference extraction.
+            logger.warning(
+                "pdf_pipeline failed while preparing "
+                "bibliography text: %s",
+                exc,
+            )
+
+            # paper_text may come from the legacy text extractor.
+            full_text = paper_text or ""
+
+        # 2. If pdf_pipeline did not identify a bibliography,
+        #    try RefChecker's existing bibliography finder.
+
+        if not bibliography_text and full_text:
+            logger.warning(
+                "pdf_pipeline produced no bibliography; "
+                "trying RefChecker's legacy bibliography finder"
+            )
+
+            bibliography_text = await asyncio.to_thread(
+                cli_checker.find_bibliography_section,
+                full_text,
+            )
+
+            bibliography_text = (
+                bibliography_text or ""
+            )
+
+        # 3. LLM-only mode
+        # llm-only controls bibliography -> references.
+        # It does NOT mean the LLM should extract the PDF text.
+
+        if self.extraction_mode == "llm-only":
+
+            if bibliography_text:
+                references = await self._parse_bibliography_text(
+                    bibliography_text,
+                    cli_checker,
+                )
+
+            else:
+                # Preserve existing full-text LLM fallback when no
+                # bibliography could be isolated.
+                references = await self._extract_references(
+                    full_text
+                )
+
+            return (
+                references,
+                self._last_reference_parser_method or "llm",
+            )
+
+        # 4. Build deterministic candidate from clean bibliography
+        # This is used mainly to:
+        #   - estimate expected reference count
+        #   - compare against GROBID
+        #   - ground fields from numbered references
+
         from refchecker.utils.extraction_quality import (
             merge_grounded_reference_candidates,
             strict_numbered_text_candidate,
         )
-        deterministic_candidate, expected_count = await asyncio.to_thread(
-            strict_numbered_text_candidate,
-            cli_checker,
-            bibliography_text,
-        )
 
+        deterministic_candidate = None
+        expected_count = None
+
+        if bibliography_text:
+
+            # strict_numbered_text_candidate() uses methods on the
+            # ArxivReferenceChecker and can change fatal_error state.
+            # This is only a quality/comparison probe. It must NOT poison
+            # the real parse_references() call that happens later.
+            fatal_state = (
+                cli_checker.fatal_error,
+                cli_checker.fatal_error_message,
+            )
+
+            try:
+                (
+                    deterministic_candidate,
+                    expected_count,
+                ) = await asyncio.to_thread(
+                    strict_numbered_text_candidate,
+                    cli_checker,
+                    bibliography_text,
+                )
+
+            finally:
+                # Restore the checker to exactly the state it had before
+                # the deterministic probe.
+                (
+                    cli_checker.fatal_error,
+                    cli_checker.fatal_error_message,
+                ) = fatal_state
+
+        # 5. Try GROBID structured-reference extraction
         grobid_candidate = None
         grobid_error = None
+
         try:
             grobid_candidate, _ = await asyncio.to_thread(
                 extract_pdf_references_with_grobid_fallback,
@@ -3461,13 +3706,20 @@ class ProgressRefChecker:
                 failure_message=failure_message,
                 return_weak_candidate=True,
             )
+
         except ValueError as exc:
-            # A deterministic text parse can still succeed when GROBID is not
-            # installed, so defer this error until all cheap options are tried.
+            # GROBID being unavailable should not immediately fail the
+            # whole extraction. The bibliography parser may still work.
             grobid_error = exc
 
+        # ----------------------------------------------------------
+        # 6. Validate GROBID result
+        # ----------------------------------------------------------
+
         if grobid_candidate:
-            from refchecker.utils.text_utils import validate_parsed_references
+            from refchecker.utils.text_utils import (
+                validate_parsed_references,
+            )
 
             validation = await asyncio.to_thread(
                 validate_parsed_references,
@@ -3475,62 +3727,150 @@ class ProgressRefChecker:
                 require_all=True,
                 expected_count=expected_count,
             )
-            if validation['is_valid']:
+
+            if validation["is_valid"]:
+
                 normalized_grobid = [
-                    _normalize_reference_fields(ref) for ref in grobid_candidate
+                    _normalize_reference_fields(ref)
+                    for ref in grobid_candidate
                 ]
+
+                # If our text parser produced a trustworthy numbered
+                # candidate, merge its grounded fields into GROBID.
                 if deterministic_candidate:
-                    normalized_grobid = merge_grounded_reference_candidates(
-                        normalized_grobid,
-                        [
-                            _normalize_reference_fields(ref)
-                            for ref in deterministic_candidate
-                        ],
+                    normalized_grobid = (
+                        merge_grounded_reference_candidates(
+                            normalized_grobid,
+                            [
+                                _normalize_reference_fields(ref)
+                                for ref in deterministic_candidate
+                            ],
+                        )
                     )
+
                 return (
                     normalized_grobid,
-                    'grobid',
+                    "grobid",
                 )
+
             logger.info(
-                "GROBID candidate rejected by PDF cascade (quality %.2f, "
-                "parsed=%d, expected=%s, bad=%d)",
-                validation['quality_score'],
+                "GROBID candidate rejected by PDF cascade "
+                "(quality %.2f, parsed=%d, expected=%s, bad=%d)",
+                validation["quality_score"],
                 len(grobid_candidate),
                 expected_count,
-                len(validation['invalid_indices']),
+                len(validation["invalid_indices"]),
             )
 
-        parsed_references = await self._extract_references(paper_text)
+        # 7. Parse the bibliography using RefChecker's existing
+        #    deterministic parser + validation + LLM fallback.
+
+        if bibliography_text:
+
+            parsed_references = (
+                await self._parse_bibliography_text(
+                    bibliography_text,
+                    cli_checker,
+                )
+            )
+
+        else:
+
+            # No bibliography could be isolated.
+            #
+            # _extract_references() preserves RefChecker's existing
+            # behaviour, including the full-text LLM fallback.
+            parsed_references = (
+                await self._extract_references(
+                    full_text
+                )
+            )
+
         if parsed_references:
-            return parsed_references, self._last_reference_parser_method or 'pdf'
-
-        if grobid_candidate:
-            logger.warning("Using weak GROBID candidate because no parser produced a replacement")
             return (
-                [_normalize_reference_fields(ref) for ref in grobid_candidate],
-                'grobid',
+                parsed_references,
+                self._last_reference_parser_method
+                or "pdf",
             )
+
+        # 8. Weak GROBID candidate as final fallback
+        if grobid_candidate:
+            logger.warning(
+                "Using GROBID candidate because "
+                "no parser produced a replacement"
+            )
+
+            return (
+                [
+                    _normalize_reference_fields(ref)
+                    for ref in grobid_candidate
+                ],
+                "grobid",
+            )
+
+        # If GROBID itself produced an important configuration/error
+        # condition, surface it now that every other parser has failed.
         if grobid_error is not None:
             raise grobid_error
-        return [], self._last_reference_parser_method
+
+        # Nothing succeeded.
+        return (
+            [],
+            self._last_reference_parser_method,
+        )
 
     def _extract_pdf_text_scoped(self, pdf_path: str) -> str:
-        """Run the CLI PDF-text extractor with check_id + FlowScope bound.
+        """
+        Extract clean manuscript body text using the shared PDFProcessor.
 
-        PDF text extraction can invoke the LLM as a fallback (when pdftotext /
-        Grobid / native parsing returns garbage). Those LLM calls happen on
-        the asyncio.to_thread worker thread, where the tracker's
-        threading.local check_id is unset — without this binding the tokens
-        land in the "default" / "other" buckets and the $ badge under-counts.
+        The clean body is used for citation-context extraction and AI-text
+        detection. If the new pipeline fails, fall back to the existing
+        CLI/legacy PDF extraction path.
         """
         try:
             from refchecker.llm import usage_tracker as _ut
+
             if self.check_id is not None:
                 _ut.set_current_check(str(self.check_id))
+
             with _ut.FlowScope("extract"):
-                return _extract_pdf_text_cli_style(pdf_path, self.llm)
-        except Exception:
-            return _extract_pdf_text_cli_style(pdf_path, self.llm)
+                document = self.pdf_processor.extract_document(
+                    pdf_path
+                )
+
+            body_text = (
+                document.body_text
+                or document.full_text
+                or ""
+            )
+
+            if body_text.strip():
+                logger.info(
+                    "pdf_pipeline extracted PDF body: "
+                    "extractor=%s, body=%d chars, bibliography=%d chars",
+                    document.extractor,
+                    len(document.body_text or ""),
+                    len(document.bibliography or ""),
+                )
+                return body_text
+
+            logger.warning(
+                "pdf_pipeline returned no usable body text; "
+                "falling back to legacy CLI PDF extraction"
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "pdf_pipeline failed during body extraction: %s; "
+                "falling back to legacy CLI PDF extraction",
+                exc,
+            )
+
+        # Temporary compatibility fallback.
+        return _extract_pdf_text_cli_style(
+            pdf_path,
+            self.llm,
+        )
 
     async def _extract_references_from_bibtex(self, bibtex_content: str) -> tuple:
         """Extract references from BibTeX/BBL content (from ArXiv source files).

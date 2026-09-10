@@ -632,7 +632,34 @@ class ArxivReferenceChecker:
             if getattr(paper, 'is_latex', False):
                 return self.extract_text_from_latex(paper.file_path) or ''
             pdf_content = self.download_pdf(paper)
-            return self.extract_text_from_pdf(pdf_content) if pdf_content else ''
+
+            if not pdf_content:
+                return ""
+
+            try:
+                document = self.pdf_processor.extract_document(
+                    pdf_content
+                )
+
+                return (
+                    document.body_text
+                    or document.full_text
+                    or ""
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "pdf_pipeline failed for AI-text extraction: %s; "
+                    "using legacy PDF extractor",
+                    exc,
+                )
+
+                return (
+                    self._extract_text_from_pdf_legacy(
+                        pdf_content
+                    )
+                    or ""
+                )
         except Exception as exc:
             logger.warning("Could not extract manuscript text for AI detection: %s", exc)
             return ''
@@ -1421,7 +1448,7 @@ class ArxivReferenceChecker:
             logger.error(f"Failed to read LaTeX file {latex_file_path}: {e}")
             return None
 
-    def extract_text_from_pdf(self, pdf_content):
+    def _extract_text_from_pdf_legacy(self, pdf_content):
         """
         Extract text from a PDF content (BytesIO object)
         """
@@ -1526,7 +1553,60 @@ class ArxivReferenceChecker:
                 logger.error(f"Error extracting text with pdftotext: {str(e3)}")
             
             return None
+    def extract_document_from_pdf(self, pdf_source):
+        """
+        Preferred PDF extraction path.
 
+        pdf_source may be:
+            - filesystem path
+            - Path
+            - bytes
+            - bytearray
+            - BytesIO
+            - binary file-like object
+        """
+        return self.pdf_processor.extract_document(
+            pdf_source
+        )
+    def extract_text_from_pdf(self, pdf_content):
+        """
+        Backwards-compatible text-only PDF API.
+
+        Prefer the clean pdf_pipeline. If the pipeline itself fails,
+        retain the old extraction cascade as a fallback.
+        """
+        if not pdf_content:
+            return None
+
+        try:
+            document = self.pdf_processor.extract_document(
+                pdf_content
+            )
+
+            text = (
+                document.full_text
+                or document.body_text
+                or ""
+            )
+
+            if text.strip():
+                return text
+
+            logger.warning(
+                "pdf_pipeline returned no usable text; "
+                "trying legacy PDF extraction"
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "pdf_pipeline failed (%s); "
+                "trying legacy PDF extraction",
+                exc,
+            )
+
+        return self._extract_text_from_pdf_legacy(
+            pdf_content
+        )
     @staticmethod
     def _strip_pdf_page_headers_from_bibliography(bibliography_text):
         """Remove PDF page headers that interrupt bibliography entries."""
@@ -4873,26 +4953,144 @@ class ArxivReferenceChecker:
         return False
 
     def _split_numbered_reference_entries(self, bibliography_text):
-        """Split a bracket-numbered bibliography into raw reference entries."""
+        """
+        Split a [N]-numbered bibliography into raw entries.
+    
+        Important:
+        PDF extraction may flatten several references onto the same line, e.g.
+    
+            [1] First ref ... [2] Second ref ... [3] Third ref ...
+    
+        Therefore reference markers MUST NOT be required to occur at line start.
+    
+        This function only establishes reference boundaries. Structural/metadata
+        validation happens later in parse_references().
+        """
         if not bibliography_text:
             return []
-
-        matches = list(re.finditer(r'(?m)^\s*\[(\d{1,4})\]\s+', bibliography_text))
-        if len(matches) < 3:
+    
+        text = (
+            bibliography_text
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
+    
+        # Diagnostic counts. This will immediately tell us whether the PDF
+        # contains all markers but lost its line boundaries.
+        all_marker_matches = list(
+            re.finditer(
+                r'(?<!\w)\[(\d{1,4})\]\s*',
+                text,
+            )
+        )
+    
+        line_marker_matches = list(
+            re.finditer(
+                r'(?m)^\s*\[(\d{1,4})\]\s*',
+                text,
+            )
+        )
+    
+        logger.warning(
+            "NUMBERED REF TRACE: chars=%d lines=%d "
+            "markers_anywhere=%d markers_at_line_start=%d first_numbers=%s",
+            len(text),
+            len(text.splitlines()),
+            len(all_marker_matches),
+            len(line_marker_matches),
+            [
+                int(match.group(1))
+                for match in all_marker_matches[:15]
+            ],
+        )
+    
+        if len(all_marker_matches) < 3:
             return []
-
-        numbers = [int(match.group(1)) for match in matches]
-        if min(numbers) > 2:
+    
+        # ----------------------------------------------------------
+        # Find a genuine sequential bibliography run:
+        # [1], [2], [3], ...
+        #
+        # Looking for a sequence protects us from random bracketed
+        # numbers that may occur inside reference titles/content.
+        # ----------------------------------------------------------
+    
+        best_run = []
+    
+        for start_index, start_match in enumerate(all_marker_matches):
+            start_number = int(start_match.group(1))
+    
+            # Normal bibliographies start at 1. Allow 0 defensively.
+            if start_number not in (0, 1):
+                continue
+    
+            run = [start_match]
+            expected = start_number + 1
+    
+            for candidate in all_marker_matches[start_index + 1:]:
+                number = int(candidate.group(1))
+    
+                if number == expected:
+                    run.append(candidate)
+                    expected += 1
+                    continue
+    
+                # A smaller/repeated number may just be bracketed content
+                # inside the current reference. Ignore it.
+                if number < expected:
+                    continue
+    
+                # We jumped past the expected number, so this particular
+                # sequential run has ended.
+                break
+    
+            if len(run) > len(best_run):
+                best_run = run
+    
+        if len(best_run) < 3:
+            logger.debug(
+                "Could not find a sequential [N] bibliography run "
+                "(found %d raw bracket markers)",
+                len(all_marker_matches),
+            )
             return []
-
+    
         entries = []
-        for index, match in enumerate(matches):
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(bibliography_text)
-            entry = bibliography_text[match.start():end].strip()
-            if self._is_likely_reference(entry):
+    
+        for index, match in enumerate(best_run):
+            end = (
+                best_run[index + 1].start()
+                if index + 1 < len(best_run)
+                else len(text)
+            )
+    
+            entry = text[match.start():end].strip()
+    
+            # Do NOT call _is_likely_reference() here.
+            #
+            # At this stage the explicit sequential [N] marker is the
+            # evidence that this is a bibliography entry. Rejecting an
+            # entry here corrupts expected_numbered_count.
+            if len(entry) > 10:
                 entries.append(entry)
-
-        return entries if len(entries) >= 3 else []
+    
+        logger.info(
+            "Detected %d sequential numbered bibliography entries "
+            "(sequence %s -> %s)",
+            len(entries),
+            (
+                best_run[0].group(1)
+                if best_run
+                else "?"
+            ),
+            (
+                best_run[-1].group(1)
+                if best_run
+                else "?"
+            ),
+        )
+    
+        return entries
 
     def _extract_numbered_references_with_llm_chunks(self, numbered_entries):
         """Retry LLM extraction in small numbered-reference groups."""
@@ -5022,6 +5220,53 @@ class ArxivReferenceChecker:
                 )
             self.fatal_error, self.fatal_error_message = fatal_state_before_deterministic
 
+        # General deterministic fallback
+        # The optimized path above only activates for [1], [2], [3] style
+        # bibliographies. But _parse_references_regex() also supports:
+        #
+        #   1. Author ...
+        #   Author (2024) ...
+        #   author-year bibliographies
+        #   newline-separated references
+        #
+        # These must work without an LLM too.
+
+        if self.extraction_mode == 'cascade' and not expected_numbered_count:
+            fatal_state_before_general_regex = (
+                self.fatal_error,
+                self.fatal_error_message,
+            )
+
+            try:
+                general_deterministic_references = (
+                    self._parse_references_regex(
+                        bibliography_text
+                    )
+                )
+
+                if general_deterministic_references:
+                    logger.info(
+                        "Using general deterministic reference extraction "
+                        "(%d references)",
+                        len(general_deterministic_references),
+                    )
+
+                    self.last_reference_parser_method = "regex"
+                    self.fatal_error = False
+                    self.fatal_error_message = None
+
+                    return general_deterministic_references
+
+            finally:
+                # If the deterministic attempt found nothing, don't let it
+                # poison the optional LLM fallback that follows.
+                if not locals().get(
+                    "general_deterministic_references"
+                ):
+                    (
+                        self.fatal_error,
+                        self.fatal_error_message,
+                    ) = fatal_state_before_general_regex
         if self.llm_extractor:
             try:
                 logger.info("Using LLM-based reference extraction")
@@ -5291,117 +5536,240 @@ class ArxivReferenceChecker:
             else:
                 return biblatex_refs
         
-        # --- IMPROVED SPLITTING: handle concatenated references like [3]... [4]... ---
-        # First, normalize the bibliography text to handle multi-line references
-        # This fixes the issue where years appear as separate lines
-        normalized_bib = re.sub(r'\s+', ' ', bibliography_text).strip()
-        
-        # Ensure proper spacing after reference numbers - more comprehensive fix
-        normalized_bib = re.sub(r'(\[\d+\])([A-Za-z])', r'\1 \2', normalized_bib)
-        # Also handle cases where numbers directly follow reference numbers
-        normalized_bib = re.sub(r'(\[\d+\])(\d)', r'\1 \2', normalized_bib)
-        
-        
-        # Handle the case where the last reference might be incomplete
-        # Check if the text ends with a reference number followed by content
-        if re.search(r'\[\d+\][^[]*$', normalized_bib):
-            # The last reference is incomplete, try to find a better ending
-            # Look for the last complete sentence or period, but avoid truncating file extensions
-            last_period = normalized_bib.rfind('.')
-            if last_period > 0:
-                # Check if this period is part of a file extension
-                text_after_period = normalized_bib[last_period+1:last_period+5]  # Check next 4 chars
-                if not re.match(r'^[a-zA-Z]{2,4}$', text_after_period):
-                    # Find the last reference number before this period
-                    last_ref_match = re.search(r'\[\d+\][^[]*?\.', normalized_bib[:last_period+1])
-                    if last_ref_match:
-                        # Truncate at the last complete reference
-                        normalized_bib = normalized_bib[:last_period+1]
-        
-        numbered_ref_pattern = r'(\[\d+\])'
-        numbered_refs = re.split(numbered_ref_pattern, normalized_bib)
+        # ---------------------------------------------------------
+        # SPLIT RAW BIBLIOGRAPHY INTO REFERENCE ENTRIES
+        # ---------------------------------------------------------
+        # Keep TWO representations of the bibliography:
+        #
+        #   structured_bib -> preserves newlines for unnumbered references
+        #   flat_bib       -> flattens whitespace only for explicit [N] refs
+        #
+        # Flattening the bibliography globally is unsafe because it destroys
+        # the only reliable boundaries in many author-year / author-first lists.
+        structured_bib = (
+            bibliography_text
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
+        structured_bib = "\n".join(
+            re.sub(r"[ \t]+", " ", line).strip()
+            for line in structured_bib.split("\n")
+        )
+        structured_bib = re.sub(r"\n{3,}", "\n\n", structured_bib).strip()
+
         references = []
-        
-        # Only process as numbered references if we actually have numbered patterns in the text
-        has_numbered_refs = bool(re.search(r'\[\d+\]', normalized_bib))
-        
-        if len(numbered_refs) > 1 and has_numbered_refs:
-            # Reconstruct references, as split removes the delimiter
+
+        # ---------------------------------------------------------
+        # 1. Bracket-numbered references: [1] ... [2] ...
+        # ---------------------------------------------------------
+        # Explicit [N] markers survive flattening, so the old normalization is
+        # useful here: it repairs PDF line wrapping without losing boundaries.
+        has_numbered_refs = bool(re.search(r"\[\d+\]", structured_bib))
+
+        if has_numbered_refs:
+            flat_bib = re.sub(r"\s+", " ", structured_bib).strip()
+
+            # Ensure proper spacing after reference numbers.
+            flat_bib = re.sub(r"(\[\d+\])([A-Za-zÄÖÜäöüß])", r"\1 \2", flat_bib)
+            flat_bib = re.sub(r"(\[\d+\])(\d)", r"\1 \2", flat_bib)
+
+            numbered_ref_pattern = r"(\[\d+\])"
+            numbered_refs = re.split(numbered_ref_pattern, flat_bib)
+
             temp = []
             for part in numbered_refs:
-                if re.match(r'^\[\d+\]$', part):
+                if re.fullmatch(r"\[\d+\]", part or ""):
                     if temp:
-                        joined_ref = ''.join(temp).strip()
-                        references.append(joined_ref)
+                        joined_ref = "".join(temp).strip()
+                        if joined_ref:
+                            references.append(joined_ref)
                         temp = []
                     temp.append(part)
                 else:
                     temp.append(part)
+
             if temp:
-                joined_ref = ''.join(temp).strip()
-                references.append(joined_ref)
-            # Remove empty or very short entries, but be less aggressive to preserve order
-            references = [r for r in references if len(r.strip()) > 10 and not re.match(r'^\[\d+\]$', r.strip())]
-            # Ensure the last chunk is included if not already
-            if numbered_refs[-1].strip() and not any(numbered_refs[-1].strip() in r for r in references):
-                references.append(numbered_refs[-1].strip())
-            # Additional defense: filter out numbered items that are clearly not references
+                joined_ref = "".join(temp).strip()
+                if joined_ref:
+                    references.append(joined_ref)
+
+            references = [
+                ref.strip()
+                for ref in references
+                if len(ref.strip()) > 10
+                and not re.fullmatch(r"\[\d+\]", ref.strip())
+            ]
+
+            # Numbered-reference filtering is safe because _is_likely_reference
+            # was explicitly written for these [N] entries.
             validated_references = []
             for ref in references:
                 if self._is_likely_reference(ref):
                     validated_references.append(ref)
                 else:
-                    logger.debug(f"Filtered out non-reference item: {ref[:100]}...")
-            
-            logger.debug(f"Before validation: {len(references)} references")
-            logger.debug(f"After validation: {len(validated_references)} references")
+                    logger.debug(
+                        "Filtered out non-reference numbered item: %s...",
+                        ref[:100],
+                    )
+
             references = validated_references
-            logger.debug(f"Found {len(references)} numbered references")
+            logger.debug("Found %d numbered references", len(references))
+
+        # ---------------------------------------------------------
+        # 2. Unnumbered references: preserve newlines
+        # ---------------------------------------------------------
         else:
-            # Fallback to original logic if not numbered
-            # Try different splitting strategies
-            splitting_strategies = [
-                (r'\[\d+\]', lambda x: [r.strip() for r in x if r.strip()]),
-                (r'\n\s*\d+\.\s+', lambda x: x[1:] if not x[0].strip() else x),
-                (r'\n\s*\([A-Za-z]+(?:\s+et\s+al\.)?(?:,\s+\d{4})\)\s+', lambda x: x),
-                (r'\n\s*\n', lambda x: x),
-            ]
-            for pattern, processor in splitting_strategies:
-                split_refs = re.split(pattern, normalized_bib)
-                if len(split_refs) > 1:
-                    references = processor(split_refs)
-                    logger.debug(f"Split bibliography using pattern: {pattern}")
-                    logger.debug(f"Found {len(references)} potential references")
-                    break
-            
-            # If no splitting strategy worked, try author-year format detection
+            # 2a. Numeric references written as "1. ...", "2. ...".
+            numeric_line_start = re.compile(r"(?m)^\s*\d{1,4}\.\s+(?=\S)")
+            numeric_matches = list(numeric_line_start.finditer(structured_bib))
+
+            if len(numeric_matches) >= 2:
+                entries = []
+                for index, match in enumerate(numeric_matches):
+                    end = (
+                        numeric_matches[index + 1].start()
+                        if index + 1 < len(numeric_matches)
+                        else len(structured_bib)
+                    )
+                    entry = structured_bib[match.start():end].strip()
+                    if len(entry) > 20:
+                        entries.append(entry)
+
+                if entries:
+                    references = entries
+                    logger.debug(
+                        "Split unnumbered bibliography on N. markers: %d references",
+                        len(references),
+                    )
+
+            # 2b. Blank-line separated bibliography.
             if not references:
-                logger.debug("Attempting author-year format detection...")
-                
-                # For author-year format, use original bibliography_text (with newlines intact)
-                # Enhanced pattern to detect author-year format
-                # Look for year endings followed by new reference starts
-                # Pattern: year (like 2024.) followed by newline and capital letter start
-                year_boundary_pattern = r'(?<=\d{4}\.)\n(?=[A-Z])'
-                split_refs = re.split(year_boundary_pattern, bibliography_text.strip())
-                logger.debug(f"Year boundary pattern split resulted in {len(split_refs)} parts")
-                
-                if len(split_refs) > 1:
-                    references = [ref.strip() for ref in split_refs if ref.strip() and len(ref.strip()) > 20]
-                    logger.debug(f"Found {len(references)} potential references with year boundary pattern")
-                else:
-                    # Fallback: simpler pattern - split on newlines followed by any capital letter
-                    simple_pattern = r'\n(?=[A-Z])'
-                    split_refs = re.split(simple_pattern, bibliography_text.strip())
-                    logger.debug(f"Simple pattern split resulted in {len(split_refs)} parts")
-                    
-                    if len(split_refs) > 1:
-                        references = [ref.strip() for ref in split_refs if ref.strip() and len(ref.strip()) > 20]
-                        logger.debug(f"Found {len(references)} potential references with simple pattern")
-        if not references:
-            references = [line.strip() for line in normalized_bib.split('\n') if line.strip()]
-            logger.debug(f"Using line-by-line splitting, found {len(references)} potential references")
+                blank_line_parts = [
+                    part.strip()
+                    for part in re.split(r"\n\s*\n+", structured_bib)
+                    if part.strip()
+                ]
+                if len(blank_line_parts) >= 2:
+                    plausible = [part for part in blank_line_parts if len(part) > 20]
+                    if len(plausible) >= 2:
+                        references = plausible
+                        logger.debug(
+                            "Split bibliography on blank lines: %d references",
+                            len(references),
+                        )
+
+            # 2c. Author-year entries where a year-ending line is followed by
+            # a new capitalized author line.
+            if not references:
+                year_boundary_pattern = r"(?<=\d{4}[.)])\n(?=[A-ZÄÖÜ])"
+                split_refs = re.split(year_boundary_pattern, structured_bib)
+                if len(split_refs) >= 2:
+                    plausible = [
+                        ref.strip()
+                        for ref in split_refs
+                        if ref.strip() and len(ref.strip()) > 20
+                    ]
+                    if len(plausible) >= 2:
+                        references = plausible
+                        logger.debug(
+                            "Split bibliography on author-year boundaries: %d references",
+                            len(references),
+                        )
+
+            # 2d. Author-first references on separate lines.
+            # This is deliberately stricter than the previous r'\n(?=[A-Z])'
+            # fallback, which split wrapped titles/venues into fake references.
+            if not references:
+                author_line_start = re.compile(
+                    r"(?m)(?=^\s*(?:"
+                    # Surname, Given... / Surname, J. ...
+                    r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+,\s*"
+                    r"(?:[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]*|[A-ZÄÖÜ]\.)"
+                    # Organization/editor forms, e.g. BBIB (Hg.): ...
+                    r"|[A-ZÄÖÜ][A-ZÄÖÜ0-9 .&/-]{2,}\s*\((?:Hg|Hrsg)\.\)\s*:"
+                    r"))"
+                )
+                starts = list(author_line_start.finditer(structured_bib))
+                if len(starts) >= 2:
+                    entries = []
+                    for index, match in enumerate(starts):
+                        end = (
+                            starts[index + 1].start()
+                            if index + 1 < len(starts)
+                            else len(structured_bib)
+                        )
+                        entry = structured_bib[match.start():end].strip()
+                        if len(entry) > 20:
+                            entries.append(entry)
+                    if len(entries) >= 2:
+                        references = entries
+                        logger.debug(
+                            "Split bibliography on author-line starts: %d references",
+                            len(references),
+                        )
+
+            # 2e. Last-resort fallback for flattened author-list bibliographies.
+            # Your German source-list PDFs use forms such as:
+            #   Bartel, Paula/Dörringer, Antonia: Title ...
+            #   BBIB (Hg.): Title ...
+            # If the PDF extractor removed every newline, split only at a very
+            # specific author/organization + colon start. This is much safer than
+            # splitting at every capitalized word.
+            if not references and "\n" not in structured_bib:
+                flattened_author_start = re.compile(
+                    r"\s+(?=(?:"
+                    r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+,\s*"
+                    r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]*"
+                    r"(?:\s*/\s*[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+,\s*"
+                    r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]*)*\s*:"
+                    r"|[A-ZÄÖÜ][A-ZÄÖÜ0-9 .&/-]{2,}\s*\((?:Hg|Hrsg)\.\)\s*:"
+                    r"))"
+                )
+                split_refs = re.split(flattened_author_start, structured_bib)
+                plausible = [
+                    ref.strip()
+                    for ref in split_refs
+                    if ref.strip() and len(ref.strip()) > 20
+                ]
+                if len(plausible) >= 2:
+                    references = plausible
+                    logger.debug(
+                        "Split flattened author-list bibliography: %d references",
+                        len(references),
+                    )
+
+            # 2f. Final conservative line fallback. Only use it when there are
+            # multiple substantial lines; never turn a flattened bibliography
+            # into one giant "reference" merely because parsing returned a list.
+            if not references:
+                substantial_lines = [
+                    line.strip()
+                    for line in structured_bib.split("\n")
+                    if len(line.strip()) > 20
+                ]
+                if len(substantial_lines) >= 2:
+                    references = substantial_lines
+                    logger.debug(
+                        "Using conservative line-by-line bibliography split: %d references",
+                        len(references),
+                    )
+
         references = [ref.strip() for ref in references if ref.strip()]
+
+        # Safety guard: a long bibliography parsed as one enormous entry is not
+        # a successful deterministic extraction. Return [] so parse_references()
+        # can continue to another fallback instead of surfacing garbage.
+        if (
+            len(references) == 1
+            and len(structured_bib) > 1200
+            and len(references[0]) > 800
+        ):
+            logger.warning(
+                "Regex parser rejected a likely merged bibliography "
+                "(%d chars as one reference)",
+                len(references[0]),
+            )
+            return []
 
         # --- POST-PROCESSING: fix malformed DOIs/URLs and edge cases ---
         def clean_url(url):
@@ -6803,6 +7171,9 @@ class ArxivReferenceChecker:
         self.last_bibliography_extraction_method = None
         self.last_paper_text = ''
         pdf_content = None
+        document = None
+        text = None
+        bibliography_text = None
         grobid_attempted = False
         from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
 
@@ -7007,62 +7378,163 @@ class ArxivReferenceChecker:
                 self._set_fatal_source_error(paper, f"Failed to read BibTeX file ({e})", debug_mode=debug_mode)
                 return []
         else:
-            # Download the PDF
+            # Download PDF
             pdf_content = self.download_pdf(paper)
-            
+
             if not pdf_content:
-                logger.warning(f"Could not download PDF for {paper_id}")
+                logger.warning(
+                    "Could not download PDF for %s",
+                    paper_id,
+        )
+
                 self._set_fatal_source_error(
                     paper,
-                    self.last_download_error or 'Could not download PDF content',
+                    self.last_download_error
+                    or "Could not download PDF content",
                     debug_mode=debug_mode,
                 )
-                return []
-            
-            # Extract text from PDF
-            text = self.extract_text_from_pdf(pdf_content)
-            self.last_paper_text = text or ''
-            self.last_bibliography_extraction_method = 'pdf'
 
-            # Cascade policy for PDFs: GROBID is the structured extractor and
-            # therefore runs before bibliography-text parsing or any LLM call.
+                return []
+
+    
+            # 1. Preferred extraction: clean pdf_pipeline
+
+            try:
+                document = self.pdf_processor.extract_document(
+                    pdf_content
+                )
+
+                text = document.full_text or ""
+                bibliography_text = (
+                    document.bibliography or ""
+                )
+
+                # Body text is what citation-context extraction and
+                # AI detection should use.
+                self.last_paper_text = (
+                    document.body_text
+                    or document.full_text
+                    or ""
+                )
+
+                self.last_bibliography_extraction_method = (
+                    "pdf_pipeline"
+                )
+
+                logger.info(
+                    "pdf_pipeline extracted %s: "
+                    "extractor=%s, body=%d chars, "
+                    "bibliography=%d chars",
+                    paper_id,
+                    document.extractor,
+                    len(document.body_text or ""),
+                    len(document.bibliography or ""),
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "pdf_pipeline failed for %s: %s; "
+                    "trying legacy PDF extraction",
+                    paper_id,
+                    exc,
+                )
+
+        # Legacy fallback
+
+                text = self._extract_text_from_pdf_legacy(
+                    pdf_content
+                )
+
+                self.last_paper_text = text or ""
+
+                if text:
+                    bibliography_text = (
+                        self.find_bibliography_section(text)
+                    )
+
+                self.last_bibliography_extraction_method = (
+                    "pdf_legacy"
+                )
+
+            # 2. Existing GROBID structured-reference candidate
+
             grobid_references = _maybe_use_grobid_fallback(
-                "No LLM or GROBID available for PDF reference extraction. "
-                "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
+                "No LLM or GROBID available for PDF reference "
+                "extraction. Please configure an API key or "
+                "ensure Docker is installed so GROBID can "
+                "auto-start."
             )
+
             if grobid_references:
                 from refchecker.utils.extraction_quality import (
                     merge_grounded_reference_candidates,
                     strict_numbered_text_candidate,
                 )
 
-                comparison_bibliography = self.find_bibliography_section(text)
-                fatal_state = (self.fatal_error, self.fatal_error_message)
+                # Use the bibliography already isolated by pdf_pipeline.
+                comparison_bibliography = bibliography_text
+
+                # Only use the old finder if the pipeline didn't
+                # identify a bibliography.
+                if (
+                    not comparison_bibliography
+                    and text
+                ):
+                    comparison_bibliography = (
+                        self.find_bibliography_section(text)
+                    )
+
+                fatal_state = (
+                    self.fatal_error,
+                    self.fatal_error_message,
+                )
+
                 try:
-                    text_candidate, _ = strict_numbered_text_candidate(
-                        self, comparison_bibliography
+                    text_candidate, _ = (
+                        strict_numbered_text_candidate(
+                            self,
+                            comparison_bibliography,
+                        )
                     )
+
                 finally:
-                    self.fatal_error, self.fatal_error_message = fatal_state
+                    (
+                        self.fatal_error,
+                        self.fatal_error_message,
+                    ) = fatal_state
+
                 if text_candidate:
-                    grobid_references = merge_grounded_reference_candidates(
-                        grobid_references, text_candidate
+                    grobid_references = (
+                        merge_grounded_reference_candidates(
+                            grobid_references,
+                            text_candidate,
+                        )
                     )
+
                 return grobid_references
         
-        if not text:
+        if not text and not bibliography_text:
             grobid_references = _maybe_use_grobid_fallback(
-                "No LLM or GROBID available for PDF reference extraction. "
-                "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
+                "No LLM or GROBID available for PDF reference "
+                "extraction. Please configure an API key or "
+                "ensure Docker is installed so GROBID can "
+                "auto-start."
             )
+
             if grobid_references:
                 return grobid_references
-            logger.warning(f"Could not extract text from {'LaTeX' if hasattr(paper, 'is_latex') and paper.is_latex else 'PDF'} for {paper_id}")
+
+            logger.warning(
+                "Could not extract usable document content for %s",
+                paper_id,
+            )
+
             self._set_fatal_source_error(
                 paper,
-                f"Could not extract text from {'LaTeX' if hasattr(paper, 'is_latex') and paper.is_latex else 'PDF'} source",
+                "Could not extract usable document content",
                 debug_mode=debug_mode,
             )
+
             return []
         
         # Save the extracted text for debugging
@@ -7079,8 +7551,13 @@ class ArxivReferenceChecker:
                 logger.warning(f"Could not save debug text file for {paper_id}: {e}")
                 # Continue processing even if debug file writing fails
         
-        # Find bibliography section
-        bibliography_text = self.find_bibliography_section(text)
+        # Use the bibliography from pdf_pipeline when available.
+        # Only run the legacy bibliography finder when no bibliography
+        # has already been identified.
+        if not bibliography_text and text:
+            bibliography_text = self.find_bibliography_section(
+                text
+            )
         
         if not bibliography_text:
             # Try pdftotext fallback for garbled PDF text
@@ -7119,8 +7596,12 @@ class ArxivReferenceChecker:
             logger.warning(f"Could not find bibliography section for {paper_id}")
             return []
 
-        # A pdftotext retry may have replaced the initial extraction.
-        self.last_paper_text = text or self.last_paper_text
+        # Preserve clean body_text when pdf_pipeline succeeded.
+        # Legacy/LaTeX paths may still update last_paper_text from text.
+        if document is None:
+            self.last_paper_text = (
+                text or self.last_paper_text
+            )
         
         # Save the bibliography text for debugging
         if debug_mode:
@@ -7131,10 +7612,83 @@ class ArxivReferenceChecker:
             except Exception as e:
                 logger.warning(f"Could not save debug bibliography file for {paper_id}: {e}")
         
+        # ------------------------------------------------------
         # Parse references
-        references = self.parse_references(bibliography_text)
+
+
+        fatal_state_before_parse = (
+            self.fatal_error,
+            self.fatal_error_message,
+        )
+
+        references = self.parse_references(
+            bibliography_text
+        )
+
+
+        # pdf_pipeline produced bibliography text, but neither
+        # deterministic parsing nor the LLM could turn it into
+        # references. Try the old PDF extraction stack once.
+
+
+        if (
+            not references
+            and document is not None
+            and pdf_content is not None
+        ):
+            logger.warning(
+                "pdf_pipeline bibliography could not be parsed "
+                "for %s; trying legacy PDF extraction",
+                paper_id,
+            )
+
+            # parse_references() may mark the extraction as fatal
+            # when nothing could be parsed. Clear that state while
+            # we try the alternate extraction.
+            (
+                self.fatal_error,
+                self.fatal_error_message,
+            ) = fatal_state_before_parse
+
+            legacy_text = self._extract_text_from_pdf_legacy(
+                pdf_content
+            )
+
+            if legacy_text:
+                legacy_bibliography = (
+                    self.find_bibliography_section(
+                        legacy_text
+                    )
+                )
+
+                if (
+                    legacy_bibliography
+                    and legacy_bibliography.strip()
+                    != bibliography_text.strip()
+                ):
+                    logger.info(
+                        "Retrying reference parsing with "
+                        "legacy PDF extraction for %s",
+                        paper_id,
+                    )
+
+                    legacy_references = self.parse_references(
+                        legacy_bibliography
+                    )
+
+                    if legacy_references:
+                        references = legacy_references
+                        bibliography_text = legacy_bibliography
+                        text = legacy_text
+
+                        self.last_paper_text = legacy_text
+
+                        self.last_bibliography_extraction_method = (
+                            "pdf_legacy"
+                        )
+
         if not self.last_bibliography_extraction_method:
-            self.last_bibliography_extraction_method = 'pdf'
+            self.last_bibliography_extraction_method = "pdf"
 
         if not references and self.extraction_mode == 'cascade':
             grobid_references = _maybe_use_grobid_fallback(
@@ -7631,6 +8185,8 @@ class ArxivReferenceChecker:
             'text': 'plain text references',
             'latex': 'LaTeX bibliography',
             'pdf': 'PDF parsing',
+            'pdf_pipeline': 'PDF pipeline',
+            'pdf_legacy': 'legacy PDF parsing',
             'grobid': 'GROBID extraction',
             'llm': 'LLM extraction',
         }
