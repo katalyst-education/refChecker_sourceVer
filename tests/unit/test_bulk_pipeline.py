@@ -1,6 +1,6 @@
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from refchecker.core.bulk_pipeline import (
     BulkPaperResult,
@@ -11,6 +11,8 @@ from refchecker.core.bulk_pipeline import (
     extract_bibliography_bulk,
     parse_references_bulk,
 )
+from refchecker.core.refchecker import ArxivReferenceChecker
+from refchecker.services.pdf_pipeline import ExtractedDocument
 
 
 class _FakeExtractionProvider:
@@ -157,6 +159,182 @@ def test_parse_references_bulk_records_zero_reference_diagnostic():
     assert checker.fatal_error is True
     assert 'Reference extraction produced zero references using LLM extraction' in checker.fatal_error_message
     assert 'bibliography_text_chars=' in checker.fatal_error_message
+
+
+def test_bulk_pdf_uses_structured_bibliography_and_keeps_body_separate():
+    body_text = (
+        'The manuscript discusses the method and cites prior work [1]. '
+    ) * 8
+    bibliography = (
+        '[1] John Smith and Alice Jones. A robust method for scientific analysis. '
+        'Journal of Testing, 2021.\n'
+        '[2] Jane Doe and Bob Roe. An efficient approach to academic research. '
+        'Conference Proceedings, 2022.\n'
+        '[3] Alice Brown and Carol White. Improved models for reliable systems. '
+        'Transactions on Testing, 2023.'
+    )
+    document = ExtractedDocument(
+        file='paper.pdf',
+        doc_type='one_column_paper',
+        extractor='test_pipeline',
+        body_text=body_text,
+        bibliography=bibliography,
+        full_text=f'{body_text}\n\nReferences\n{bibliography}',
+        metadata={
+            'extraction_diagnostics': {
+                'bibliography_status': 'extracted',
+                'errors': [],
+                'warnings': [],
+            },
+        },
+    )
+    checker = ArxivReferenceChecker(llm_config={'disabled': True})
+    checker.extraction_mode = 'llm-only'
+    checker.download_pdf = MagicMock(return_value=BytesIO(b'pdf bytes'))
+    checker.pdf_processor.extract_document = MagicMock(return_value=document)
+    paper = SimpleNamespace(
+        title='Test paper',
+        file_path=None,
+        get_short_id=lambda: 'test-paper',
+        is_latex=False,
+        is_bibtex=False,
+        is_text_refs=False,
+    )
+    batcher = _RecordingExtractionBatcher(
+        references=[{'title': 'Parsed structured reference'}]
+    )
+
+    from refchecker.core import bulk_pipeline
+
+    with (
+        patch.object(bulk_pipeline, 'get_bibtex_content', return_value=None),
+        patch.object(
+            bulk_pipeline,
+            'parse_references_bulk',
+            side_effect=lambda _checker, text, _batcher: (
+                batcher.extract_references(_checker, text)
+            ),
+        ),
+    ):
+        references = extract_bibliography_bulk(
+            checker,
+            paper,
+            debug_mode=False,
+            extraction_batcher=batcher,
+        )
+
+    assert references == [{'title': 'Parsed structured reference'}]
+    assert len(batcher.calls) == 1
+    assert batcher.calls[0].strip() == bibliography
+    assert checker.last_paper_text.strip() == body_text.strip()
+    assert '[1] John Smith' not in checker.last_paper_text
+    checker.pdf_processor.extract_document.assert_called_once_with(
+        checker.download_pdf.return_value,
+        include_bibliography=True,
+    )
+
+
+def test_bulk_source_bibliography_keeps_priority_over_pdf_pipeline():
+    checker = ArxivReferenceChecker(llm_config={'disabled': True})
+    checker.download_pdf = MagicMock()
+    checker.pdf_processor.extract_document = MagicMock()
+    paper = SimpleNamespace(
+        title='Test paper',
+        file_path=None,
+        get_short_id=lambda: 'test-paper',
+        is_latex=False,
+        is_bibtex=False,
+        is_text_refs=False,
+    )
+    batcher = _RecordingExtractionBatcher(
+        references=[{'title': 'Source bibliography reference'}]
+    )
+    from refchecker.core import bulk_pipeline
+
+    with (
+        patch.object(
+            bulk_pipeline,
+            'get_bibtex_content',
+            return_value='@article{source, title={Source bibliography}}',
+        ),
+        patch.object(
+            bulk_pipeline,
+            'parse_references_bulk',
+            side_effect=lambda _checker, text, _batcher: (
+                batcher.extract_references(_checker, text)
+            ),
+        ),
+    ):
+        references = extract_bibliography_bulk(
+            checker,
+            paper,
+            debug_mode=False,
+            extraction_batcher=batcher,
+        )
+
+    assert references == [{'title': 'Source bibliography reference'}]
+    assert batcher.calls == ['@article{source, title={Source bibliography}}']
+    checker.pdf_processor.extract_document.assert_not_called()
+    checker.download_pdf.assert_not_called()
+
+
+def test_bulk_pdf_pipeline_failure_uses_legacy_text_and_preserves_body():
+    body_text = ('The paper cites prior work [1]. ') * 8
+    bibliography = (
+        '[1] John Smith and Alice Jones. A robust method for scientific analysis. '
+        'Journal of Testing, 2021.\n'
+        '[2] Jane Doe and Bob Roe. An efficient approach to academic research. '
+        'Conference Proceedings, 2022.\n'
+        '[3] Alice Brown and Carol White. Improved models for reliable systems. '
+        'Transactions on Testing, 2023.'
+    )
+    checker = ArxivReferenceChecker(llm_config={'disabled': True})
+    checker.extraction_mode = 'llm-only'
+    checker.download_pdf = MagicMock(return_value=BytesIO(b'pdf bytes'))
+    checker.pdf_processor.extract_document = MagicMock(
+        side_effect=ValueError('pipeline failed')
+    )
+    checker.extract_text_from_pdf = MagicMock(
+        return_value=f'{body_text}\n\nReferences\n{bibliography}'
+    )
+    paper = SimpleNamespace(
+        title='Test paper',
+        file_path=None,
+        get_short_id=lambda: 'test-paper',
+        is_latex=False,
+        is_bibtex=False,
+        is_text_refs=False,
+    )
+    batcher = _RecordingExtractionBatcher(
+        references=[{'title': 'Legacy reference'}]
+    )
+    from refchecker.core import bulk_pipeline
+
+    with (
+        patch.object(bulk_pipeline, 'get_bibtex_content', return_value=None),
+        patch.object(
+            bulk_pipeline,
+            'parse_references_bulk',
+            side_effect=lambda _checker, text, _batcher: (
+                batcher.extract_references(_checker, text)
+            ),
+        ),
+    ):
+        references = extract_bibliography_bulk(
+            checker,
+            paper,
+            debug_mode=False,
+            extraction_batcher=batcher,
+        )
+
+    assert references == [{'title': 'Legacy reference'}]
+    assert len(batcher.calls) == 1
+    assert batcher.calls[0].strip() == bibliography
+    assert checker.last_paper_text.strip() == body_text.strip()
+    assert '[1] John Smith' not in checker.last_paper_text
+    checker.extract_text_from_pdf.assert_called_once_with(
+        checker.download_pdf.return_value
+    )
 
 
 def test_parse_references_bulk_uses_llm_before_structured_parsers():

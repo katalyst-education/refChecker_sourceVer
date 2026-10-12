@@ -2016,6 +2016,9 @@ class ProgressRefChecker:
 
             paper_title = "Unknown Paper"
             paper_text = ""
+            paper_full_text = ""
+            pdf_bibliography_text = None
+            pdf_document = None
             title_updated = False
             pdf_path_for_fallback = None
 
@@ -2069,17 +2072,25 @@ class ProgressRefChecker:
                     except Exception as e:
                         logger.debug(f"Could not get OpenReview metadata: {e}")
 
-                cached_pdf_path = get_cached_artifact_path(self.cache_dir, pdf_url, 'paper.pdf')
-                if cached_pdf_path and os.path.exists(cached_pdf_path) and os.path.getsize(cached_pdf_path) > 0:
-                    try:
-                        pdf_processor = PDFProcessor()
-                        extracted_title = await asyncio.to_thread(pdf_processor.extract_title_from_pdf, cached_pdf_path)
-                        if extracted_title:
-                            paper_title = extracted_title
-                            await update_title_if_needed(paper_title)
-                            logger.info(f"Extracted title from cached PDF: {paper_title}")
-                    except Exception as e:
-                        logger.warning(f"Could not extract title from cached PDF: {e}")
+            async def update_title_from_pdf_document(document, pdf_path, pdf_processor):
+                nonlocal paper_title
+                if paper_title != "Unknown Paper":
+                    return
+                try:
+                    extracted_title = (
+                        document.title
+                        if document and document.title
+                        else await asyncio.to_thread(
+                            pdf_processor.extract_title_from_pdf,
+                            pdf_path,
+                        )
+                    )
+                    if extracted_title:
+                        paper_title = extracted_title
+                        await update_title_if_needed(paper_title)
+                        logger.info("Extracted title from PDF: %s", paper_title)
+                except Exception as e:
+                    logger.warning("Could not extract title from PDF: %s", e)
             
             if source_type == "url":
                 # Check if this is an OpenReview URL — convert to PDF download
@@ -2121,7 +2132,20 @@ class ProgressRefChecker:
                         try:
                             cached_pdf = get_cached_artifact_path(self.cache_dir, paper_source, 'paper.pdf')
                             if cached_pdf and os.path.exists(cached_pdf) and os.path.getsize(cached_pdf) > 0:
-                                paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, cached_pdf)
+                                (
+                                    pdf_document,
+                                    paper_full_text,
+                                    paper_text,
+                                    pdf_bibliography_text,
+                                ) = await asyncio.to_thread(
+                                    self._extract_pdf_document_scoped,
+                                    cached_pdf,
+                                )
+                                await update_title_from_pdf_document(
+                                    pdf_document,
+                                    cached_pdf,
+                                    PDFProcessor(),
+                                )
                                 if paper_text:
                                     pdf_path_for_fallback = cached_pdf
                                     logger.info("Cache hit: recovered %d chars of body text from the cached PDF for citation contexts / AI detection", len(paper_text))
@@ -2146,18 +2170,38 @@ class ProgressRefChecker:
                         pdf_path_for_fallback = pdf_path
                         set_extraction_method('pdf')
                         pdf_processor = PDFProcessor()
-                        paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
+                        try:
+                            (
+                                pdf_document,
+                                paper_full_text,
+                                paper_text,
+                                pdf_bibliography_text,
+                            ) = await asyncio.to_thread(
+                                self._extract_pdf_document_scoped,
+                                pdf_path,
+                            )
+                        except Exception as extraction_exc:
+                            logger.warning(
+                                "Structured PDF extraction failed for %s; using legacy text extraction: %s",
+                                pdf_path,
+                                extraction_exc,
+                            )
+                            paper_text = await asyncio.to_thread(
+                                self._extract_pdf_text_scoped,
+                                pdf_path,
+                            )
+                            paper_full_text = paper_text
 
                         # Try to extract the paper title from the PDF content
                         # (only if we don't already have a title from the API)
                         if paper_title == "Unknown Paper":
                             try:
-                                extracted_title = await asyncio.to_thread(pdf_processor.extract_title_from_pdf, pdf_path)
-                                if extracted_title:
-                                    paper_title = extracted_title
-                                    await update_title_if_needed(paper_title)
-                                    logger.info(f"Extracted title from PDF URL: {paper_title}")
-                                else:
+                                await update_title_from_pdf_document(
+                                    pdf_document,
+                                    pdf_path,
+                                    pdf_processor,
+                                )
+                                if paper_title == "Unknown Paper":
                                     # Fallback to URL filename
                                     from urllib.parse import urlparse, unquote
                                     url_path = urlparse(paper_source).path
@@ -2428,7 +2472,15 @@ class ProgressRefChecker:
                         pdf_path_for_fallback = pdf_path
                         set_extraction_method('pdf')
                         # Extract text using the same CLI path for parity.
-                        paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
+                        (
+                            pdf_document,
+                            paper_full_text,
+                            paper_text,
+                            pdf_bibliography_text,
+                        ) = await asyncio.to_thread(
+                            self._extract_pdf_document_scoped,
+                            pdf_path,
+                        )
                     else:
                         # References came from the .bbl/.bib source files, so LLM
                         # reference extraction is skipped — but we still need the
@@ -2441,7 +2493,15 @@ class ProgressRefChecker:
                             if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
                                 await asyncio.to_thread(download_arxiv_paper_pdf, paper, pdf_path, arxiv_id)
                             pdf_path_for_fallback = pdf_path
-                            paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
+                            (
+                                pdf_document,
+                                paper_full_text,
+                                paper_text,
+                                pdf_bibliography_text,
+                            ) = await asyncio.to_thread(
+                                self._extract_pdf_document_scoped,
+                                pdf_path,
+                            )
                             logger.info(
                                 "Extracted PDF body text for citation contexts / AI detection after %s source extraction (%d chars)",
                                 extraction_method,
@@ -2465,15 +2525,35 @@ class ProgressRefChecker:
                 if paper_source.lower().endswith('.pdf'):
                     pdf_processor = PDFProcessor()
                     pdf_path_for_fallback = paper_source
-                    paper_text = await asyncio.to_thread(self._extract_pdf_text_scoped, paper_source)
+                    try:
+                        (
+                            pdf_document,
+                            paper_full_text,
+                            paper_text,
+                            pdf_bibliography_text,
+                        ) = await asyncio.to_thread(
+                            self._extract_pdf_document_scoped,
+                            paper_source,
+                        )
+                    except Exception as extraction_exc:
+                        logger.warning(
+                            "Structured PDF extraction failed for upload %s; using legacy text extraction: %s",
+                            paper_source,
+                            extraction_exc,
+                        )
+                        paper_text = await asyncio.to_thread(
+                            self._extract_pdf_text_scoped,
+                            paper_source,
+                        )
+                        paper_full_text = paper_text
                     
                     # Try to extract the paper title from the PDF
                     try:
-                        extracted_title = await asyncio.to_thread(pdf_processor.extract_title_from_pdf, paper_source)
-                        if extracted_title:
-                            paper_title = extracted_title
-                            await update_title_if_needed(paper_title)
-                            logger.info(f"Extracted title from PDF: {paper_title}")
+                        await update_title_from_pdf_document(
+                            pdf_document,
+                            paper_source,
+                            pdf_processor,
+                        )
                     except Exception as e:
                         logger.warning(f"Could not extract title from PDF: {e}")
                 elif paper_source.lower().endswith(('.tex', '.txt', '.bib')):
@@ -2584,6 +2664,8 @@ class ProgressRefChecker:
                         references, pdf_method = await self._extract_references_from_pdf(
                             pdf_path_for_fallback,
                             paper_text,
+                            bibliography_text=pdf_bibliography_text,
+                            full_text=paper_full_text or paper_text,
                             failure_message=(
                                 "No parser, LLM, or GROBID service could extract "
                                 "references from this PDF."
@@ -2620,7 +2702,7 @@ class ProgressRefChecker:
             # URL/DOI check (references via Crossref) otherwise has no body, so
             # the "▶ Context" expandable silently disappeared when AI detection
             # was off. The fetch is cached, so the cost is paid once.
-            if not (paper_text or "").strip():
+            if not (paper_text or "").strip() and pdf_document is None:
                 fetched_body = await self._fetch_body_text_for_ai_detection(paper_source)
                 if fetched_body:
                     paper_text = fetched_body
@@ -2629,6 +2711,11 @@ class ProgressRefChecker:
                     # No body text anywhere → contexts/AI detection can't run.
                     # Make it visible instead of silently dropping every context.
                     logger.warning("No body text available for citation contexts (source=%s, refs=%d) — inline 'cited in' contexts will be empty for this article", extraction_method, len(references or []))
+            elif not (paper_text or "").strip():
+                logger.warning(
+                    "Structured PDF extraction returned no manuscript body; "
+                    "skipping redundant extraction for citation contexts"
+                )
             _attach_citation_contexts(references, paper_text)
             _ctx_attached = sum(1 for r in (references or []) if r.get("citation_context"))
             logger.info(
@@ -2936,7 +3023,10 @@ class ProgressRefChecker:
                     return ""  # HTML / paywalled — let the honest "no body" message stand
                 with open(pdf_path, "wb") as fh:
                     fh.write(content)
-            text = await asyncio.to_thread(self._extract_pdf_text_scoped, pdf_path)
+            _, _, text, _ = await asyncio.to_thread(
+                self._extract_pdf_document_scoped,
+                pdf_path,
+            )
             logger.info("AI-detection body fetch: extracted %d chars from %s", len(text or ""), src)
             return text or ""
         except Exception as exc:  # noqa: BLE001
@@ -3309,7 +3399,12 @@ class ProgressRefChecker:
                 'raw_text': ref_string
             }
 
-    async def _extract_references(self, paper_text: str) -> List[Dict[str, Any]]:
+    async def _extract_references(
+        self,
+        paper_text: str,
+        *,
+        bibliography_text: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Extract references using the same pipeline/order as the CLI."""
         try:
             cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
@@ -3318,7 +3413,14 @@ class ProgressRefChecker:
             await self.emit_progress("extracting", {
                 "message": "Finding bibliography section..."
             })
-            bib_section = await asyncio.to_thread(cli_checker.find_bibliography_section, paper_text)
+            bib_section = (
+                bibliography_text
+                if bibliography_text and bibliography_text.strip()
+                else await asyncio.to_thread(
+                    cli_checker.find_bibliography_section,
+                    paper_text,
+                )
+            )
             if not bib_section:
                 # v0.7.52: heading-finder fallback. The regex-based
                 # `find_bibliography_section` looks for "References" /
@@ -3421,6 +3523,8 @@ class ProgressRefChecker:
         pdf_path: str,
         paper_text: str,
         *,
+        bibliography_text: Optional[str] = None,
+        full_text: Optional[str] = None,
         failure_message: Optional[str] = None,
     ) -> tuple[List[Dict[str, Any]], Optional[str]]:
         """Run the shared, validated PDF cascade.
@@ -3434,14 +3538,24 @@ class ProgressRefChecker:
         Both the initial WebUI check and per-reference document re-extraction
         call this method so they cannot silently choose different PDF parsers.
         """
+        source_text = full_text or paper_text
+        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
+        selected_bibliography = (
+            bibliography_text
+            if bibliography_text and bibliography_text.strip()
+            else await asyncio.to_thread(
+                cli_checker.find_bibliography_section,
+                source_text,
+            )
+        )
+
         if self.extraction_mode == 'llm-only':
-            references = await self._extract_references(paper_text)
+            references = await self._extract_references(
+                selected_bibliography or source_text,
+                bibliography_text=selected_bibliography or None,
+            )
             return references, self._last_reference_parser_method or 'llm'
 
-        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
-        bibliography_text = await asyncio.to_thread(
-            cli_checker.find_bibliography_section, paper_text
-        )
         from refchecker.utils.extraction_quality import (
             merge_grounded_reference_candidates,
             strict_numbered_text_candidate,
@@ -3449,7 +3563,7 @@ class ProgressRefChecker:
         deterministic_candidate, expected_count = await asyncio.to_thread(
             strict_numbered_text_candidate,
             cli_checker,
-            bibliography_text,
+            selected_bibliography,
         )
 
         grobid_candidate = None
@@ -3502,7 +3616,10 @@ class ProgressRefChecker:
                 len(validation['invalid_indices']),
             )
 
-        parsed_references = await self._extract_references(paper_text)
+        parsed_references = await self._extract_references(
+            selected_bibliography or source_text,
+            bibliography_text=selected_bibliography or None,
+        )
         if parsed_references:
             return parsed_references, self._last_reference_parser_method or 'pdf'
 
@@ -3533,6 +3650,70 @@ class ProgressRefChecker:
                 return _extract_pdf_text_cli_style(pdf_path, self.llm)
         except Exception:
             return _extract_pdf_text_cli_style(pdf_path, self.llm)
+
+    def _extract_pdf_document_scoped(self, pdf_path: str):
+        """Extract and select a PDF document under the current check's usage scope."""
+        from refchecker.llm import usage_tracker as _ut
+
+        if self.check_id is not None:
+            _ut.set_current_check(str(self.check_id))
+        with _ut.FlowScope("extract"):
+            try:
+                document = PDFProcessor().extract_document(
+                    pdf_path,
+                    include_bibliography=True,
+                )
+                if document is None:
+                    raise ValueError("PDFProcessor returned no structured document")
+                if not any(
+                    value and value.strip()
+                    for value in (
+                        document.full_text,
+                        document.body_text,
+                        document.bibliography,
+                    )
+                ):
+                    raise ValueError("PDFProcessor returned an empty structured document")
+                checker = _make_cli_checker(self.llm, self.extraction_mode)
+                full_text, body_text, bibliography = (
+                    checker._select_pdf_document_content(document)
+                )
+                diagnostics = (
+                    document.metadata.get("extraction_diagnostics") or {}
+                )
+                logger.info(
+                    "WebUI structured PDF extraction used %s (bibliography=%s)",
+                    document.extractor or "unknown extractor",
+                    diagnostics.get("bibliography_status", "unknown"),
+                )
+                for message in diagnostics.get("errors", []):
+                    logger.warning("PDF extraction diagnostic: %s", message)
+                for message in diagnostics.get("warnings", []):
+                    logger.warning("PDF extraction warning: %s", message)
+                return (
+                    document,
+                    full_text,
+                    body_text,
+                    bibliography if bibliography and bibliography.strip() else None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Structured PDF extraction failed; retrying legacy text extraction: %s",
+                    exc,
+                )
+                full_text = self._extract_pdf_text_scoped(pdf_path)
+                checker = _make_cli_checker(self.llm, self.extraction_mode)
+                bibliography = checker.find_bibliography_section(full_text) or ""
+                try:
+                    from refchecker.services.pdf_pipeline.text_extractors.paper_helpers import (
+                        split_text_and_references,
+                    )
+
+                    body_text = split_text_and_references(full_text)[0] or full_text
+                except Exception as split_exc:
+                    logger.warning("Could not separate PDF body text: %s", split_exc)
+                    body_text = full_text
+                return None, full_text, body_text, bibliography or None
 
     async def _extract_references_from_bibtex(self, bibtex_content: str) -> tuple:
         """Extract references from BibTeX/BBL content (from ArXiv source files).
