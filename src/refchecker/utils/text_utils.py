@@ -2923,11 +2923,10 @@ def _compact_initials_name_match(parts1: List[str], parts2: List[str]) -> bool:
     has tokens is still rejected — that would be claiming initials the
     DB doesn't confirm.
     """
-    # Strip trailing periods on each token so "r." becomes "r" — common
-    # in cleaned-name forms where the period survives. The original
-    # function compared on `.isalpha()` which fails for "r.".
+    # Remove period separators from initials so compact forms such as
+    # "P.K." and "r." can be compared with expanded given names.
     def _strip_period(tok: str) -> str:
-        return tok.rstrip('.').strip()
+        return tok.replace('.', '').strip()
 
     p1 = [_strip_period(t) for t in parts1]
     p2 = [_strip_period(t) for t in parts2]

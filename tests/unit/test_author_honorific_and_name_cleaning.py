@@ -28,6 +28,7 @@ def test_enhanced_name_match_intended_behavior():
 def test_enhanced_name_match_compact_initials():
     assert enhanced_name_match("BR Cowley", "Benjamin R. Cowley")
     assert enhanced_name_match("JW Pillow", "Jonathan W. Pillow")
+    assert enhanced_name_match("P.K. S", "Pavan Kumar S")
 
 
 def test_enhanced_name_match_collapsed_author_tokens():

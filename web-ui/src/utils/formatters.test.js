@@ -284,6 +284,19 @@ describe('formatters', () => {
       )
     })
 
+    it('preserves every compact dotted initial in an as-cited IEEE reference', () => {
+      const ref = {
+        title: 'BiCA: Effective Biomedical Dense Retrieval with Citation-Aware Hard Negatives',
+        authors: ['A. Sinha', 'P.K. S', 'R. Balaji', 'N.P. Bhatt'],
+        year: 2026,
+        venue: 'Association for the Advancement of Artificial Intelligence',
+      }
+
+      expect(exportReferenceAsStyle(ref, 'ieee')).toContain(
+        'A. Sinha, P. K. S, R. Balaji, N. P. Bhatt,',
+      )
+    })
+
     it('decodes HTML character references in candidate metadata', () => {
       const ref = {
         title: 'Improving radiology report generation systems',

@@ -1428,7 +1428,7 @@ function _splitAuthorName(rawName) {
   if (name.includes(',')) {
     const [last, rest] = name.split(',', 2).map(s => s.trim())
     const givenParts = (rest || '').split(/\s+/).filter(Boolean)
-    const initials = givenParts.map(p => p[0] ? p[0].toUpperCase() + '.' : '').join(' ')
+    const initials = _formatGivenInitials(givenParts)
     return { first: rest || '', last, initials }
   }
   // "Firstname Middle Lastname" form
@@ -1436,8 +1436,18 @@ function _splitAuthorName(rawName) {
   if (parts.length === 1) return { first: '', last: parts[0], initials: '' }
   const last = parts.pop()
   const first = parts.join(' ')
-  const initials = parts.map(p => (p[0] || '').toUpperCase() + '.').join(' ')
+  const initials = _formatGivenInitials(parts)
   return { first, last, initials }
+}
+
+function _formatGivenInitials(parts) {
+  return parts.flatMap(part => {
+    const compact = part.replace(/[.-]/g, '')
+    if (/[.-]/.test(part) && /^[A-Za-z]{2,4}$/.test(compact)) {
+      return [...compact]
+    }
+    return part[0] ? [part[0]] : []
+  }).map(initial => `${initial.toUpperCase()}.`).join(' ')
 }
 
 function _authorsArray(authors) {
