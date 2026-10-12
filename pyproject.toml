@@ -35,6 +35,8 @@ dependencies = [
     "pandas>=3.0.2",
     "numpy>=2.4.4",
     "pdfplumber>=0.11.9",
+    "pdfminer.six>=20231228",
+    "pymupdf>=1.27.2.3",
     "pybtex>=0.26.1",
 ]
 
@@ -76,7 +78,6 @@ webui = [
     "aiosqlite>=0.22.1",
     "httpx>=0.28.1",
     "cryptography>=47.0.0",
-    "pymupdf>=1.27.2.3",
     "Pillow>=12.2.0",  # For thumbnail image enhancement
     "python-multipart>=0.0.27",  # For FastAPI form data handling
     "python-jose[cryptography]>=3.5.0",  # For JWT token creation and validation (multi-user auth)

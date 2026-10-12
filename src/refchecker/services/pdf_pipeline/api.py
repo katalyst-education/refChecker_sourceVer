@@ -10,7 +10,11 @@ from typing import BinaryIO, Iterator, Union
 
 from .classification.pdf_classifier import classify_pdf
 from .config import MAX_CLASSIFIER_PAGES
-from .models import ExtractedDocument
+from .models import (
+    ExtractedDocument,
+    PDFExtractionError,
+    build_extraction_diagnostics,
+)
 from .text_extractors.router import TextExtractorRouter
 
 
@@ -94,13 +98,12 @@ def _pdf_input_as_path(
             "BytesIO, or binary file-like object"
         )
 
+    if not isinstance(pdf_bytes, (bytes, bytearray)):
+        raise TypeError("PDF file-like input must return bytes")
+    pdf_bytes = bytes(pdf_bytes)
+
     if not pdf_bytes:
         raise ValueError("PDF input is empty")
-
-    if not pdf_bytes.startswith(b"%PDF-"):
-        raise ValueError(
-            "Input does not appear to be a PDF"
-        )
 
     # ---------------------------------------------------------
     # Some current extractors / GROBID integration require a Path,
@@ -119,7 +122,7 @@ def _pdf_input_as_path(
     finally:
         try:
             temp_path.unlink(missing_ok=True)
-        except OSError:
+        except FileNotFoundError:
             pass
 
 
@@ -137,10 +140,18 @@ def extract_pdf(
         pdf_path,
         is_temporary,
     ):
-        classification = classify_pdf(
-            pdf_path,
-            max_pages=max_classifier_pages,
-        )
+        classification_error = None
+        try:
+            classification = classify_pdf(
+                pdf_path,
+                max_pages=max_classifier_pages,
+            )
+        except Exception as exc:
+            classification_error = exc
+            classification = {
+                "type": "unknown",
+                "classification_error": str(exc),
+            }
 
         doc_type = classification.get(
             "type",
@@ -148,14 +159,179 @@ def extract_pdf(
         )
 
         router = TextExtractorRouter()
+        primary_error = None
+        try:
+            document = router.extract(
+                pdf_path,
+                doc_type,
+                include_bibliography=include_bibliography,
+            )
+        except Exception as exc:
+            primary_error = exc
 
-        document = router.extract(
-            pdf_path,
-            doc_type,
-            include_bibliography=include_bibliography,
-        )
+        if (
+            primary_error is None
+            and not document.full_text.strip()
+            and not document.body_text.strip()
+        ):
+            primary_error = PDFExtractionError(
+                "No text could be extracted from the PDF",
+                build_extraction_diagnostics(
+                    document_status="failed",
+                    bibliography_status="extraction_failed",
+                    extractor=document.extractor,
+                    classification=classification,
+                    reason="No text could be extracted from the PDF",
+                ),
+            )
+
+        if primary_error is not None:
+            if doc_type != "unknown":
+                try:
+                    document = router.fallback_extractor.extract(
+                        pdf_path,
+                        "unknown",
+                        include_bibliography=include_bibliography,
+                    )
+                except Exception as fallback_error:
+                    fallback_diagnostics = (
+                        fallback_error.diagnostics
+                        if isinstance(fallback_error, PDFExtractionError)
+                        else build_extraction_diagnostics(
+                            bibliography_status="extraction_failed",
+                            extractor="fallback",
+                            classification=classification,
+                        )
+                    )
+                    errors = list(fallback_diagnostics.get("errors", []))
+                    if isinstance(primary_error, PDFExtractionError):
+                        errors.extend(primary_error.diagnostics.get("errors", []))
+                    if classification_error is not None:
+                        errors.append(
+                            f"PDF classification failed: {classification_error}"
+                        )
+                    errors.append(
+                        f"{doc_type} extraction failed: {primary_error}"
+                    )
+                    errors.append(f"Fallback extraction failed: {fallback_error}")
+                    fallback_diagnostics.update({
+                        "document_status": "failed",
+                        "bibliography_status": "extraction_failed",
+                        "extractor": "fallback",
+                        "classification": classification,
+                        "errors": errors,
+                        "reason": (
+                            "Primary and fallback PDF extraction both failed"
+                        ),
+                    })
+                    extracted_text = getattr(
+                        fallback_error,
+                        "extracted_text",
+                        "",
+                    ) or getattr(primary_error, "extracted_text", "")
+                    raise PDFExtractionError(
+                        "PDF extraction failed after fallback",
+                        fallback_diagnostics,
+                        extracted_text=extracted_text,
+                    ) from fallback_error
+
+            else:
+                primary_diagnostics = (
+                    primary_error.diagnostics
+                    if isinstance(primary_error, PDFExtractionError)
+                    else build_extraction_diagnostics(
+                        bibliography_status="extraction_failed",
+                        extractor=doc_type,
+                    )
+                )
+                errors = list(primary_diagnostics.get("errors", []))
+                if classification_error is not None:
+                    errors.append(
+                        f"PDF classification failed: {classification_error}"
+                    )
+                errors.append(f"Fallback extraction failed: {primary_error}")
+                primary_diagnostics.update({
+                    "document_status": "failed",
+                    "bibliography_status": "extraction_failed",
+                    "classification": classification,
+                    "errors": errors,
+                    "reason": "Fallback PDF extraction failed",
+                })
+                raise PDFExtractionError(
+                    "PDF extraction failed",
+                    primary_diagnostics,
+                    extracted_text=getattr(primary_error, "extracted_text", ""),
+                ) from primary_error
+
+            fallback_diagnostics = document.metadata.setdefault(
+                "extraction_diagnostics",
+                build_extraction_diagnostics(
+                    bibliography_status=(
+                        "extracted" if document.bibliography.strip()
+                        else "not_found"
+                    ),
+                    extractor=document.extractor,
+                ),
+            )
+            fallback_diagnostics["document_status"] = "partial"
+            fallback_diagnostics.setdefault("errors", []).append(
+                f"{doc_type} extraction failed; used fallback: {primary_error}"
+            )
+            if classification_error is not None:
+                fallback_diagnostics["errors"].append(
+                    f"PDF classification failed: {classification_error}"
+                )
+            fallback_diagnostics["reason"] = (
+                "Primary extraction failed; local fallback produced text"
+            )
 
         document.metadata["classification"] = classification
+        if not document.full_text.strip() and not document.body_text.strip():
+            diagnostics = document.metadata.get(
+                "extraction_diagnostics",
+                build_extraction_diagnostics(
+                    document_status="failed",
+                    bibliography_status="extraction_failed",
+                    extractor=document.extractor,
+                    classification=classification,
+                    reason="No text could be extracted from the PDF",
+                ),
+            )
+            diagnostics.update({
+                "document_status": "failed",
+                "bibliography_status": "extraction_failed",
+                "classification": classification,
+                "reason": "No text could be extracted after fallback",
+            })
+            raise PDFExtractionError(
+                "No text could be extracted from the PDF after fallback",
+                diagnostics,
+            )
+
+        diagnostics = document.metadata.setdefault(
+            "extraction_diagnostics",
+            build_extraction_diagnostics(
+                bibliography_status=(
+                    "not_applicable"
+                    if doc_type == "presentation_slide"
+                    else "extracted"
+                    if document.bibliography.strip()
+                    else "not_found"
+                ),
+                extractor=document.extractor,
+                reason="",
+            ),
+        )
+        if not diagnostics.get("classification"):
+            diagnostics["classification"] = classification
+        if classification_error is not None:
+            diagnostics["document_status"] = "partial"
+            diagnostics.setdefault("errors", []).append(
+                f"PDF classification failed; used fallback: {classification_error}"
+            )
+            diagnostics["reason"] = (
+                "Classification failed; local fallback produced text"
+            )
 
         # Don't expose a meaningless temp path as the source filename.
         if is_temporary:

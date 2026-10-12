@@ -19,6 +19,7 @@ pybtex>=0.26.1
 # Additional core dependencies found in codebase
 pandas>=3.0.2
 pdfplumber>=0.11.9
+pdfminer.six>=20231228
 pymupdf>=1.27.2.3
 
 # Web UI backend dependencies
