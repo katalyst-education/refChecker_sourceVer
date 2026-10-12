@@ -6,8 +6,17 @@ Extracted from core.refchecker to improve modularity
 
 import os
 import logging
-from typing import Optional, Dict, Any
+import io
+import tempfile
+from typing import Optional, Dict, Any, BinaryIO
 from dataclasses import dataclass
+
+from .pdf_pipeline import ExtractedDocument, PDFExtractionError, extract_pdf
+from .pdf_pipeline.models import build_extraction_diagnostics
+from .pdf_pipeline.text_extractors.paper_helpers import (
+    assemble_document_text,
+    split_text_and_references,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +114,224 @@ class PDFProcessor:
         except Exception as e:
             logger.error(f"Error extracting text from PDF {pdf_path}: {e}")
             raise
+
+    def extract_document(
+        self,
+        source: (
+            str
+            | os.PathLike
+            | bytes
+            | bytearray
+            | io.BytesIO
+            | BinaryIO
+        ),
+        *,
+        include_bibliography: bool = False,
+    ) -> ExtractedDocument:
+        """Extract a structured PDF document, falling back to legacy pypdf.
+
+        ``include_bibliography`` controls only ``full_text``. The bibliography
+        field is retained independently whenever the pipeline can identify it.
+        """
+        original_position = None
+        pipeline_source = source
+        if hasattr(source, "read") and not isinstance(
+            source, (bytes, bytearray)
+        ):
+            try:
+                if hasattr(source, "tell"):
+                    original_position = source.tell()
+                if hasattr(source, "seek"):
+                    source.seek(0)
+                pipeline_source = source.read()
+            finally:
+                if original_position is not None and hasattr(source, "seek"):
+                    source.seek(original_position)
+            if not isinstance(pipeline_source, (bytes, bytearray)):
+                raise TypeError("PDF file-like input must return bytes")
+            pipeline_source = bytes(pipeline_source)
+
+        pipeline_error = None
+        try:
+            document = extract_pdf(
+                pipeline_source,
+                include_bibliography=include_bibliography,
+            )
+            unusable_reason = self._structured_document_problem(
+                document,
+                include_bibliography=include_bibliography,
+            )
+            if unusable_reason is None:
+                document.metadata.setdefault("pdf_processor", {})[
+                    "pipeline"
+                ] = {"status": "succeeded"}
+                return document
+            pipeline_error = ValueError(unusable_reason)
+        except Exception as exc:
+            pipeline_error = exc
+
+        temporary_path = None
+        try:
+            if isinstance(pipeline_source, (str, os.PathLike)):
+                legacy_path = os.fspath(pipeline_source)
+            else:
+                pdf_bytes = bytes(pipeline_source)
+                if not pdf_bytes:
+                    raise ValueError("PDF input is empty")
+                descriptor, temporary_name = tempfile.mkstemp(suffix=".pdf")
+                temporary_path = temporary_name
+                with os.fdopen(descriptor, "wb") as temporary_file:
+                    temporary_file.write(pdf_bytes)
+                legacy_path = temporary_name
+
+            legacy_text = self.extract_text_from_pdf(legacy_path)
+            try:
+                body_text, bibliography, references_debug = (
+                    split_text_and_references(legacy_text)
+                )
+                body_text, full_text = assemble_document_text(
+                    body_text,
+                    bibliography,
+                    include_bibliography,
+                    references_debug,
+                )
+                diagnostics = build_extraction_diagnostics(
+                    document_status="complete",
+                    bibliography_status=(
+                        "extracted"
+                        if bibliography.strip()
+                        else (
+                            "not_found"
+                            if references_debug.get("references_split_reason")
+                            in {
+                                "no_reference_heading_found",
+                                "no_late_reference_heading_found",
+                                "reference_heading_not_verified",
+                            }
+                            else "detection_failed"
+                        )
+                    ),
+                    extractor="legacy_pdf_processor",
+                    reason=references_debug.get(
+                        "references_split_reason", ""
+                    ),
+                )
+            except Exception as exc:
+                # Preserve all legacy text if structural separation itself fails.
+                body_text = legacy_text.strip()
+                full_text = body_text
+                bibliography = ""
+                diagnostics = build_extraction_diagnostics(
+                    document_status="partial",
+                    bibliography_status="detection_failed",
+                    extractor="legacy_pdf_processor",
+                    errors=[f"Bibliography split failed: {exc}"],
+                    reason="Legacy text retained without a reliable bibliography split",
+                )
+
+            title = self.extract_title_from_pdf(legacy_path) or os.path.splitext(
+                os.path.basename(legacy_path)
+            )[0]
+            if isinstance(pipeline_source, (str, os.PathLike)):
+                filename = os.path.basename(os.fspath(pipeline_source))
+            else:
+                filename = "<memory>"
+            fallback_document = ExtractedDocument(
+                file=filename,
+                doc_type="unknown",
+                extractor="legacy_pdf_processor",
+                title=title,
+                body_text=body_text,
+                bibliography=bibliography,
+                full_text=full_text,
+                pages=[],
+                sections=[],
+                metadata={
+                    "references": references_debug
+                    if "references_debug" in locals()
+                    else {},
+                    "extraction_diagnostics": diagnostics,
+                    "pdf_processor": {
+                        "pipeline": {
+                            "status": "failed",
+                            "error": str(pipeline_error),
+                        },
+                        "fallback": {
+                            "status": "succeeded",
+                            "method": "PDFProcessor.extract_text_from_pdf",
+                        },
+                    },
+                },
+            )
+            logger.warning(
+                "Structured PDF pipeline failed; used legacy extraction for %s: %s",
+                filename,
+                pipeline_error,
+            )
+            return fallback_document
+        except Exception as fallback_error:
+            pipeline_diagnostics = (
+                pipeline_error.diagnostics
+                if isinstance(pipeline_error, PDFExtractionError)
+                else build_extraction_diagnostics(
+                    document_status="failed",
+                    bibliography_status="extraction_failed",
+                    extractor="pdf_pipeline",
+                )
+            )
+            errors = list(pipeline_diagnostics.get("errors", []))
+            errors.append(f"PDF pipeline failed: {pipeline_error}")
+            errors.append(f"Legacy PDF extraction failed: {fallback_error}")
+            diagnostics = build_extraction_diagnostics(
+                document_status="failed",
+                bibliography_status="extraction_failed",
+                extractor="pdf_processor",
+                errors=errors,
+                reason="Structured and legacy PDF extraction both failed",
+            )
+            raise PDFExtractionError(
+                "PDF extraction failed in both pipeline and legacy fallback",
+                diagnostics,
+                extracted_text=getattr(
+                    pipeline_error,
+                    "extracted_text",
+                    "",
+                ),
+            ) from fallback_error
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+
+    @staticmethod
+    def _structured_document_problem(
+        document: Any,
+        *,
+        include_bibliography: bool,
+    ) -> Optional[str]:
+        if not isinstance(document, ExtractedDocument):
+            return "PDF pipeline returned an invalid document object"
+        if not (
+            document.body_text.strip()
+            or document.bibliography.strip()
+            or document.full_text.strip()
+        ):
+            return "PDF pipeline returned no usable text"
+        if (
+            not include_bibliography
+            and document.bibliography.strip()
+            and document.bibliography in document.full_text
+        ):
+            return "PDF pipeline included bibliography despite include_bibliography=False"
+        if (
+            include_bibliography
+            and document.bibliography.strip()
+            and document.bibliography not in document.full_text
+        ):
+            return "PDF pipeline omitted bibliography despite include_bibliography=True"
+        return None
     
     def create_local_file_paper(self, file_path: str, metadata: Optional[Dict[str, Any]] = None) -> Paper:
         """
