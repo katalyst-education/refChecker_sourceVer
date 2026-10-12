@@ -231,6 +231,8 @@ describe('useReferenceActions alternative suggestions', () => {
     expect(result.current.isSuggesting('uid:row-second')).toBe(false)
     expect(result.current.suggestFor).toEqual({
       ref_id: 'uid:row-second',
+      check_id: 17,
+      api_ref_id: 'uid:row-second',
       candidates: [],
     })
   })

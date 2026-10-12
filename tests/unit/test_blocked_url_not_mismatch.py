@@ -20,6 +20,32 @@ from refchecker.checkers.webpage_checker import WebPageChecker
 KIMI_URL = 'https://huggingface.co/moonshotai/Kimi-K3'
 
 
+@pytest.mark.parametrize('status', [None, 401, 403, 429, 500, 503, 404])
+def test_scholarly_url_access_failure_is_not_a_missing_page(status, monkeypatch):
+    from unittest.mock import Mock
+    from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
+
+    checker = WebPageChecker()
+    response = None if status is None else Mock(status_code=status)
+    monkeypatch.setattr(checker, '_respectful_request', lambda *args, **kwargs: response)
+    reference = {
+        'title': 'Guidelines for performing Systematic Literature Reviews in software engineering',
+        'venue': 'EBSE Technical Report EBSE-2007-01',
+        'url': 'https://www.semanticscholar.org/paper/bf3910a40028240b821790738896954638932e33',
+    }
+    data, errors, url = checker.verify_raw_url_for_unverified_reference(reference)
+    reason = checker.check_unverified_url_reference(reference)
+    assert data is None
+    assert reason == errors[0]['error_details']
+    message = EnhancedHybridReferenceChecker._url_failure_message(reason, url)
+    if status == 404:
+        assert 'Non-existent web page' in message
+    else:
+        assert 'could not be accessed' in message
+        assert 'Non-existent' not in message
+        assert 'does not reference' not in message
+
+
 @pytest.fixture
 def checker():
     return WebPageChecker()

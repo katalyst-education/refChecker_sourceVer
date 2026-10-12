@@ -34,6 +34,7 @@ missing fields as "no signal" rather than zero.
 """
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -111,6 +112,14 @@ def _short_id(openalex_url: Optional[str]) -> Optional[str]:
         tail = s.rsplit('/', 1)[-1]
         return tail or None
     return s
+
+
+def _openalex_work_id(value: Optional[str]) -> Optional[str]:
+    """Return a canonical OpenAlex Work ID when *value* contains one."""
+    short_id = _short_id(value)
+    if not short_id or not re.fullmatch(r"[Ww]\d+", short_id):
+        return None
+    return f"W{short_id[1:]}"
 
 
 def _extract_authors_with_orcid(authorships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -288,7 +297,9 @@ def build_enrichment(verified_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     ids = verified_data.get('ids') or {}
     if isinstance(ids, dict):
         if ids.get('openalex'):
-            enrichment['openalex_id'] = _short_id(ids['openalex'])
+            openalex_id = _openalex_work_id(ids['openalex'])
+            if openalex_id:
+                enrichment['openalex_id'] = openalex_id
         if ids.get('pmid'):
             enrichment['pubmed_id'] = str(ids['pmid']).rsplit('/', 1)[-1]
         if ids.get('pmcid'):
@@ -296,7 +307,9 @@ def build_enrichment(verified_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if ids.get('mag'):
             enrichment['mag_id'] = str(ids['mag'])
     if 'openalex_id' not in enrichment and verified_data.get('id'):
-        enrichment['openalex_id'] = _short_id(verified_data['id'])
+        openalex_id = _openalex_work_id(verified_data['id'])
+        if openalex_id:
+            enrichment['openalex_id'] = openalex_id
     s2_ext = verified_data.get('externalIds') or {}
     if isinstance(s2_ext, dict):
         if 'pubmed_id' not in enrichment and s2_ext.get('PubMed'):

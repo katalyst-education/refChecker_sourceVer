@@ -85,6 +85,20 @@ def test_build_enrichment_existing_counts_still_normalized():
     assert e["publication_type"] == "journal-article"
 
 
+def test_openalex_link_requires_an_openalex_work_id():
+    """Source-specific record IDs must never be rendered as OpenAlex IDs."""
+    econbiz = build_enrichment({"id": "10013548914", "_matched_database": "EconBiz"})
+    assert "openalex_id" not in econbiz
+    assert "openalex" not in econbiz.get("links", {})
+
+    direct_work = build_enrichment({"id": "https://openalex.org/w1234567890"})
+    assert direct_work["openalex_id"] == "W1234567890"
+    assert direct_work["links"]["openalex"] == "https://openalex.org/W1234567890"
+
+    ids_work = build_enrichment({"ids": {"openalex": "https://openalex.org/W9876543210"}})
+    assert ids_work["openalex_id"] == "W9876543210"
+
+
 def test_build_enrichment_funders_from_grants():
     e = build_enrichment({"grants": [{"funder_display_name": "NIH"}, {"funder_display_name": "NSF"}]})
     assert e["has_funding"] is True

@@ -62,6 +62,38 @@ class GoogleBooksReferenceChecker:
         if wait:
             time.sleep(wait)
 
+    def _log_key_rejection(self, response: requests.Response, attempt: int) -> None:
+        """Log a structured, credential-safe explanation for a rejected key."""
+        error: Dict[str, Any] = {}
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                candidate = payload.get("error")
+                if isinstance(candidate, dict):
+                    error = candidate
+        except (ValueError, AttributeError):
+            pass
+
+        reasons = [
+            str(item.get("reason"))
+            for item in error.get("errors", [])
+            if isinstance(item, dict) and item.get("reason")
+        ]
+        message = str(error.get("message") or "Google Books rejected the API key")
+        if self.api_key:
+            message = message.replace(self.api_key, "[REDACTED]")
+
+        logger.error(
+            "GOOGLE_BOOKS_API_TRACE event=key_rejected http_status=%d "
+            "attempt=%d google_status=%r google_code=%r reasons=%s message=%r",
+            response.status_code,
+            attempt,
+            error.get("status"),
+            error.get("code"),
+            reasons or None,
+            message,
+        )
+
     @staticmethod
     def _isbn_from_reference(reference: Dict[str, Any]) -> Optional[str]:
         for key in ("isbn", "ISBN"):
@@ -164,6 +196,8 @@ class GoogleBooksReferenceChecker:
                 response.status_code,
                 attempt + 1,
             )
+            if response.status_code in {400, 401, 403}:
+                self._log_key_rejection(response, attempt + 1)
             if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
                 try:

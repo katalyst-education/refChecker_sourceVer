@@ -51,13 +51,13 @@ const findReferencePosition = (references, updated, referenceKey) => {
   return indexHits.length === 1 ? indexHits[0][1] : -1
 }
 
-const patchCompletedReference = (operation, reference) => {
+export const patchCompletedReference = (operation, reference) => {
   if (!operation?.check_id || !reference) return
   const history = useHistoryStore.getState()
   const historyPosition = findReferencePosition(
     history.selectedCheck?.results, reference, operation.reference_key,
   )
-  if (historyPosition >= 0) {
+  if (history.selectedCheck?.id === operation.check_id && historyPosition >= 0) {
     history.updateHistoryReference?.(operation.check_id, historyPosition, reference)
   }
   const check = useCheckStore.getState()

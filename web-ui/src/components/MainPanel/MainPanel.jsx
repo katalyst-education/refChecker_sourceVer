@@ -110,14 +110,18 @@ export default function MainPanel() {
   const mainRef = useRef(null)
   const contentRef = useRef(null)
   const [showScrollTop, setShowScrollTop] = useState(false)
-  const [resultsTab, setResultsTab] = useState('references') // references | corrections | graph
+  const [workflow, setWorkflow] = useState('check')
+  const [checkTab, setCheckTab] = useState('references')
+  const [exploreTab, setExploreTab] = useState('suggested')
+  const resultsTab = workflow === 'check' ? checkTab : exploreTab
+  const setResultsTab = workflow === 'check' ? setCheckTab : setExploreTab
   const [globalView, setGlobalView] = useState(null) // 'seen' | null — overrides the per-check views when set
   const [showExplore, setShowExplore] = useState(false) // ResearchRabbit-style fullscreen Explore graph overlay (#68)
 
   // When a citation highlight in the document links back to its reference,
   // make sure the References tab is showing so the target card can flash.
   useEffect(() => {
-    const onFocus = () => { setGlobalView(null); setResultsTab('references') }
+    const onFocus = () => { setGlobalView(null); setWorkflow('check'); setCheckTab('references'); setShowExplore(false) }
     window.addEventListener('refchecker:focus-reference', onFocus)
     return () => window.removeEventListener('refchecker:focus-reference', onFocus)
   }, [])
@@ -376,8 +380,16 @@ export default function MainPanel() {
           <StatusSection />
         )}
 
+        {showContent && (
+          <div className="flex flex-wrap items-center gap-1 border-b" style={{ borderColor: 'var(--color-border)' }} role="tablist" aria-label="Paper workflow">
+            <ResultsTabButton active={workflow === 'check'} onClick={() => setWorkflow('check')} label="Check references" />
+            <ResultsTabButton active={workflow === 'explore'} onClick={() => setWorkflow('explore')} label="Explore literature" />
+          </div>
+        )}
+
         {/* Stats Section — minimal health chip sits in its header row */}
         {showContent && (
+          <div hidden={workflow !== 'check'}>
           <StatsSection
             stats={displayStats}
             isComplete={isComplete}
@@ -392,31 +404,25 @@ export default function MainPanel() {
               </>
             }
           />
+          </div>
         )}
 
-        {/* On-demand article tools in a 2×2 button grid — each pill keeps its
-            cell and never shifts; clicking one opens its details full-width in
-            the shared region directly below the grid (ActionPanelGrid owns the
-            accordion). Capped at 760px so the pills don't stretch edge-to-edge. */}
+        {/* Checking tools stay mounted when switching workflows. */}
         {showContent && isComplete && (
+          <div hidden={workflow !== 'check'}>
           <ActionPanelGrid>
             {/*
              * Per-article remount keys (#bug: cross-article result bleed).
              * In a batch, these on-demand panels keep their fetched results
              * in local state. Without a key tied to the selected article,
              * React reuses the same instance when switching articles, so
-             * article A's Retraction / Gap-finder / Citation-numbering
+             * article A's Retraction / Citation-numbering
              * results leak onto article B. Keying each on `selectedCheckId`
              * forces a fresh mount per article — every article gets its own
              * clean state and never inherits a sibling's results.
              */}
             <RetractionCheck
               key={`ret-${selectedCheckId}`}
-              checkId={(selectedCheckId && selectedCheckId > 0) ? selectedCheckId : currentCheckId}
-              references={displayRefs}
-            />
-            <GapFinder
-              key={`gap-${selectedCheckId}`}
               checkId={(selectedCheckId && selectedCheckId > 0) ? selectedCheckId : currentCheckId}
               references={displayRefs}
             />
@@ -429,18 +435,24 @@ export default function MainPanel() {
               checkId={(selectedCheckId && selectedCheckId > 0) ? selectedCheckId : currentCheckId}
             />
           </ActionPanelGrid>
+          </div>
         )}
 
-        {/* References / Corrections tabs */}
+        {/* Each workflow remembers its own selected results view. */}
         {showContent && (
           <div>
             <div
-              className="flex items-center gap-1 mb-3 border-b"
+              className="flex flex-wrap items-center gap-1 mb-3 border-b"
               style={{ borderColor: 'var(--color-border)' }}
               role="tablist"
               aria-label="Results view"
             >
               {(() => {
+                if (workflow === 'explore') return [
+                  ['suggested', 'Suggested papers', null],
+                  ['similar', 'Related papers', null],
+                  ['graph', 'Citation graph', displayRefs.length],
+                ]
                 // Reflect the active Summary-chip filter in the tab pill
                 // counts, not just in the in-page header. The corrections
                 // count must apply the SAME style filter the Summary chips
@@ -481,8 +493,6 @@ export default function MainPanel() {
                 return [
                   ['references', 'References', refsForCount.length],
                   ['corrections', 'Corrections', correctionsCount],
-                  ['graph', 'Graph', refsForCount.length],
-                  ['similar', 'Similar Papers', null],
                 ]
               })().map(([key, label, count]) => (
                 <ResultsTabButton
@@ -520,6 +530,21 @@ export default function MainPanel() {
                 references={displayRefs}
                 isCheckComplete={isComplete}
               />
+            </div>
+            <div hidden={resultsTab !== 'suggested'}>
+              <h2 className="text-sm font-medium mb-1">Potentially relevant papers</h2>
+              <p className="text-xs mb-3" style={{ color: 'var(--color-text-secondary)' }}>
+                Frequently co-cited works outside your bibliography. Suggestions to consider, separate from reference-check findings.
+              </p>
+              {isComplete ? (
+                <GapFinder
+                  key={`gap-${selectedCheckId}`}
+                  checkId={(selectedCheckId && selectedCheckId > 0) ? selectedCheckId : currentCheckId}
+                  references={displayRefs}
+                />
+              ) : (
+                <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>Suggestions will be available when reference checking finishes.</p>
+              )}
             </div>
             <div style={{ display: resultsTab === 'graph' ? 'block' : 'none' }}>
               <GraphView references={displayRefs} paperTitle={displayPaperTitle} />

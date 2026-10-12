@@ -27,7 +27,7 @@ class TestRawUrlVerification(unittest.TestCase):
     def test_nonexistent_page_returns_correct_error(self, mock_request):
         """Test that non-existent pages return the correct error message."""
         # Mock a 404 response
-        mock_request.return_value = None
+        mock_request.return_value = Mock(status_code=404)
         
         reference = {
             'title': 'Test Paper',

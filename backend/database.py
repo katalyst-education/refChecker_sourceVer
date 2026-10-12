@@ -473,6 +473,25 @@ class Database:
                 )
             """)
 
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS reference_investigation_evidence (
+                    id TEXT PRIMARY KEY,
+                    check_id INTEGER NOT NULL REFERENCES check_history(id),
+                    reference_uid TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_reference_evidence_check ON reference_investigation_evidence(check_id, reference_uid)")
+            await db.execute("""
+                CREATE TRIGGER IF NOT EXISTS delete_reference_investigation_evidence
+                AFTER DELETE ON check_history
+                BEGIN
+                    DELETE FROM reference_investigation_evidence WHERE check_id = OLD.id;
+                END
+            """)
+
             # LLM configurations table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS llm_configs (
@@ -2716,6 +2735,99 @@ class Database:
                 )
             await db.commit()
             return cursor.rowcount > 0
+
+    async def commit_reference_investigation(
+        self, check_id: int, expected: Dict[str, Any], updated: Optional[Dict[str, Any]],
+        evidence: Dict[str, Any], user_id: Optional[int] = None,
+    ) -> str:
+        """Atomically compare and update one row and retain its investigation.
+
+        BEGIN IMMEDIATE protects the read-modify-write of the JSON list. Other
+        rows are read inside the transaction, not copied from the initial read.
+        Even an unsaved/stale investigation retains its evidence for audit.
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            query = "SELECT results_json FROM check_history WHERE id = ?"
+            params = [check_id]
+            if user_id is not None:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            row = await (await conn.execute(query, params)).fetchone()
+            if row is None:
+                await conn.rollback()
+                return 'not_found'
+            results = _sanitize_loaded_reference_results(json.loads(row[0] or '[]'))
+            uid = expected.get('ref_uid')
+            matches = [i for i, ref in enumerate(results) if (
+                ref.get('ref_uid') == uid if uid else
+                ref.get('id') == expected.get('id') if expected.get('id') is not None else
+                ref.get('index') == expected.get('index') and ref.get('title') == expected.get('title')
+            )]
+            unchanged = len(matches) == 1 and results[matches[0]] == expected
+            decision = 'reference_changed' if not unchanged else 'saved' if updated is not None else 'recorded'
+            if decision == 'saved':
+                results[matches[0]] = updated
+                results = ensure_reference_uids(results)
+                buckets = _compute_reference_buckets_from_results(results, is_complete=True, stored_total_refs=len(results))
+                columns = ('total_refs', 'errors_count', 'warnings_count', 'suggestions_count',
+                           'unverified_count', 'refs_with_errors', 'refs_with_warnings_only',
+                           'refs_with_suggestions_only', 'refs_verified')
+                await conn.execute(
+                    "UPDATE check_history SET results_json = ?, " + ', '.join(f'{name} = ?' for name in columns) + " WHERE id = ?",
+                    [json.dumps(results, default=str), *(buckets[name] for name in columns), check_id],
+                )
+            await conn.execute(
+                "INSERT INTO reference_investigation_evidence (id, check_id, reference_uid, decision, evidence_json) VALUES (?, ?, ?, ?, ?)",
+                (evidence['id'], check_id, str(uid or expected.get('id') or expected.get('index') or ''),
+                 decision, json.dumps({**evidence, 'save_decision': decision}, default=str)),
+            )
+            await conn.commit()
+            return decision
+
+    async def list_reference_investigations(
+        self,
+        check_id: int,
+        reference_uid: str,
+        user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return a reference's investigation audit trail, newest first.
+
+        Joining through ``check_history`` applies the same ownership boundary as
+        the rest of the history APIs.  The evidence payload remains intact so
+        callers can render both saved confirmations and inconclusive attempts.
+        """
+        query = """
+            SELECT evidence.id, evidence.decision, evidence.evidence_json,
+                   evidence.created_at
+            FROM reference_investigation_evidence AS evidence
+            JOIN check_history AS history ON history.id = evidence.check_id
+            WHERE evidence.check_id = ? AND evidence.reference_uid = ?
+        """
+        params: List[Any] = [check_id, reference_uid]
+        if user_id is not None:
+            query += " AND history.user_id = ?"
+            params.append(user_id)
+        query += " ORDER BY evidence.created_at DESC, evidence.rowid DESC"
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            rows = await (await conn.execute(query, params)).fetchall()
+
+        investigations = []
+        for row in rows:
+            try:
+                evidence = json.loads(row["evidence_json"] or "{}")
+            except (TypeError, ValueError):
+                evidence = {}
+            investigations.append({
+                "id": row["id"],
+                "decision": row["decision"],
+                "created_at": row["created_at"],
+                "evidence": evidence if isinstance(evidence, dict) else {},
+            })
+        return investigations
 
     async def clear_verification_cache(self) -> int:
         """Clear all cached verification results. Returns count of deleted entries."""

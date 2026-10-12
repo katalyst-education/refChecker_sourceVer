@@ -913,15 +913,14 @@ class WebPageChecker:
         # Make request to check if page exists
         response = self._respectful_request(web_url)
         if response is None:
-            return "non-existent web page"
+            return "paper not verified; cited URL could not be accessed"
         
         if response.status_code == 404:
             return "non-existent web page"
         elif response.status_code == 403:
-            # For blocked resources, we can't check content but assume page exists
-            return "paper not verified but URL references paper"
+            return "paper not verified; cited URL could not be accessed"
         elif response.status_code != 200:
-            return "non-existent web page"
+            return "paper not verified; cited URL could not be accessed"
         
         try:
             # Parse HTML content to search for title
@@ -1005,11 +1004,14 @@ class WebPageChecker:
         # Make request to check if page exists
         response = self._respectful_request(web_url)
         if response is None:
-            return None, [{"error_type": "unverified", "error_details": "non-existent web page"}], web_url
+            return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
         
         if response.status_code == 404:
             return None, [{"error_type": "unverified", "error_details": "non-existent web page"}], web_url
         elif response.status_code == 403:
+            # A blocked scholarly landing page cannot confirm the cited work.
+            if self.is_scholarly_source_url(web_url):
+                return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
             # For blocked resources, we can't check content but assume page exists
             venue_field = reference.get('journal') or reference.get('venue') or reference.get('booktitle')
             if not venue_field or self._is_web_content_venue(venue_field, web_url):
@@ -1030,7 +1032,7 @@ class WebPageChecker:
             else:
                 return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
         elif response.status_code != 200:
-            return None, [{"error_type": "unverified", "error_details": "non-existent web page"}], web_url
+            return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
         
         try:
             # Parse HTML content to search for title

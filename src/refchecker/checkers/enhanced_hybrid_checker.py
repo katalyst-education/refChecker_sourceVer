@@ -769,6 +769,12 @@ class EnhancedHybridReferenceChecker:
             'arxiv': data.get('arxiv_id') or external.get('ArXiv') or external.get('arxiv'),
             'pmid': data.get('pmid') or external.get('PubMed') or external.get('PMID'),
         }
+        if not values['arxiv']:
+            from refchecker.utils.url_utils import extract_arxiv_id_from_url
+            for field in ('url', 'venue'):
+                values['arxiv'] = extract_arxiv_id_from_url(data.get(field))
+                if values['arxiv']:
+                    break
         normalized = {
             kind: cls._normalize_identifier(kind, value)
             for kind, value in values.items()
@@ -1379,8 +1385,11 @@ class EnhancedHybridReferenceChecker:
                 # for DOI/ArXiv-anchored matches — those identifiers are
                 # authoritative and any year/author mismatch is a real
                 # error we want to surface, not a wrong-paper drift.
-                if self._is_wrong_paper_match(reference, verified_data, errors, api_name):
-                    identity = self._assess_candidate_identity(reference, verified_data)
+                # Apply the reconciliation identity gate before any early
+                # return or incomplete-result fallback can accept this candidate.
+                # Normal scans and search-all must reject the same wrong works.
+                identity = self._assess_candidate_identity(reference, verified_data)
+                if identity.get('status') == 'wrong_match' or self._is_wrong_paper_match(reference, verified_data, errors, api_name):
                     logger.info(
                         "[DATABASE_TRACE] stage=result database=%s status=rejected_wrong_paper "
                         "duration_ms=%d candidate=%r errors=%r",
@@ -1391,7 +1400,7 @@ class EnhancedHybridReferenceChecker:
                     )
                     logger.debug(
                         f"Enhanced Hybrid: {api_name} returned wrong-paper match "
-                        f"(year+author both off) — rejecting and falling through to next API"
+                        f"({identity.get('reason')}) — rejecting and falling through to next API"
                     )
                     self._emit_database_event(
                         database=api_name, label=self._format_api_name(api_name),

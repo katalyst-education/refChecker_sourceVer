@@ -206,7 +206,7 @@ VERIFICATION_DERIVED_FIELDS = frozenset({
     "supporting_evidence", "verified_via_website", "enrichment",
     "publication_year_assessment", "corrected_reference",
     "_raw_errors", "from_cache", "from_fuzzy_cache",
-    "fuzzy_match_score", "verified_title", "verified_authors", "verified_year",
+    "verification_evidence", "fuzzy_match_score", "verified_title", "verified_authors", "verified_year",
     "verified_venue", "verified_doi", "verified_arxiv_id", "verified_pmid",
 })
 

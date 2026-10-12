@@ -327,6 +327,10 @@ export const removeReferenceFromCheck = (checkId, refId) =>
   api.delete(`/history/${checkId}/references/${encodeURIComponent(refId)}`)
 export const suggestAlternativeReference = (checkId, refId) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/suggest-alternative`)
+export const investigateReferenceSuggestion = (checkId, refId, candidate) =>
+  api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/investigate-suggestion`, candidate, { timeout: 0 })
+export const getReferenceInvestigations = (checkId, refId) =>
+  api.get(`/history/${checkId}/references/${encodeURIComponent(refId)}/investigations`)
 export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
   api.post(
     `/history/${checkId}/references/${encodeURIComponent(refId)}/verify`,

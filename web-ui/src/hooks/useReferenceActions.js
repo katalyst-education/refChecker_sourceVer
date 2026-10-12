@@ -281,7 +281,7 @@ export default function useReferenceActions() {
     try {
       const response = await suggestAlternativeReference(selectedCheckId, apiRefId)
       if (latestSuggestRef.current === ident) {
-        setSuggestFor({ ref_id: ident, candidates: response.data?.candidates || [] })
+        setSuggestFor({ ref_id: ident, check_id: selectedCheckId, api_ref_id: apiRefId, candidates: response.data?.candidates || [] })
       }
     } catch (error) {
       alert(error?.response?.data?.detail || error?.message || 'Suggest failed')

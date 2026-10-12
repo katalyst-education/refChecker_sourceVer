@@ -9322,18 +9322,8 @@ async def suggest_alternative_reference(
             logger.debug("OpenAlex suggest-alternative fallback failed: %s", error)
 
     # Crossref and OpenAlex commonly return the same work.
-    seen_candidate_keys = set()
-    deduplicated_candidates = []
-    for candidate in candidates:
-        candidate_key = (
-            (candidate.get("doi") or "").lower()
-            or (candidate.get("title") or "").strip().lower()[:80]
-        )
-        if not candidate_key or candidate_key in seen_candidate_keys:
-            continue
-        seen_candidate_keys.add(candidate_key)
-        deduplicated_candidates.append(candidate)
-    candidates = deduplicated_candidates[:8]
+    from refchecker.utils.suggestion_ranking import merge_reference_suggestions
+    candidates = merge_reference_suggestions(candidates)[:8]
 
     # Prefer candidates that cite works also cited by the checked paper.
     try:
@@ -9405,7 +9395,12 @@ async def suggest_alternative_reference(
                     "Given the possibly inaccurate reference below, identify up to 3 REAL papers "
                     "the author may have meant. Return a strict JSON array with fields: title, "
                     "authors (array of strings), year (integer), venue, doi (or null), "
-                    "arxiv_id (or null), and reason (one short sentence).\n\n"
+                    "arxiv_id (or null), url (or null), and reason (one short sentence).\n"
+                    "When known, provide a direct https URL to the work's publisher page, "
+                    "institutional repository record, or original report/PDF. This is especially "
+                    "useful for technical reports without a DOI. Do not invent or guess URLs "
+                    "or identifiers; use null when unknown. A URL is a lead for subsequent "
+                    "verification, not proof that the work exists.\n\n"
                     f"Title: {title}\nAuthors: {authors_text}\n"
                     f"Year: {target.get('year') or 'unknown'}\n"
                     f"Venue: {target.get('venue') or 'unknown'}\n\n"
@@ -9439,6 +9434,23 @@ async def suggest_alternative_reference(
                                     continue
                                 doi = item.get("doi")
                                 arxiv_id = item.get("arxiv_id")
+                                source_url = item.get("url")
+                                if isinstance(source_url, str):
+                                    source_url = source_url.strip()
+                                    try:
+                                        from urllib.parse import urlsplit
+                                        parsed_url = urlsplit(source_url)
+                                        if (
+                                            parsed_url.scheme not in {"http", "https"}
+                                            or not parsed_url.hostname
+                                            or parsed_url.username or parsed_url.password
+                                            or any(char.isspace() for char in source_url)
+                                        ):
+                                            source_url = None
+                                    except ValueError:
+                                        source_url = None
+                                else:
+                                    source_url = None
                                 llm_candidates.append({
                                     "title": item["title"],
                                     "authors": item.get("authors") or [],
@@ -9447,9 +9459,9 @@ async def suggest_alternative_reference(
                                     "doi": doi,
                                     "arxiv_id": arxiv_id,
                                     "url": (
-                                        f"https://doi.org/{doi}" if doi
+                                        source_url or (f"https://doi.org/{doi}" if doi
                                         else f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id
-                                        else None
+                                        else None)
                                     ),
                                     "reason": item.get("reason"),
                                     "source": "llm",
@@ -9457,11 +9469,180 @@ async def suggest_alternative_reference(
     except Exception as error:
         logger.debug("LLM suggest-alternative augmentation skipped: %s", error)
 
+    from refchecker.utils.suggestion_ranking import rank_reference_suggestions
     return {
         "reference_id": ref_id,
         "cited_title": title,
-        "candidates": llm_candidates + candidates,
+        "candidates": rank_reference_suggestions(target, llm_candidates + candidates),
         "rate_limited": semantic_scholar_rate_limited,
+    }
+
+
+class _InvestigateSuggestionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=2000)
+    authors: List[str] = Field(default_factory=list)
+    year: Optional[int] = None
+    venue: Optional[str] = None
+    doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    url: Optional[str] = None
+    source: Optional[str] = None
+    sources: List[str] = Field(default_factory=list)
+    links: List[Dict[str, Any]] = Field(default_factory=list)
+    observations: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@app.post("/api/history/{check_id}/references/{ref_id}/investigate-suggestion")
+async def investigate_reference_suggestion(
+    check_id: int, ref_id: str, body: _InvestigateSuggestionRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Investigate a candidate and save confirmations of unchanged cited metadata."""
+    owner_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=owner_id)
+    if refs is None or _find_ref_index(refs, ref_id) is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+    target = dict(refs[_find_ref_index(refs, ref_id)])
+    candidate = body.model_dump(exclude_none=True, exclude={'source', 'sources', 'links', 'observations'})
+    if body.url:
+        from urllib.parse import urlsplit
+        try:
+            parsed = urlsplit(body.url)
+            valid = parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
+        except ValueError:
+            valid = False
+        if not valid:
+            raise HTTPException(status_code=422, detail="Source link must be an HTTP or HTTPS URL")
+    cancel_event = threading.Event()
+    events = []
+    async with _reference_search_global_lane:
+        async with _reference_search_lane(owner_id):
+            checker = await _create_reference_search_checker(
+                semantic_scholar_api_key=await _resolve_semantic_scholar_api_key(None),
+                google_books_api_key=await _resolve_google_books_api_key(None),
+                paperclip_api_key=await _resolve_paperclip_api_key(None),
+                progress_callback=events.append, cancel_event=cancel_event,
+            )
+
+            def run_verify():
+                from refchecker.core.refchecker import ArxivReferenceChecker
+                from refchecker.llm import usage_tracker
+                usage_tracker.set_current_check(str(check_id))
+                with usage_tracker.FlowScope("suggest"):
+                    shared = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
+                    shared.non_arxiv_checker = checker
+                    return shared.verify_reference_standard(None, dict(candidate), force_all_databases=True)
+
+            try:
+                findings, url, verified_data = await asyncio.wait_for(
+                    asyncio.to_thread(run_verify), timeout=REFERENCE_SEARCH_DEADLINE_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(status_code=504, detail="Suggestion investigation timed out")
+            finally:
+                cancel_event.set()
+    from refchecker.utils.reference_evidence import compare_reference_evidence
+    from copy import deepcopy
+    retrieved_metadata = deepcopy(verified_data)
+    comparison = compare_reference_evidence(target, retrieved_metadata)
+    # Candidate-relative bibliographic discrepancies are replaced by findings
+    # comparing the original citation directly with the retrieved record.
+    bibliographic_fields = ('title', 'author', 'year', 'venue', 'doi', 'arxiv', 'pmid', 'isbn')
+    original_findings = comparison['findings'] + [
+        finding for finding in (findings or [])
+        if not str(finding.get('error_type') or finding.get('warning_type') or '').lower().startswith(bibliographic_fields)
+    ]
+    projection = project_verification_result(candidate, verified_data, findings, url, enrich_enabled=True)
+    original_projection = project_verification_result(target, deepcopy(retrieved_metadata), original_findings, url, enrich_enabled=True)
+    web_metadata = (verified_data or {}).get('web_metadata')
+    accessibility_only = bool(web_metadata) and (
+        web_metadata.get('access_blocked') or not web_metadata.get('page_title')
+    )
+    confirmed_original = (
+        bool(verified_data)
+        and original_projection.get('status') == 'verified'
+        and not accessibility_only
+        and comparison['confirmed']
+    )
+    saved = False
+    cache_saved = False
+    updated = None
+    evidence = {
+        'id': str(uuid.uuid4()),
+        'retrieved_at': datetime.now(timezone.utc).isoformat(),
+        'method': 'shared_verifier_all_databases',
+        'original_citation': target,
+        'selected_suggestion': body.model_dump(exclude_none=True),
+        'source_url': url,
+        'matched_database': (retrieved_metadata or {}).get('_matched_database'),
+        'retrieved_metadata': retrieved_metadata,
+        'database_events': events,
+        'candidate_findings': findings or [],
+        'comparison': comparison,
+        'accepted_changes': [],
+    }
+    if confirmed_original:
+        updated = merge_fresh_verification(target, original_projection)
+        updated['verification_evidence'] = {
+            key: evidence[key] for key in ('id', 'retrieved_at', 'method', 'source_url', 'matched_database', 'retrieved_metadata', 'comparison', 'accepted_changes')
+        }
+    decision = await db.commit_reference_investigation(check_id, target, updated, evidence, user_id=owner_id)
+    if decision == 'reference_changed':
+        raise HTTPException(status_code=409, detail="The original reference changed during investigation; evidence was retained but the reference was not overwritten")
+    if decision == 'not_found':
+        raise HTTPException(status_code=404, detail="Check not found")
+    saved = decision == 'saved'
+    if saved:
+        try:
+            cache_saved = bool(await db.upsert_verified_reference(updated, check_id=check_id))
+        except Exception:
+            logger.exception("Could not cache confirmed suggestion for check %s", check_id)
+    return {
+        "reference": projection,
+        "original_comparison": comparison,
+        "evidence_id": evidence['id'],
+        "retrieved_at": evidence['retrieved_at'],
+        "updated_reference": updated,
+        "sources": list({event['database']: event for event in events if event.get('database')}.values()),
+        "saved": saved,
+        "cache_saved": cache_saved,
+        "save_reason": (
+            "confirmed_original" if saved else
+            "source_accessibility_only" if accessibility_only else
+            "retrieved_metadata_differs" if any(field['status'] == 'different' for field in comparison['fields']) else
+            "insufficient_evidence" if any(field['status'] == 'unknown' for field in comparison['fields']) else
+            "not_confirmed"
+        ),
+    }
+
+
+@app.get("/api/history/{check_id}/references/{ref_id}/investigations")
+async def list_reference_investigations(
+    check_id: int,
+    ref_id: str,
+    current_user: UserInfo = Depends(require_user),
+):
+    """Return the persisted investigation trail for one reference."""
+    owner_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=owner_id)
+    index = _find_ref_index(refs or [], ref_id)
+    if refs is None or index is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+
+    reference = refs[index]
+    reference_uid = str(
+        reference.get("ref_uid")
+        or reference.get("id")
+        or reference.get("index")
+        or ""
+    )
+    return {
+        "reference_id": ref_id,
+        "investigations": await db.list_reference_investigations(
+            check_id,
+            reference_uid,
+            user_id=owner_id,
+        ),
     }
 
 

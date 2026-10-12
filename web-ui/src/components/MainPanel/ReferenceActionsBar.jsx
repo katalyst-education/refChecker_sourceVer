@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { openExternal } from '../../utils/tauriBridge'
 import { useStyleStore } from '../../stores/useStyleStore'
+import { patchCompletedReference } from '../../stores/useReferenceSearchStore'
 import {
   CITATION_STYLE_DEFAULTS,
   CITATION_STYLES,
@@ -10,9 +11,11 @@ import {
   beginAuthenticatedSourceSession,
   completeAuthenticatedSourceSession,
   resolveDoi,
+  getReferenceInvestigations,
+  investigateReferenceSuggestion,
 } from '../../utils/api'
 import ReferenceLinksList from '../ReferenceCard/ReferenceLinksList'
-import { collectCandidateLinks } from '../../utils/referenceLinks'
+import { collectCandidateLinks, collectReferenceLinks } from '../../utils/referenceLinks'
 
 const databaseStatusLabel = (status) => ({
   matched: 'Match',
@@ -274,6 +277,61 @@ export function AddReferencePanel({ newRef, setNewRef, busyKey, onSave, onCancel
 export function SuggestAltPanel({ suggestFor, onClose }) {
   const format = useStyleStore(s => s.format)
   const styleOptions = useStyleStore(s => s.styleOptions)
+  const [investigations, setInvestigations] = useState({})
+  const [history, setHistory] = useState({ status: 'idle', items: [] })
+  const [historyRefresh, setHistoryRefresh] = useState(0)
+  const generation = useRef(0)
+  const historyGeneration = useRef(0)
+  useEffect(() => {
+    generation.current += 1
+    setInvestigations({})
+    return () => { generation.current += 1 }
+  }, [suggestFor?.check_id, suggestFor?.api_ref_id])
+  useEffect(() => {
+    const currentGeneration = ++historyGeneration.current
+    if (!suggestFor?.check_id || !suggestFor?.api_ref_id) {
+      setHistory({ status: 'ready', items: [] })
+      return undefined
+    }
+    setHistory({ status: 'loading', items: [] })
+    getReferenceInvestigations(suggestFor.check_id, suggestFor.api_ref_id)
+      .then(response => {
+        if (currentGeneration === historyGeneration.current) {
+          setHistory({ status: 'ready', items: response.data?.investigations || [] })
+        }
+      })
+      .catch(error => {
+        if (currentGeneration === historyGeneration.current) {
+          setHistory({
+            status: 'failed',
+            items: [],
+            message: error?.response?.data?.detail || error?.message || 'Investigation history could not be loaded',
+          })
+        }
+      })
+    return () => { historyGeneration.current += 1 }
+  }, [suggestFor?.check_id, suggestFor?.api_ref_id, historyRefresh])
+  const investigate = async (candidate, index) => {
+    const currentGeneration = generation.current
+    setInvestigations(prev => ({ ...prev, [index]: { status: 'running' } }))
+    try {
+      const response = await investigateReferenceSuggestion(suggestFor.check_id, suggestFor.api_ref_id, candidate)
+      if (response.data?.saved && response.data?.updated_reference) {
+        patchCompletedReference({ check_id: suggestFor.check_id, reference_key: suggestFor.ref_id }, response.data.updated_reference)
+      }
+      if (currentGeneration === generation.current) {
+        setInvestigations(prev => ({ ...prev, [index]: { status: 'completed', ...response.data } }))
+        setHistoryRefresh(value => value + 1)
+      }
+    } catch (error) {
+      if (currentGeneration === generation.current) {
+        setInvestigations(prev => ({ ...prev, [index]: { status: 'failed', message: error?.response?.data?.detail || error?.message || 'Investigation failed' } }))
+        // A 409 can still have created an audit record for the concurrent edit.
+        // Reloading also keeps the panel authoritative after any server response.
+        setHistoryRefresh(value => value + 1)
+      }
+    }
+  }
   if (!suggestFor) return null
 
   const styleLabel = CITATION_STYLES.find(s => s.id === format)?.label
@@ -324,12 +382,19 @@ export function SuggestAltPanel({ suggestFor, onClose }) {
         <ul className="space-y-2">
           {suggestFor.candidates.map((candidate, index) => {
             const styled = renderInStyle(candidate, index)
+            const investigation = investigations[index]
+            const result = investigation?.reference
             return (
               <li
                 key={`${candidate.doi || candidate.arxiv_id || candidate.title || 'candidate'}-${index}`}
                 className="flex flex-col gap-1 rounded-md p-2"
-                style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+                style={{ background: 'var(--color-bg-secondary)', border: candidate.strong_fit ? '2px solid var(--color-accent)' : '1px solid var(--color-border)' }}
               >
+                {candidate.strong_fit && (
+                  <div style={{ color: 'var(--color-accent)', fontWeight: 600 }}>
+                    Strong citation fit · {(candidate.fit_reasons || []).join(' · ')}
+                  </div>
+                )}
                 <div className="flex items-start justify-between gap-2">
                   <div
                     className="flex-1 min-w-0"
@@ -358,14 +423,20 @@ export function SuggestAltPanel({ suggestFor, onClose }) {
                   </button>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                  {candidate.source && (
+                  {(candidate.sources || (candidate.source ? [candidate.source] : [])).map(source => (
                     <span
+                      key={source}
                       className="px-1.5 py-0.5 rounded"
                       style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)' }}
                     >
-                      {candidate.source === 'semantic_scholar' ? 'S2' : candidate.source}
+                      {source === 'semantic_scholar' ? 'S2' : source}
                     </span>
+                  ))}
+                  {!result && (candidate.discovery_status === 'llm_only' || (!candidate.discovery_status && candidate.source === 'llm')) && (
+                    <span>AI suggestion · not independently verified</span>
                   )}
+                  {!result && candidate.discovery_status === 'database_candidate' && <span>Found in database search · verification pending</span>}
+                  {result && <span>Source check: {result.status || 'unverified'}</span>}
                   {typeof candidate.overlap === 'number' && candidate.overlap > 0 && (
                     <span
                       className="px-1.5 py-0.5 rounded"
@@ -377,28 +448,123 @@ export function SuggestAltPanel({ suggestFor, onClose }) {
                       title="Shares references with this paper's bibliography"
                     >
                       shares {candidate.overlap} ref{candidate.overlap === 1 ? '' : 's'}
-                      {candidate.overlap_winner ? ' · best match' : ''}
+                      {candidate.overlap_winner ? ' · most shared references' : ''}
                     </span>
                   )}
-                  {candidate.url && (
-                    <a
-                      href={candidate.url}
-                      onClick={event => { event.preventDefault(); openExternal(candidate.url) }}
-                      style={{ color: 'var(--color-accent)' }}
-                    >
-                      {candidate.url.length > 80 ? `${candidate.url.slice(0, 80)}…` : candidate.url}
-                    </a>
-                  )}
+                  <ReferenceLinksList links={collectCandidateLinks(candidate)} summary="Source links" />
                 </div>
                 {candidate.reason && (
                   <div style={{ color: 'var(--color-text-muted)', fontSize: '0.8em', fontStyle: 'italic' }}>
                     {candidate.reason}
                   </div>
                 )}
+                {suggestFor.check_id && suggestFor.api_ref_id && (
+                  <button
+                    type="button"
+                    className="text-xs px-2 py-1 rounded border self-start"
+                    disabled={Object.values(investigations).some(item => item.status === 'running')}
+                    onClick={() => investigate(candidate, index)}
+                  >
+                    {investigation?.status === 'running' ? 'Investigating…' : 'Investigate this suggestion'}
+                  </button>
+                )}
+                {investigation && (
+                  <div role="status" className="text-xs space-y-1">
+                    {investigation.status === 'running' && <p>Checking this candidate against the configured sources. A confirmation of the original citation will be saved automatically.</p>}
+                    {investigation.status === 'failed' && <p>{investigation.message}</p>}
+                    {result && <>
+                      <p>Investigation result: {result.status || 'unverified'}. {investigation.saved ? 'Original reference verified and saved.' : 'Original reference unchanged.'}</p>
+                      {investigation.saved && <p>{investigation.cache_saved ? 'Saved to the local reference database.' : 'The check was saved, but the local reference database could not be updated.'}</p>}
+                      {!investigation.saved && investigation.save_reason === 'retrieved_metadata_differs' && <p>The retrieved source differs from the original citation. Review the field comparison before applying any correction.</p>}
+                      {investigation.save_reason === 'insufficient_evidence' && <p>The retrieved source does not confirm every cited field.</p>}
+                      {investigation.save_reason === 'source_accessibility_only' && <p>The link's accessibility does not confirm the citation metadata. The original reference was not marked verified.</p>}
+                      {result.matched_database && <p>Matched source: {result.matched_database}</p>}
+                      {[...(result.errors || []), ...(result.warnings || [])].map((finding, i) => (
+                        <p key={i}>{finding.error_details || finding.warning_details}</p>
+                      ))}
+                      <ReferenceLinksList links={collectReferenceLinks(result)} />
+                      {investigation.original_comparison && (
+                        <details open>
+                          <summary>Original citation compared with retrieved metadata</summary>
+                          <table className="w-full text-left">
+                            <thead><tr><th>Field</th><th>Cited</th><th>Retrieved</th><th>Result</th></tr></thead>
+                            <tbody>{investigation.original_comparison.fields.filter(field => field.status !== 'not_cited').map(field => (
+                              <tr key={field.field}>
+                                <td>{field.field}</td>
+                                <td>{Array.isArray(field.cited) ? field.cited.join(', ') : String(field.cited ?? '—')}</td>
+                                <td>{Array.isArray(field.actual) ? field.actual.join(', ') : String(field.actual ?? 'Not reported')}</td>
+                                <td>{({ confirmed: 'Confirmed', different: 'Different', unknown: 'Not confirmed' })[field.status] || field.status}</td>
+                              </tr>
+                            ))}</tbody>
+                          </table>
+                        </details>
+                      )}
+                      {investigation.retrieved_at && <p>Evidence recorded: {new Date(investigation.retrieved_at).toLocaleString()}</p>}
+                      {(investigation.sources || []).length > 0 && (
+                        <details>
+                          <summary>Database evidence</summary>
+                          <ul>
+                            {investigation.sources.map(source => (
+                              <li key={source.database}>
+                                {source.label || source.database}: {databaseStatusLabel(source.status)}
+                                {source.reason ? ` — ${source.reason}` : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </>}
+                  </div>
+                )}
               </li>
             )
           })}
         </ul>
+      )}
+      {history.status === 'loading' && (
+        <p className="mt-3 text-xs" style={{ color: 'var(--color-text-muted)' }}>Loading investigation history…</p>
+      )}
+      {history.status === 'failed' && (
+        <p className="mt-3 text-xs" style={{ color: 'var(--color-text-muted)' }}>{history.message}</p>
+      )}
+      {history.items.length > 0 && (
+        <details className="mt-3 text-xs">
+          <summary>Investigation history ({history.items.length})</summary>
+          <ul className="mt-2 space-y-2">
+            {history.items.map(item => {
+              const evidence = item.evidence || {}
+              const comparison = evidence.comparison || {}
+              const candidate = evidence.selected_suggestion || {}
+              return (
+                <li key={item.id} className="rounded p-2" style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}>
+                  <p>
+                    {({ saved: 'Original citation confirmed', recorded: 'Investigation recorded', reference_changed: 'Reference changed during investigation' })[item.decision] || item.decision}
+                    {item.created_at ? ` · ${new Date(item.created_at).toLocaleString()}` : ''}
+                  </p>
+                  {candidate.title && <p>Candidate: {candidate.title}</p>}
+                  {evidence.matched_database && <p>Matched source: {evidence.matched_database}</p>}
+                  {evidence.source_url && <ReferenceLinksList links={[{ type: 'source', url: evidence.source_url }]} summary="Retrieved source" />}
+                  {(comparison.fields || []).some(field => field.status !== 'not_cited') && (
+                    <details className="mt-1">
+                      <summary>Field comparison</summary>
+                      <table className="w-full text-left mt-1">
+                        <thead><tr><th>Field</th><th>Cited</th><th>Retrieved</th><th>Result</th></tr></thead>
+                        <tbody>{comparison.fields.filter(field => field.status !== 'not_cited').map(field => (
+                          <tr key={field.field}>
+                            <td>{field.field}</td>
+                            <td>{Array.isArray(field.cited) ? field.cited.join(', ') : String(field.cited ?? '—')}</td>
+                            <td>{Array.isArray(field.actual) ? field.actual.join(', ') : String(field.actual ?? 'Not reported')}</td>
+                            <td>{({ confirmed: 'Confirmed', different: 'Different', unknown: 'Not confirmed' })[field.status] || field.status}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </details>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </details>
       )}
     </div>
   )

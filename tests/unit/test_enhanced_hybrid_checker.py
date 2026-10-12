@@ -693,6 +693,40 @@ def test_search_all_preserves_year_warning_when_two_sources_agree_on_actual_year
     assert data['_publication_year_assessment']['classification'] == 'likely_citation_error'
 
 
+@pytest.mark.parametrize('force_all_databases', [False, True])
+@pytest.mark.parametrize('matching_doi', [False, True])
+def test_kitchenham_title_identity_is_consistent_across_search_modes(force_all_databases, matching_doi):
+    events = []
+    checker = _catalogue_reconciliation_checker(events)
+    checker.dnb = checker.tib = checker.open_library = None
+    reference = {
+        'title': 'Guidelines for performing Systematic Literature Reviews in software engineering',
+        'authors': ['B. Kitchenham'],
+        'year': 2007,
+    }
+    candidate = {
+        'title': 'Protocol for a Tertiary study of Systematic Literature Reviews and Evidence-based Guidelines in IT and Software Engineering',
+        'authors': ['B. Kitchenham', 'P. Brereton', 'D. Budgen', 'M. Turner', 'J. Bailey', 'S. Linkman'],
+        'year': 2009,
+    }
+    if matching_doi:
+        reference['doi'] = candidate['doi'] = '10.1000/identity-test'
+    checker.semantic_scholar = CatalogueCandidateChecker('Semantic Scholar', candidate)
+
+    data, findings, _ = checker._verify_reference_core(
+        reference, force_all_databases=force_all_databases,
+    )
+
+    if matching_doi:
+        assert data['title'] == candidate['title']
+    else:
+        assert data is None
+        assert findings
+        rejected = [event for event in events if event.get('status') == 'rejected_wrong_paper']
+        assert len(rejected) == 1
+        assert 'title similarity is only' in rejected[0]['reason']
+
+
 def test_wrong_database_match_is_rejected_before_metadata_reconciliation():
     events = []
     checker = _catalogue_reconciliation_checker(events)

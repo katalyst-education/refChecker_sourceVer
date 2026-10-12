@@ -1,6 +1,8 @@
 import logging
 from unittest.mock import Mock, patch
 
+import requests
+
 from refchecker.checkers.google_books import GoogleBooksReferenceChecker
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
 
@@ -70,6 +72,37 @@ def test_google_books_uses_header_book_filter_and_normalises_result(monkeypatch,
     assert "event=response print_type=books status=200" in trace
     assert "event=results print_type=books count=1" in trace
     assert "event=matched print_type=books" in trace
+    assert "books-key" not in trace
+
+
+def test_google_books_logs_structured_key_rejection_without_key(monkeypatch, caplog):
+    monkeypatch.setenv("REFCHECKER_GOOGLE_BOOKS_RATE_LIMIT_DELAY", "0")
+    response = Mock(status_code=403)
+    response.json.return_value = {
+        "error": {
+            "code": 403,
+            "message": "API key books-key is invalid",
+            "status": "PERMISSION_DENIED",
+            "errors": [{"reason": "keyInvalid"}],
+        }
+    }
+    response.raise_for_status.side_effect = requests.HTTPError("403 Client Error")
+
+    with caplog.at_level(logging.ERROR), patch(
+        "refchecker.checkers.google_books.requests.get", return_value=response
+    ):
+        checker = GoogleBooksReferenceChecker(api_key="books-key")
+        try:
+            checker.search_books("The Hobbit")
+        except requests.HTTPError:
+            pass
+
+    trace = "\n".join(record.getMessage() for record in caplog.records)
+    assert "GOOGLE_BOOKS_API_TRACE event=key_rejected" in trace
+    assert "http_status=403" in trace
+    assert "PERMISSION_DENIED" in trace
+    assert "keyInvalid" in trace
+    assert "[REDACTED]" in trace
     assert "books-key" not in trace
 
 
