@@ -1,6 +1,7 @@
 """Contracts for the result shape shared by scan and single-ref rechecks."""
 
 from backend.reference_result import (
+    derive_corrected_reference,
     merge_fresh_verification,
     project_verification_result,
 )
@@ -64,3 +65,38 @@ def test_resolved_catalogue_metadata_conflict_is_informational():
     assert result["errors"] == []
     assert result["warnings"] == []
     assert result["infos"][0]["info_type"] == "metadata_conflict"
+
+
+def test_author_position_correction_preserves_other_cited_authors():
+    reference = {
+        "authors": ["A. Sinha", "P. S", "R. Balaji", "N. Bhatt"],
+    }
+    findings = [{
+        "warning_type": "author",
+        "warning_details": "Author 2 mismatch\n       cited:  P. S\n       actual: Pavan Kumar S",
+        "actual_value": "Pavan Kumar S",
+    }]
+
+    correction = derive_corrected_reference(reference, findings)
+
+    assert correction == {
+        "authors": ["A. Sinha", "Pavan Kumar S", "R. Balaji", "N. Bhatt"],
+    }
+
+
+def test_projection_exposes_author_position_correction_for_apply_fix():
+    reference = {
+        "title": "BiCA",
+        "authors": ["A. Sinha", "P. S", "R. Balaji", "N. Bhatt"],
+    }
+    finding = {
+        "warning_type": "author",
+        "warning_details": "Author 2 mismatch\n       cited:  P. S\n       actual: Pavan Kumar S",
+        "actual_value": "Pavan Kumar S",
+    }
+
+    result = project_verification_result(reference, {}, [finding], None, enrich_enabled=False)
+
+    assert result["corrected_reference"] == {
+        "authors": ["A. Sinha", "Pavan Kumar S", "R. Balaji", "N. Bhatt"],
+    }

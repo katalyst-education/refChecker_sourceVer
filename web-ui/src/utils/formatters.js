@@ -86,18 +86,40 @@ export function formatDate(date) {
  */
 function _authorToString(a) {
   if (a == null) return ''
-  if (typeof a === 'string') return a
+  if (typeof a === 'string') return decodeReferenceText(a)
   if (typeof a !== 'object') return String(a)
-  if (typeof a.name === 'string') return a.name
-  if (typeof a.full_name === 'string') return a.full_name
-  if (typeof a.display_name === 'string') return a.display_name
+  if (typeof a.name === 'string') return decodeReferenceText(a.name)
+  if (typeof a.full_name === 'string') return decodeReferenceText(a.full_name)
+  if (typeof a.display_name === 'string') return decodeReferenceText(a.display_name)
   if (a.author && typeof a.author === 'object') {
-    if (typeof a.author.display_name === 'string') return a.author.display_name
-    if (typeof a.author.name === 'string') return a.author.name
+    if (typeof a.author.display_name === 'string') return decodeReferenceText(a.author.display_name)
+    if (typeof a.author.name === 'string') return decodeReferenceText(a.author.name)
   }
   // Family + given (CSL JSON style)
-  if (a.family || a.given) return [a.given, a.family].filter(Boolean).join(' ')
+  if (a.family || a.given) return [a.given, a.family].filter(Boolean).map(decodeReferenceText).join(' ')
   return ''
+}
+
+// Metadata APIs occasionally return HTML character references in otherwise
+// plain-text fields. Citation previews render text nodes, so decode the small,
+// safe entity subset here rather than exposing strings such as "&#x32;022".
+function decodeReferenceText(value) {
+  if (typeof value !== 'string' || !value.includes('&')) return value
+  const named = { amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"' }
+  return value
+    .replace(/&#(x[0-9a-f]+|\d+);/gi, (entity, raw) => {
+      const codePoint = raw[0].toLowerCase() === 'x'
+        ? Number.parseInt(raw.slice(1), 16)
+        : Number.parseInt(raw, 10)
+      try {
+        return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : entity
+      } catch {
+        return entity
+      }
+    })
+    .replace(/&(amp|apos|gt|lt|nbsp|quot);/gi, (entity, name) => named[name.toLowerCase()] || entity)
 }
 
 // R09/R41: a bare "et al."/"and others" token is a TRUNCATION SENTINEL, not
@@ -697,18 +719,25 @@ function getCorrectedReferenceData(ref) {
     return null
   })()
 
+  const candidate = ref.corrected_reference && typeof ref.corrected_reference === 'object'
+    ? ref.corrected_reference
+    : {}
+  const hasCandidateValue = (field) => (
+    candidate[field] !== undefined && candidate[field] !== null && candidate[field] !== ''
+  )
   const corrected = {
     // `apply_correction` merges corrected_reference into the stored citation.
-    // Start the preview from that same payload so accepting a speculative
-    // database match can never apply metadata that was hidden from the user.
-    title: ref.corrected_reference?.title || ref.title,
-    authors: ref.corrected_reference?.authors || ref.authors,
-    year: displayReferenceValue(ref.corrected_reference?.year || ref.year),
-    venue: displayReferenceValue(ref.corrected_reference?.venue || ref.venue),
-    doi: _doiIssueValue
-      || ref.corrected_reference?.doi
+    // This candidate is the exact payload that Apply Fix persists. Preserve
+    // each supplied field when individual issue messages contain abbreviated
+    // or partial values from a lower-quality source.
+    title: decodeReferenceText(candidate.title || ref.title),
+    authors: candidate.authors || ref.authors,
+    year: displayReferenceValue(decodeReferenceText(candidate.year || ref.year)),
+    venue: displayReferenceValue(decodeReferenceText(candidate.venue || ref.venue)),
+    doi: decodeReferenceText(candidate.doi)
+      || _doiIssueValue
       || ref.doi || (doiFromUrls ? doiFromUrls.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : null),
-    arxivId: ref.corrected_reference?.arxiv_id
+    arxivId: decodeReferenceText(candidate.arxiv_id)
       || ref.arxiv_id || (arxivFromUrls ? arxivFromUrls.replace(/^https?:\/\/arxiv\.org\/abs\//i, '') : null),
     citedUrl: ref.cited_url || null,
     url: ref.authoritative_urls?.[0]?.url || ref.cited_url,
@@ -716,6 +745,14 @@ function getCorrectedReferenceData(ref) {
   
   for (const issue of allIssues) {
     const errorType = (issue.error_type || issue.warning_type || '').toLowerCase()
+    const candidateField = {
+      title: 'title', author: 'authors', authors: 'authors', year: 'year',
+      venue: 'venue', doi: 'doi', arxiv_id: 'arxiv_id',
+    }[errorType]
+    // An accepted candidate has already passed the backend's match-selection
+    // safeguards. Its data is what the apply endpoint merges into the cited
+    // reference, so the preview must follow it field-for-field.
+    if (candidateField && hasCandidateValue(candidateField)) continue
     const parsed = parseErrorDetailsForMarkdown(issue.error_details || issue.warning_details)
     // Prefer the parsed/explicit actual_value; fall back to the typed correction
     // fields the backend carries for "missing" issues (year/venue/title/authors/doi),
@@ -729,7 +766,8 @@ function getCorrectedReferenceData(ref) {
       doi: issue.ref_doi_correct,
       arxiv_id: issue.ref_arxiv_id_correct,
     }
-    const actualValue = parsed?.actual || issue.actual_value || typedByType[errorType]
+    const positionalAuthorValue = decodeReferenceText(parsed?.actual || issue.actual_value)
+    const actualValue = decodeReferenceText(positionalAuthorValue || typedByType[errorType])
 
     if (actualValue) {
       switch (errorType) {
@@ -738,6 +776,21 @@ function getCorrectedReferenceData(ref) {
           break
         case 'author':
         case 'authors':
+          // "Author 2 mismatch" names one author, not a replacement list.
+          // Preserve every surrounding cited author and update the reported
+          // one-based position. This also makes historical rows display a
+          // safe preview before their next server-side re-verification.
+          const positionMatch = String(issue.error_details || issue.warning_details || '')
+            .match(/\bauthor\s+(\d+)\s+mismatch\b/i)
+          const position = positionMatch ? Number.parseInt(positionMatch[1], 10) - 1 : -1
+          if (position >= 0 && positionalAuthorValue) {
+            const authors = normalizeAuthors(corrected.authors)
+            if (position < authors.length) {
+              authors[position] = positionalAuthorValue
+              corrected.authors = authors
+              break
+            }
+          }
           // Parse author string into array if it's a string
           if (typeof actualValue === 'string') {
             // Split on common author separators

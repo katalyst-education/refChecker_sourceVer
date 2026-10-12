@@ -11,6 +11,7 @@ other presentation data from a previous verification.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.reference_status import classify_verification_result
@@ -19,6 +20,74 @@ from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_sugg
 
 
 logger = logging.getLogger(__name__)
+
+
+_AUTHOR_POSITION_MISMATCH = re.compile(r"\bauthor\s+(\d+)\s+mismatch\b", re.IGNORECASE)
+_ACTUAL_VALUE_LINE = re.compile(r"^\s*actual:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _author_name(value: Any) -> str:
+    """Return one usable author name from a checker/UI value."""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("display_name") or ""
+    if isinstance(value, (list, tuple)):
+        return _author_name(value[0]) if len(value) == 1 else ""
+    return " ".join(str(value or "").split()).strip()
+
+
+def _cited_author_list(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        return [name for name in (_author_name(item) for item in value) if name]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
+def derive_corrected_reference(
+    reference: Dict[str, Any],
+    findings: Iterable[Dict[str, Any]],
+    verified_data: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build an Apply-Fix payload from explicit verification findings.
+
+    A finding such as ``Author 2 mismatch`` carries the replacement for one
+    position. It updates that position while preserving the surrounding cited
+    authors, which prevents a one-name value from replacing the whole list.
+    """
+    issues = [issue for issue in (findings or []) if isinstance(issue, dict)]
+    verified = verified_data if isinstance(verified_data, dict) else {}
+    if any(issue.get("requires_user_confirmation") for issue in issues):
+        candidate = {
+            key: verified[key]
+            for key in ("title", "authors", "year", "venue", "doi", "arxiv_id")
+            if verified.get(key) not in (None, "", [])
+        }
+        if candidate:
+            return candidate
+
+    authors = _cited_author_list((reference or {}).get("authors"))
+    corrected_authors = list(authors)
+    changed = False
+    for issue in issues:
+        issue_type = str(issue.get("error_type") or issue.get("warning_type") or "").lower()
+        if issue_type not in {"author", "authors"}:
+            continue
+        details = str(issue.get("error_details") or issue.get("warning_details") or "")
+        match = _AUTHOR_POSITION_MISMATCH.search(details)
+        if not match:
+            continue
+        position = int(match.group(1)) - 1
+        if position < 0 or position >= len(corrected_authors):
+            continue
+        actual = _author_name(issue.get("actual_value"))
+        if not actual:
+            actual_match = _ACTUAL_VALUE_LINE.search(details)
+            actual = actual_match.group(1).strip() if actual_match else ""
+        if actual and corrected_authors[position] != actual:
+            corrected_authors[position] = actual
+            changed = True
+
+    return {"authors": corrected_authors} if changed else None
 
 
 def _format_findings(sanitized: Iterable[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -184,14 +253,9 @@ def project_verification_result(
         if verified.get(source_key):
             result[destination_key] = verified[source_key]
 
-    if any(warning.get("requires_user_confirmation") for warning in formatted_warnings):
-        candidate = {
-            key: verified[key]
-            for key in ("title", "authors", "year", "venue", "doi", "arxiv_id")
-            if verified.get(key) not in (None, "", [])
-        }
-        if candidate:
-            result["corrected_reference"] = candidate
+    candidate = derive_corrected_reference(cited, findings, verified)
+    if candidate:
+        result["corrected_reference"] = candidate
 
     if include_raw_errors:
         result["_raw_errors"] = findings

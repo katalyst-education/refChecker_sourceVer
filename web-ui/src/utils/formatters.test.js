@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
-import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue, exportReferenceAsBibtex, exportResultsAsMarkdown, normalizeAuthors, isEtAlSentinel, hasEtAlSentinel, plural, countLabel } from './formatters'
+import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue, exportReferenceAsBibtex, exportReferenceAsStyle, exportResultsAsMarkdown, normalizeAuthors, isEtAlSentinel, hasEtAlSentinel, plural, countLabel } from './formatters'
 
 describe('formatters', () => {
   describe('exportResultsAsMarkdown', () => {
@@ -242,6 +242,57 @@ describe('formatters', () => {
       expect(bibtex).toContain('year = {2009}')
       expect(bibtex).toContain('journal = {Candidate venue}')
       expect(bibtex).not.toContain('Original cited title')
+    })
+
+    it('keeps full candidate metadata ahead of partial issue values', () => {
+      // A lower-priority source may report only one abbreviated author while
+      // the selected match has the full authoritative list. Apply Fix merges
+      // corrected_reference, so the preview must present that same payload.
+      const ref = {
+        title: 'BiCA: Effective Biomedical Dense Retrieval with Citation-Aware Hard Negatives',
+        authors: ['A. Sinha', 'P. S', 'R. Balaji', 'N. Bhatt'],
+        year: 2026,
+        venue: 'Proceedings of the AAAI Conference on Artificial Intelligence',
+        warnings: [{ error_type: 'author', actual_value: 'P. K. S' }],
+        corrected_reference: {
+          authors: ['Aarush Sinha', 'Pavan Kumar S', 'Roshan Balaji', 'Nirav Pravinbhai Bhatt'],
+          venue: 'Proceedings of the AAAI Conference on Artificial Intelligence',
+        },
+      }
+
+      const ieee = exportReferenceAsStyle(ref, 'ieee')
+
+      expect(ieee).toContain('A. Sinha, P. K. S, R. Balaji, N. P. Bhatt,')
+      expect(ieee).not.toMatch(/^P\. K\. S,/)
+    })
+
+    it('replaces only the reported author position when no candidate exists', () => {
+      const ref = {
+        title: 'BiCA: Effective Biomedical Dense Retrieval with Citation-Aware Hard Negatives',
+        authors: ['A. Sinha', 'P. S', 'R. Balaji', 'N. Bhatt'],
+        year: 2026,
+        venue: 'Proceedings of the AAAI Conference on Artificial Intelligence',
+        warnings: [{
+          error_type: 'author',
+          error_details: 'Author 2 mismatch\n       cited:  P. S\n       actual: Pavan Kumar S',
+          actual_value: 'Pavan Kumar S',
+        }],
+      }
+
+      expect(exportReferenceAsStyle(ref, 'ieee')).toContain(
+        'A. Sinha, P. K. S, R. Balaji, N. Bhatt,',
+      )
+    })
+
+    it('decodes HTML character references in candidate metadata', () => {
+      const ref = {
+        title: 'Improving radiology report generation systems',
+        authors: ['V. Ramesh'],
+        year: 2022,
+        corrected_reference: { venue: 'ML4H@NeurIPS, &#x32;022' },
+      }
+
+      expect(exportReferenceAsStyle(ref, 'ieee')).toContain('ML4H@NeurIPS, 2022')
     })
 
     it('includes year + venue + DOI named by errors/warnings (no authoritative_urls)', () => {

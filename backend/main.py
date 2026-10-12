@@ -8782,6 +8782,16 @@ async def verify_single_reference(
 
     if body and body.apply_correction:
         corrected = target.get("corrected_reference") or {}
+        # Older saved checks predate stored correction payloads. A positional
+        # author fix also supersedes any stale one-name payload: Apply Fix
+        # updates the named author while retaining every other cited author.
+        from backend.reference_result import derive_corrected_reference
+        derived_correction = derive_corrected_reference(
+            target,
+            [*(target.get("errors") or []), *(target.get("warnings") or [])],
+        )
+        if derived_correction:
+            corrected = {**corrected, **derived_correction}
         if isinstance(corrected, dict) and corrected:
             for k in ("title", "authors", "year", "venue", "doi", "arxiv_id"):
                 v = corrected.get(k)
