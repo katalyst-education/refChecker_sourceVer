@@ -314,6 +314,7 @@ class ArxivReferenceChecker:
         self.ai_detection_device = (ai_detection_device or 'cpu').lower()
         self.ai_detection_results = []
         self.last_paper_text = ''
+        self.last_extracted_document = None
 
         # Initialize optional LLM hallucination verifier
         # If a separate hallucination provider is specified, use it; otherwise
@@ -628,6 +629,9 @@ class ArxivReferenceChecker:
         """Reuse extraction output, fetching text only after a bibliography-cache hit."""
         if self.last_paper_text:
             return self.last_paper_text
+        document = getattr(self, 'last_extracted_document', None)
+        if document is not None:
+            return document.body_text or ''
         if getattr(paper, 'is_text_refs', False) or getattr(paper, 'is_bibtex', False):
             return ''
         try:
@@ -638,6 +642,68 @@ class ArxivReferenceChecker:
         except Exception as exc:
             logger.warning("Could not extract manuscript text for AI detection: %s", exc)
             return ''
+
+    def _select_pdf_document_content(self, document):
+        """Select structured PDF text, reusing the legacy detector for recovery."""
+        full_text = document.full_text or '\n\n'.join(
+            part
+            for part in (document.body_text, document.bibliography)
+            if part
+        )
+        bibliography = document.bibliography or ''
+        body_text = document.body_text or ''
+        detected_bibliography = (
+            self.find_bibliography_section(full_text) if full_text else None
+        )
+
+        if not body_text and full_text:
+            from refchecker.services.pdf_pipeline.text_extractors.paper_helpers import (
+                split_text_and_references,
+            )
+
+            recovered_body, _, _ = split_text_and_references(full_text)
+            body_text = recovered_body or full_text
+
+        if not bibliography.strip():
+            bibliography = detected_bibliography or ''
+            return full_text, body_text, bibliography
+
+        detected_bibliography = (detected_bibliography or '').strip()
+        if not detected_bibliography or detected_bibliography == bibliography:
+            return full_text, body_text, bibliography
+
+        normalized_pipeline = re.sub(r'\s+', ' ', bibliography).strip()
+        normalized_detected = re.sub(r'\s+', ' ', detected_bibliography).strip()
+        if normalized_pipeline not in normalized_detected:
+            return full_text, body_text, bibliography
+
+        # A broader detector result is only accepted when the existing
+        # numbered-reference parser validates the whole candidate. This avoids
+        # treating stray bracketed numbers as evidence of a complete section.
+        from refchecker.utils.extraction_quality import strict_numbered_text_candidate
+
+        fatal_state = (self.fatal_error, self.fatal_error_message)
+        regex_state = getattr(self, 'used_regex_extraction', False)
+        unreliable_state = getattr(self, 'used_unreliable_extraction', False)
+        try:
+            detected_references, _ = strict_numbered_text_candidate(
+                self,
+                detected_bibliography,
+            )
+        finally:
+            self.fatal_error, self.fatal_error_message = fatal_state
+            self.used_regex_extraction = regex_state
+            self.used_unreliable_extraction = unreliable_state
+
+        if detected_references and len(normalized_detected) > len(normalized_pipeline):
+            logger.warning(
+                "Pipeline bibliography appears incomplete; using the broader "
+                "legacy-detected bibliography with %d validated references",
+                len(detected_references),
+            )
+            bibliography = detected_bibliography
+
+        return full_text, body_text, bibliography
 
     def _run_ai_detection_for_paper(self, paper):
         """Run the same shared local detector used by WebUI and bulk requests."""
@@ -6807,7 +6873,9 @@ class ArxivReferenceChecker:
         logger.debug(f"Extracting bibliography for paper {paper_id}: {paper.title}")
         self.last_bibliography_extraction_method = None
         self.last_paper_text = ''
+        self.last_extracted_document = None
         pdf_content = None
+        pdf_bibliography_text = None
         grobid_attempted = False
         from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
 
@@ -7024,9 +7092,120 @@ class ArxivReferenceChecker:
                 )
                 return []
             
-            # Extract text from PDF
-            text = self.extract_text_from_pdf(pdf_content)
-            self.last_paper_text = text or ''
+            # Prefer the structured extraction contract while retaining the
+            # legacy text path as recovery if both PDFProcessor extractors fail.
+            try:
+                document = self.pdf_processor.extract_document(
+                    pdf_content,
+                    include_bibliography=True,
+                )
+                if document is None:
+                    raise ValueError("PDFProcessor returned no structured document")
+                if not any(
+                    value and value.strip()
+                    for value in (
+                        document.full_text,
+                        document.body_text,
+                        document.bibliography,
+                    )
+                ):
+                    raise ValueError("PDFProcessor returned an empty structured document")
+            except Exception as exc:
+                logger.warning(
+                    "Structured PDF extraction failed for %s; retrying legacy extraction: %s",
+                    paper_id,
+                    exc,
+                )
+                extraction_diagnostics = getattr(exc, 'diagnostics', {}) or {}
+                for diagnostic in extraction_diagnostics.get('errors', []):
+                    logger.warning(
+                        "PDF extraction diagnostic for %s: %s",
+                        paper_id,
+                        diagnostic,
+                    )
+                for diagnostic in extraction_diagnostics.get('warnings', []):
+                    logger.warning(
+                        "PDF extraction warning for %s: %s",
+                        paper_id,
+                        diagnostic,
+                    )
+                document = None
+
+            if document is not None:
+                self.last_extracted_document = document
+                text = document.full_text or '\n\n'.join(
+                    part
+                    for part in (document.body_text, document.bibliography)
+                    if part
+                )
+                self.last_paper_text = document.body_text or ''
+                pdf_bibliography_text = document.bibliography or None
+
+                extraction_diagnostics = (
+                    document.metadata.get('extraction_diagnostics') or {}
+                )
+                processor_diagnostics = document.metadata.get('pdf_processor') or {}
+                pipeline_result = processor_diagnostics.get('pipeline') or {}
+                fallback_result = processor_diagnostics.get('fallback') or {}
+                logger.info(
+                    "Structured PDF extraction for %s used %s "
+                    "(pipeline=%s, fallback=%s, bibliography=%s)",
+                    paper_id,
+                    document.extractor or 'unknown extractor',
+                    pipeline_result.get('status', 'unknown'),
+                    fallback_result.get('status', 'not_used'),
+                    extraction_diagnostics.get('bibliography_status', 'unknown'),
+                )
+                for diagnostic in extraction_diagnostics.get('errors', []):
+                    logger.warning("PDF extraction diagnostic for %s: %s", paper_id, diagnostic)
+                for diagnostic in extraction_diagnostics.get('warnings', []):
+                    logger.warning("PDF extraction warning for %s: %s", paper_id, diagnostic)
+
+                text, self.last_paper_text, selected_bibliography = (
+                    self._select_pdf_document_content(document)
+                )
+                if selected_bibliography:
+                    if not pdf_bibliography_text:
+                        logger.info(
+                            "Recovered bibliography for %s with the existing text detector",
+                            paper_id,
+                        )
+                    pdf_bibliography_text = selected_bibliography
+                else:
+                    logger.warning(
+                        "Structured PDF extraction found no bibliography for %s; "
+                        "legacy bibliography detection also found none",
+                        paper_id,
+                    )
+            else:
+                self.last_extracted_document = None
+                pdf_bibliography_text = None
+                try:
+                    text = self.extract_text_from_pdf(pdf_content)
+                except Exception as legacy_exc:
+                    logger.error(
+                        "Legacy PDF text extraction also failed for %s: %s",
+                        paper_id,
+                        legacy_exc,
+                    )
+                    text = None
+                if text:
+                    try:
+                        from refchecker.services.pdf_pipeline.text_extractors.paper_helpers import (
+                            split_text_and_references,
+                        )
+
+                        self.last_paper_text = split_text_and_references(text)[0] or text
+                    except Exception as split_exc:
+                        logger.warning(
+                            "Could not separate bibliography from legacy PDF text "
+                            "for %s: %s",
+                            paper_id,
+                            split_exc,
+                        )
+                        self.last_paper_text = text
+                else:
+                    self.last_paper_text = ''
             self.last_bibliography_extraction_method = 'pdf'
 
             # Cascade policy for PDFs: GROBID is the structured extractor and
@@ -7041,7 +7220,10 @@ class ArxivReferenceChecker:
                     strict_numbered_text_candidate,
                 )
 
-                comparison_bibliography = self.find_bibliography_section(text)
+                comparison_bibliography = (
+                    pdf_bibliography_text
+                    or self.find_bibliography_section(text)
+                )
                 fatal_state = (self.fatal_error, self.fatal_error_message)
                 try:
                     text_candidate, _ = strict_numbered_text_candidate(
@@ -7085,7 +7267,7 @@ class ArxivReferenceChecker:
                 # Continue processing even if debug file writing fails
         
         # Find bibliography section
-        bibliography_text = self.find_bibliography_section(text)
+        bibliography_text = pdf_bibliography_text or self.find_bibliography_section(text)
         
         if not bibliography_text:
             # Try pdftotext fallback for garbled PDF text
@@ -7124,8 +7306,8 @@ class ArxivReferenceChecker:
             logger.warning(f"Could not find bibliography section for {paper_id}")
             return []
 
-        # A pdftotext retry may have replaced the initial extraction.
-        self.last_paper_text = text or self.last_paper_text
+        # Keep last_paper_text as the manuscript body; ``text`` may include
+        # the bibliography and remains available through last_extracted_document.
         
         # Save the bibliography text for debugging
         if debug_mode:

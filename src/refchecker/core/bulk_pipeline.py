@@ -940,11 +940,16 @@ def _reset_worker_state(checker: Any) -> None:
     checker.errors = []
     checker.single_paper_mode = False
     checker.current_paper_info = None
+    checker.last_paper_text = ''
+    checker.last_extracted_document = None
 
 
 def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extraction_batcher: BulkLLMExtractionBatcher) -> List[Dict[str, Any]]:
     paper_id = paper.get_short_id()
     logger.debug('Bulk extracting bibliography for paper %s: %s', paper_id, getattr(paper, 'title', ''))
+    text = ''
+    pdf_content = None
+    pdf_bibliography_text = None
 
     bibtex_content = get_bibtex_content(paper)
     if bibtex_content:
@@ -983,8 +988,73 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                 debug_mode=debug_mode,
             )
             return []
-        text = checker.extract_text_from_pdf(pdf_content)
-        checker.last_paper_text = text or ''
+        try:
+            pdf_processor = getattr(checker, 'pdf_processor', None)
+            if pdf_processor is None:
+                from refchecker.services.pdf_processor import PDFProcessor
+
+                pdf_processor = PDFProcessor()
+            document = pdf_processor.extract_document(
+                pdf_content,
+                include_bibliography=True,
+            )
+            if document is None:
+                raise ValueError('PDFProcessor returned no structured document')
+            if not any(
+                value and value.strip()
+                for value in (
+                    document.full_text,
+                    document.body_text,
+                    document.bibliography,
+                )
+            ):
+                raise ValueError('PDFProcessor returned an empty structured document')
+            checker.last_extracted_document = document
+            text, body_text, pdf_bibliography_text = (
+                checker._select_pdf_document_content(document)
+            )
+            checker.last_paper_text = body_text
+            extraction_diagnostics = (
+                document.metadata.get('extraction_diagnostics') or {}
+            )
+            logger.info(
+                'Bulk structured PDF extraction for %s used %s '
+                '(bibliography=%s)',
+                paper_id,
+                document.extractor or 'unknown extractor',
+                extraction_diagnostics.get('bibliography_status', 'unknown'),
+            )
+            for message in extraction_diagnostics.get('errors', []):
+                logger.warning('PDF extraction diagnostic for %s: %s', paper_id, message)
+            for message in extraction_diagnostics.get('warnings', []):
+                logger.warning('PDF extraction warning for %s: %s', paper_id, message)
+        except Exception as exc:
+            logger.warning(
+                'Structured PDF extraction failed for %s; retrying legacy extraction: %s',
+                paper_id,
+                exc,
+            )
+            checker.last_extracted_document = None
+            text = checker.extract_text_from_pdf(pdf_content)
+            if text:
+                try:
+                    from refchecker.services.pdf_pipeline.text_extractors.paper_helpers import (
+                        split_text_and_references,
+                    )
+
+                    checker.last_paper_text = (
+                        split_text_and_references(text)[0] or text
+                    )
+                except Exception as split_exc:
+                    logger.warning(
+                        'Could not separate PDF body text for %s: %s',
+                        paper_id,
+                        split_exc,
+                    )
+                    checker.last_paper_text = text
+            else:
+                checker.last_paper_text = ''
+            pdf_bibliography_text = None
 
         if getattr(checker, 'extraction_mode', 'cascade') == 'cascade':
             try:
@@ -1005,7 +1075,10 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                         strict_numbered_text_candidate,
                     )
 
-                    comparison_bibliography = checker.find_bibliography_section(text)
+                    comparison_bibliography = (
+                        pdf_bibliography_text
+                        or checker.find_bibliography_section(text)
+                    )
                     fatal_state = (checker.fatal_error, checker.fatal_error_message)
                     try:
                         text_candidate, _ = strict_numbered_text_candidate(
@@ -1032,7 +1105,10 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
         )
         return []
 
-    bibliography_text = checker.find_bibliography_section(text)
+    bibliography_text = (
+        pdf_bibliography_text
+        or checker.find_bibliography_section(text)
+    )
     if not bibliography_text:
         # If bibliography not found, try pdftotext as fallback (handles garbled pypdf output)
         if hasattr(paper, 'file_path') and paper.file_path:
