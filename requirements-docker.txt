@@ -18,7 +18,8 @@ pybtex>=0.26.1  # For parsing ArXiv BibTeX citations
 # Additional core dependencies found in codebase
 pandas>=3.0.2
 pdfplumber>=0.11.9
-pymupdf>=1.27.2.3  # For PDF thumbnail generation
+pdfminer.six>=20231228
+pymupdf>=1.27.2.3  # PDF extraction and thumbnail generation
 
 # Web UI backend dependencies
 fastapi>=0.136.1

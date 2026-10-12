@@ -14,6 +14,8 @@ fuzzywuzzy>=0.18.0
 python-Levenshtein>=0.27.3
 pandas>=3.0.2
 pdfplumber>=0.11.9
+pdfminer.six>=20231228
+pymupdf>=1.27.2.3
 
 # Web UI / auth dependencies (needed for backend/auth.py tests)
 python-jose[cryptography]>=3.5.0

@@ -4,7 +4,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from ..config import GROBID_URL
+from ..config import GROBID_METADATA_TIMEOUT, GROBID_URL
+from ..models import build_extraction_diagnostics
 from .common_helpers import (
     normalize_unicode_basic,
     normalize_for_repetition,
@@ -133,6 +134,20 @@ def paper_clean_text(text: str) -> str:
     return text.strip()
 
 
+def paper_clean_text_preserve_lines(text: str) -> str:
+    """Normalize extracted text while retaining line-based entry boundaries."""
+    if not text:
+        return ""
+
+    text = normalize_unicode_basic(text)
+    text = fix_broken_line_hyphenation(text)
+    text = fix_split_uppercase_words(text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def paper_normalize_for_repetition(text: str) -> str:
     return normalize_for_repetition(text, paper_clean_text)
 
@@ -164,7 +179,11 @@ def extract_grobid_metadata(pdf_path: Path) -> dict:
             files = {
                 "input": (pdf_path.name, file_handle, "application/pdf"),
             }
-            response = requests.post(GROBID_URL, files=files, timeout=120)
+            response = requests.post(
+                GROBID_URL,
+                files=files,
+                timeout=GROBID_METADATA_TIMEOUT,
+            )
 
         response.raise_for_status()
         root = ET.fromstring(response.text)
@@ -464,13 +483,27 @@ def should_merge_hyphenated_linebreak(previous: str, current: str) -> bool:
 
 
 def append_text_line(lines: list[str], text: str) -> None:
-    text = paper_clean_text(text)
+    text = paper_clean_text_preserve_lines(text)
 
     if not text:
         return
 
-    if lines and should_merge_hyphenated_linebreak(lines[-1], text):
-        lines[-1] = lines[-1][:-1] + text
+    if not lines:
+        lines.append(text)
+        return
+
+    previous_lines = lines[-1].splitlines()
+    current_lines = text.splitlines()
+    if (
+        previous_lines
+        and current_lines
+        and should_merge_hyphenated_linebreak(
+            previous_lines[-1],
+            current_lines[0],
+        )
+    ):
+        previous_lines[-1] = previous_lines[-1].rstrip()[:-1] + current_lines[0]
+        lines[-1] = "\n".join(previous_lines + current_lines[1:])
     else:
         lines.append(text)
 
@@ -902,6 +935,22 @@ REFERENCE_START_RE = re.compile(
     flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE,
 )
 
+APPENDIX_START_RE = re.compile(
+    r"""
+    ^\s*
+    (?:\#\#\s*)?
+    (?:
+        appendix(?:\s+[A-Z0-9IVX]+)?
+        | appendices
+        | supplementary\s+materials?
+        | supplemental\s+materials?
+    )
+    (?:\s*[:.\-–—]\s*.*|\s+.+)?
+    \s*$
+    """,
+    flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE,
+)
+
 
 def is_references_heading(text: str) -> bool:
     text = paper_clean_text(text)
@@ -953,6 +1002,9 @@ def split_text_and_references(
             "references_candidate_positions": [],
             "references_candidate_scores": [],
             "references_split_reason": "",
+            "body_before_references": "",
+            "body_after_references": "",
+            "references_heading": "",
         }
     
         if not text:
@@ -979,41 +1031,22 @@ def split_text_and_references(
             return text.strip(), "", debug
     
         # ---------------------------------------------------------
-        # Ignore obvious TOC/front-matter occurrences.
-        # ---------------------------------------------------------
-    
-        min_start_ratio = 0.60
-    
-        plausible_matches = [
-            match
-            for match in matches
-            if (
-                match.start() / max(len(text), 1)
-                >= min_start_ratio
-            )
-        ]
-    
-        if not plausible_matches:
-            debug["references_split_reason"] = (
-                "no_late_reference_heading_found"
-            )
-            return text.strip(), "", debug
-    
-        # ---------------------------------------------------------
         # Score each candidate by how bibliography-like the text
         # immediately following it appears.
-        #
-        # This is much safer than plausible_matches[-1].
         # ---------------------------------------------------------
     
         scored_candidates = []
     
-        for match in plausible_matches:
+        for match in matches:
             after = text[match.end():]
+            appendix_match = APPENDIX_START_RE.search(after)
+            if appendix_match:
+                after = after[:appendix_match.start()]
     
             # Inspect enough text to see several references without
             # allowing the rest of a huge thesis to dominate scoring.
             sample = after[:12000]
+            entry_sample = after[:2500]
     
             score = 0
     
@@ -1021,12 +1054,13 @@ def split_text_and_references(
             bracket_numbers = [
                 int(value)
                 for value in re.findall(
-                    r"\[(\d{1,4})\]",
-                    sample,
+                    r"(?m)^\s*\[(\d{1,4})\]\s+",
+                    entry_sample,
                 )
             ]
     
             if bracket_numbers:
+                score += 25
                 score += min(
                     len(bracket_numbers),
                     30,
@@ -1065,11 +1099,12 @@ def split_text_and_references(
                 int(value)
                 for value in re.findall(
                     r"(?m)^\s*(\d{1,4})[.)]\s+",
-                    sample,
+                    entry_sample,
                 )
             ]
     
             if decimal_numbers:
+                score += 25
                 score += min(
                     len(decimal_numbers),
                     30,
@@ -1078,17 +1113,17 @@ def split_text_and_references(
                 if decimal_numbers[0] == 1:
                     score += 80
     
-            # ---- common bibliography metadata
-            years = re.findall(
-                r"\b(?:18|19|20)\d{2}[a-z]?\b",
-                sample,
-                flags=re.IGNORECASE,
+            # ---- Author/year entries are a strong bibliography signal.
+            author_year_entries = re.findall(
+                r"(?im)^\s*(?:"
+                r"[A-Z][\w'’.-]{1,40},[^\n]{0,100}"
+                r"|\b[A-Z][\w'’.-]{1,40}\s+"
+                r"(?:et\s+al\.\s*)?"
+                r")\(?\s*(?:18|19|20)\d{2}[a-z]?\s*\)?",
+                entry_sample,
             )
-    
-            score += min(
-                len(years),
-                30,
-            )
+            if len(author_year_entries) >= 2:
+                score += 80
     
             dois = re.findall(
                 r"\b10\.\d{4,9}/\S+",
@@ -1125,6 +1160,10 @@ def split_text_and_references(
                     "decimal_count": len(
                         decimal_numbers
                     ),
+                    "author_year_count": len(author_year_entries),
+                    "bibliography_end": (
+                        match.end() + len(after)
+                    ),
                 }
             )
     
@@ -1145,32 +1184,48 @@ def split_text_and_references(
                 "decimal_count": (
                     item["decimal_count"]
                 ),
+                "author_year_count": item["author_year_count"],
             }
             for item in scored_candidates
         ]
     
         # Highest bibliography evidence wins.
         #
-        # On equal scores choose the EARLIER candidate rather than
-        # the later one. Once a real References section begins,
-        # another occurrence inside it should not replace it.
+        # When evidence is equal, prefer the later heading; an earlier
+        # table-of-contents entry can otherwise inherit evidence from the
+        # actual bibliography farther down the document.
         best = max(
             scored_candidates,
             key=lambda item: (
                 item["score"],
-                -item["match"].start(),
+                item["match"].start(),
             ),
         )
+
+        if best["score"] < 20:
+            debug["references_split_reason"] = (
+                "reference_heading_not_verified"
+            )
+            return text.strip(), "", debug
     
         match = best["match"]
+        bibliography_end = best["bibliography_end"]
     
-        body_text = text[
+        body_before_references = text[
             :match.start()
         ].strip()
     
         bibliography_text = text[
             match.end():
+            bibliography_end
         ].strip()
+        body_after_references = text[bibliography_end:].strip()
+        body_parts = [
+            part
+            for part in (body_before_references, body_after_references)
+            if part
+        ]
+        body_text = "\n\n".join(body_parts)
     
         debug["references_found"] = True
         debug["references_split_reason"] = (
@@ -1181,12 +1236,105 @@ def split_text_and_references(
             match.start():
             match.start() + 250
         ]
+        debug["body_before_references_length"] = len(
+            body_before_references
+        )
+        debug["references_heading"] = text[match.start():match.end()].strip()
     
         return (
             body_text,
             bibliography_text,
             debug,
         )
+
+
+def assemble_document_text(
+    body_text: str,
+    bibliography: str,
+    include_bibliography: bool,
+    references_debug: dict | None = None,
+    *,
+    leading_parts: list[str] | None = None,
+) -> tuple[str, str]:
+    """Build body/full text while keeping appendices in source order."""
+    leading = [part.strip() for part in (leading_parts or []) if part.strip()]
+
+    if references_debug and references_debug.get("references_found"):
+        before_length = references_debug.get(
+            "body_before_references_length"
+        )
+        if isinstance(before_length, int):
+            before = body_text[:before_length].strip()
+            after = body_text[before_length:].strip()
+        else:
+            before = body_text.strip()
+            after = ""
+        body_parts = leading + [part for part in (before, after) if part]
+        full_parts = leading + ([before] if before else [])
+        if include_bibliography and bibliography.strip():
+            full_parts.extend([
+                references_debug.get("references_heading") or "## References",
+                bibliography.strip(),
+            ])
+        if after:
+            full_parts.append(after)
+        return (
+            "\n\n".join(body_parts).strip(),
+            "\n\n".join(full_parts).strip(),
+        )
+
+    body_parts = leading + ([body_text.strip()] if body_text.strip() else [])
+    full_parts = list(body_parts)
+    if include_bibliography and bibliography.strip():
+        full_parts.extend(["## References", bibliography.strip()])
+    return (
+        "\n\n".join(body_parts).strip(),
+        "\n\n".join(full_parts).strip(),
+    )
+
+
+def extraction_diagnostics_from_references(
+    references_debug: dict | None,
+    bibliography: str,
+    *,
+    extractor: str,
+    errors: list[str] | None = None,
+    warnings: list[str] | None = None,
+    failed_pages: list[int] | None = None,
+) -> dict:
+    if references_debug is None:
+        bibliography_status = "detection_failed"
+        reason = "Bibliography detection did not return a result"
+    elif references_debug.get("references_found"):
+        bibliography_status = (
+            "extracted" if bibliography.strip() else "extraction_failed"
+        )
+        reason = references_debug.get("references_split_reason", "")
+    elif references_debug.get("references_split_reason") in {
+        "no_reference_heading_found",
+        "no_late_reference_heading_found",
+    }:
+        bibliography_status = "not_found"
+        reason = references_debug.get("references_split_reason", "")
+    else:
+        bibliography_status = "detection_failed"
+        reason = references_debug.get("references_split_reason", "")
+
+    errors = list(errors or [])
+    failed_pages = list(failed_pages or [])
+    return build_extraction_diagnostics(
+        bibliography_status=bibliography_status,
+        document_status=(
+            "partial" if errors or failed_pages else "complete"
+        ),
+        extractor=extractor,
+        errors=errors,
+        warnings=warnings,
+        failed_pages=failed_pages,
+        reason=reason,
+    )
+
+
 # ============================================================
 # FINAL PAPER TEXT BUILDING
 # ============================================================
@@ -1211,7 +1359,7 @@ def build_clean_paper_text(pages: list[dict]) -> dict:
         seen = set()
 
         for block in blocks:
-            text = paper_clean_text(block["text"])
+            text = paper_clean_text_preserve_lines(block["text"])
 
             # Very important:
             # TOC/directory entries must be handled before reference detection.

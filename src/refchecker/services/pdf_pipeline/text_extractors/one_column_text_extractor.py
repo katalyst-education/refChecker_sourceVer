@@ -1,10 +1,15 @@
+import logging
 from pathlib import Path
 import re
 
 import pymupdf  # PyMuPDF
 
 from ..config import GROBID_URL
-from ..models import ExtractedDocument
+from ..models import (
+    ExtractedDocument,
+    PDFExtractionError,
+    build_extraction_diagnostics,
+)
 from .base_text_extractor import BaseTextExtractor
 from .paper_helpers import (
     REPEATED_TEXT_MIN_FRACTION,
@@ -16,10 +21,14 @@ from .paper_helpers import (
     build_clean_paper_text,
     extract_grobid_metadata,
     default_front_matter_trim_debug,
+    assemble_document_text,
+    extraction_diagnostics_from_references,
     trim_pages_to_first_body_heading,
     trim_text_before_references,
     split_text_and_references,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -244,10 +253,38 @@ class OneColumnTextExtractor(BaseTextExtractor):
                 
         clean_text = paper.get("text", "")
 
-        body_text, bibliography, references_debug = (
-            split_text_and_references(clean_text)
-        )
-        logger.warning(
+        if not clean_text.strip():
+            diagnostics = build_extraction_diagnostics(
+                document_status="failed",
+                bibliography_status="extraction_failed",
+                extractor=self.name,
+                errors=["No text could be extracted from the PDF"],
+                reason="No usable page text was extracted",
+            )
+            raise PDFExtractionError(
+                "No text could be extracted from the PDF",
+                diagnostics,
+            )
+
+        try:
+            body_text, bibliography, references_debug = (
+                split_text_and_references(clean_text)
+            )
+        except Exception as exc:
+            diagnostics = extraction_diagnostics_from_references(
+                None,
+                "",
+                extractor=self.name,
+                errors=[str(exc)],
+            )
+            diagnostics["document_status"] = "partial"
+            raise PDFExtractionError(
+                "Bibliography detection failed",
+                diagnostics,
+                extracted_text=clean_text,
+            ) from exc
+
+        logger.debug(
             "PIPELINE REFERENCES TRACE: "
             "clean=%d body=%d bibliography=%d "
             "matches=%s positions=%s reason=%s preview=%r "
@@ -261,26 +298,18 @@ class OneColumnTextExtractor(BaseTextExtractor):
             references_debug.get("references_start_preview"),
             (bibliography or "")[:500],
         )
-        body_parts = []
-
+        leading_parts = []
         if title:
-            body_parts.append(title)
-
+            leading_parts.append(title)
         if abstract:
-            body_parts.append("## Abstract\n" + abstract)
-
-        if body_text:
-            body_parts.append(body_text)
-
-        clean_body = "\n\n".join(body_parts).strip()
-        if include_bibliography and bibliography:
-            full_text = (
-                clean_body
-                + "\n\n## References\n"
-                + bibliography
-            ).strip()
-        else:
-            full_text = clean_body
+            leading_parts.append("## Abstract\n" + abstract)
+        clean_body, full_text = assemble_document_text(
+            body_text,
+            bibliography,
+            include_bibliography,
+            references_debug,
+            leading_parts=leading_parts,
+        )
         return ExtractedDocument(
             file=pdf_path.name,
             doc_type=doc_type,
@@ -316,6 +345,17 @@ class OneColumnTextExtractor(BaseTextExtractor):
                 "removed_repeated_blocks": sorted(repeated_blocks),
                 "front_matter_trim": front_matter_trim_debug,
                 "references": references_debug,
+                "extraction_diagnostics":
+                    extraction_diagnostics_from_references(
+                        references_debug,
+                        bibliography,
+                        extractor=self.name,
+                        warnings=(
+                            [f"GROBID metadata extraction failed: {grobid_metadata['grobid_error']}"]
+                            if grobid_metadata.get("grobid_error")
+                            else []
+                        ),
+                    ),
             },
         )
         
