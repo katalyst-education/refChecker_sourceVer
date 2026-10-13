@@ -4926,6 +4926,49 @@ def _parsed_author_issues(authors):
     return issues
 
 
+def normalize_reference_fields(reference):
+    """Normalize shared reference field names and lift visible identifiers."""
+    if reference.get('journal') and not reference.get('venue'):
+        reference['venue'] = reference['journal']
+
+    if not reference.get('doi'):
+        for key in ('cited_url', 'url', 'raw_text', 'raw'):
+            value = reference.get(key)
+            if isinstance(value, str) and value:
+                match = re.search(
+                    r'(?:10\.\d{4,9}/[\w.\-;()/:%]+)',
+                    value,
+                )
+                if match:
+                    reference['doi'] = match.group(0).rstrip('.,;)')
+                    break
+
+    if not reference.get('arxiv_id'):
+        for key in ('cited_url', 'url', 'raw_text', 'raw'):
+            value = reference.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            match = re.search(
+                r'arxiv\.org/abs/([\w.\-/]+)',
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                arxiv_id = match.group(1).rstrip('.,;)')
+                reference['arxiv_id'] = re.sub(r'v\d+$', '', arxiv_id)
+                break
+            match = re.search(
+                r'arxiv[: ]\s*(\d{4}\.\d{4,5})',
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                reference['arxiv_id'] = match.group(1)
+                break
+
+    return reference
+
+
 def validate_parsed_references(references, *, require_all=False, expected_count=None):
     """
     Validate that parsed references meet minimum quality standards.
@@ -4967,6 +5010,10 @@ def validate_parsed_references(references, *, require_all=False, expected_count=
             ref_issues.append('missing authors')
         else:
             ref_issues.extend(_parsed_author_issues(ref.get('authors')))
+
+        # Reject records containing merged multi-reference artifacts
+        if ref.get('is_merged_artifact') or ref.get('is_merged'):
+            ref_issues.append('merged multi-reference record')
             
         # Check for malformed content that suggests parsing failure
         title = ref.get('title', '')

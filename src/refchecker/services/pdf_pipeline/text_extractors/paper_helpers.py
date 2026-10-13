@@ -6,6 +6,7 @@ import requests
 
 from ..config import GROBID_METADATA_TIMEOUT, GROBID_URL
 from ..models import build_extraction_diagnostics
+from refchecker.utils.reference_patterns import AUTHOR_YEAR_ENTRY_START_RE
 from .common_helpers import (
     normalize_unicode_basic,
     normalize_for_repetition,
@@ -85,7 +86,7 @@ def fix_broken_line_hyphenation(text: str) -> str:
             return f"{before}-{after}"
 
         if after[:1].isupper():
-            return f"{before}- {after}"
+            return f"{before}-{after}"
 
         return before + after
 
@@ -107,14 +108,12 @@ def fix_split_uppercase_words(text: str) -> str:
         return ""
 
     upper_chars = "A-ZÄÖÜ"
-    lower_chars = "a-zäöüß"
-
     previous = None
 
     while previous != text:
         previous = text
         text = re.sub(
-            rf"\b([{upper_chars}])\s+([{upper_chars}][{upper_chars}{lower_chars}]{{2,}})\b",
+            rf"\b([B-HJ-ZÄÖÜ])\s+([{upper_chars}]{{2,}})\b",
             r"\1\2",
             text,
         )
@@ -594,6 +593,10 @@ def append_page_text(parts: list[str], page_text: str) -> None:
     if not first_line:
         return
 
+    if REFERENCE_START_RE.match(first_line):
+        parts.append(page_text)
+        return
+
     if should_merge_hyphenated_linebreak(parts[-1], first_line):
         parts[-1] = parts[-1].rstrip()[:-1] + paper_clean_text(first_line)
 
@@ -930,20 +933,30 @@ REFERENCE_START_RE = re.compile(
         | quellenverzeichnis
     )
     \b
-    (?!.*\.{3,}.*\d+\s*$)
+    (?!.*(?:\.\s*){4,}.*\d+\s*$)
     """,
     flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE,
 )
 
-APPENDIX_START_RE = re.compile(
+POST_BIBLIOGRAPHY_SECTION_RE = re.compile(
     r"""
     ^\s*
     (?:\#\#\s*)?
+    (?:\d+(?:\.\d+)*\.?\s+)?
     (?:
         appendix(?:\s+[A-Z0-9IVX]+)?
         | appendices
         | supplementary\s+materials?
         | supplemental\s+materials?
+        | anhang(?:\s+[A-Z0-9IVX]+)?
+        | anhangsverzeichnis
+        | anhänge
+        | eidesstattliche\s+erklärung
+        | eigenständigkeitserklärung
+        | selbstständigkeitserklärung
+        | selbständigkeitserklärung
+        | selbstaendigkeitserklaerung
+        | erklärung
     )
     (?:\s*[:.\-–—]\s*.*|\s+.+)?
     \s*$
@@ -965,6 +978,22 @@ def is_references_heading(text: str) -> bool:
         "quellen",
         "quellenverzeichnis",
     } or bool(REFERENCE_START_RE.match(text))
+
+
+def is_reference_contents_page_number(text: str, match: re.Match) -> bool:
+    """Reject a heading whose only same-line suffix is a contents page number."""
+    line_end = text.find("\n", match.end())
+    if line_end == -1:
+        line_end = len(text)
+
+    suffix = text[match.end():line_end]
+    return bool(
+        re.fullmatch(
+            r"\s*(?:(?:\.\s*){3,})?\d{1,4}\s*",
+            suffix,
+        )
+    )
+
 
 def trim_text_before_references(text: str) -> tuple[str, dict]:
     """
@@ -1010,11 +1039,21 @@ def split_text_and_references(
         if not text:
             return "", "", debug
     
-        matches = list(
+        all_matches = list(
             REFERENCE_START_RE.finditer(text)
         )
-    
-        debug["references_match_count"] = len(matches)
+        matches = [
+            match
+            for match in all_matches
+            if not is_reference_contents_page_number(text, match)
+        ]
+
+        debug["references_match_count"] = len(all_matches)
+        debug["references_ignored_toc_positions"] = [
+            round(match.start() / max(len(text), 1), 3)
+            for match in all_matches
+            if match not in matches
+        ]
     
         debug["references_candidate_positions"] = [
             round(
@@ -1039,14 +1078,14 @@ def split_text_and_references(
     
         for match in matches:
             after = text[match.end():]
-            appendix_match = APPENDIX_START_RE.search(after)
+            appendix_match = POST_BIBLIOGRAPHY_SECTION_RE.search(after)
             if appendix_match:
                 after = after[:appendix_match.start()]
     
             # Inspect enough text to see several references without
             # allowing the rest of a huge thesis to dominate scoring.
             sample = after[:12000]
-            entry_sample = after[:2500]
+            entry_sample = after[:2500].lstrip()
     
             score = 0
     
@@ -1114,15 +1153,10 @@ def split_text_and_references(
                     score += 80
     
             # ---- Author/year entries are a strong bibliography signal.
-            author_year_entries = re.findall(
-                r"(?im)^\s*(?:"
-                r"[A-Z][\w'’.-]{1,40},[^\n]{0,100}"
-                r"|\b[A-Z][\w'’.-]{1,40}\s+"
-                r"(?:et\s+al\.\s*)?"
-                r")\(?\s*(?:18|19|20)\d{2}[a-z]?\s*\)?",
-                entry_sample,
+            author_year_entries = list(
+                AUTHOR_YEAR_ENTRY_START_RE.finditer(entry_sample)
             )
-            if len(author_year_entries) >= 2:
+            if author_year_entries:
                 score += 80
     
             dois = re.findall(
@@ -1356,7 +1390,7 @@ def build_clean_paper_text(pages: list[dict]) -> dict:
         allow_reference_cut = page_ratio >= min_reference_page_ratio
 
         lines = []
-        seen = set()
+        seen: dict[str, list[tuple[float, float, float, float] | None]] = {}
 
         for block in blocks:
             text = paper_clean_text_preserve_lines(block["text"])
@@ -1364,22 +1398,32 @@ def build_clean_paper_text(pages: list[dict]) -> dict:
             # Very important:
             # TOC/directory entries must be handled before reference detection.
             if is_likely_directory_entry(text):
-                text = clean_directory_entry_for_output(text)
-
-                if text:
-                    append_text_line(lines, text)
-
+                append_text_line(lines, text)
                 continue
 
             if not text:
                 continue
 
-            norm = paper_normalize_for_repetition(text)
+            norm = re.sub(r"\s+", " ", text).strip().casefold()
 
-            if norm in seen:
+            bounds = None
+            if all(
+                key in block
+                for key in ("x0", "y0", "x1", "y1")
+            ):
+                bounds = tuple(
+                    float(block[key]) for key in ("x0", "y0", "x1", "y1")
+                )
+
+            previous_bounds = seen.get(norm, [])
+            duplicate = norm in seen and any(
+                _paper_blocks_overlap(bounds, previous)
+                for previous in previous_bounds
+            )
+            if duplicate:
                 continue
 
-            seen.add(norm)
+            seen.setdefault(norm, []).append(bounds)
 
             if (
                 DROP_REFERENCES_SECTION
@@ -1439,3 +1483,27 @@ def build_clean_paper_text(pages: list[dict]) -> dict:
         "pages": output_pages,
         "section_headings": section_headings,
     }
+
+
+def _paper_blocks_overlap(
+    first: tuple[float, float, float, float] | None,
+    second: tuple[float, float, float, float] | None,
+) -> bool:
+    if first is None or second is None:
+        return first is None and second is None
+
+    x0 = max(first[0], second[0])
+    y0 = max(first[1], second[1])
+    x1 = min(first[2], second[2])
+    y1 = min(first[3], second[3])
+    intersection = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+    second_area = max(0.0, second[2] - second[0]) * max(
+        0.0, second[3] - second[1]
+    )
+    smaller_area = min(first_area, second_area)
+
+    if smaller_area == 0:
+        return first == second
+
+    return intersection / smaller_area >= 0.9

@@ -64,6 +64,7 @@ from refchecker.utils.reference_fixups import (
     fixup_reference_fields,
     strip_citation_tail_from_venue,
 )
+from refchecker.utils.reference_patterns import AUTHOR_YEAR_ENTRY_START_RE
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
 from refchecker.core.parallel_processor import ParallelReferenceProcessor  
@@ -73,6 +74,11 @@ from refchecker.database.local_database_updater import update_local_database
 # Import version
 from refchecker.__version__ import __version__
 from refchecker.llm.base import create_llm_provider, ReferenceExtractor
+
+_AUTHOR_YEAR_REFERENCE_START_RE = re.compile(
+    r"(?m)(?:^|[.!?]\s+)([A-Z][^.!?\n]{1,180}?)\.\s*((?:19|20)\d{2})\b"
+)
+_AUTHOR_YEAR_ENTRY_START_RE = AUTHOR_YEAR_ENTRY_START_RE
 
 def get_llm_api_key_interactive(provider: str) -> str:
     """
@@ -674,7 +680,9 @@ class ArxivReferenceChecker:
 
         normalized_pipeline = re.sub(r'\s+', ' ', bibliography).strip()
         normalized_detected = re.sub(r'\s+', ' ', detected_bibliography).strip()
-        if normalized_pipeline not in normalized_detected:
+        detected_contains_pipeline = normalized_pipeline in normalized_detected
+        detected_is_pipeline_suffix = normalized_detected in normalized_pipeline
+        if not detected_contains_pipeline and not detected_is_pipeline_suffix:
             return full_text, body_text, bibliography
 
         # A broader detector result is only accepted when the existing
@@ -695,13 +703,58 @@ class ArxivReferenceChecker:
             self.used_regex_extraction = regex_state
             self.used_unreliable_extraction = unreliable_state
 
-        if detected_references and len(normalized_detected) > len(normalized_pipeline):
+        if detected_contains_pipeline and (
+            len(normalized_detected) > len(normalized_pipeline)
+        ) and detected_references:
             logger.warning(
                 "Pipeline bibliography appears incomplete; using the broader "
                 "legacy-detected bibliography with %d validated references",
                 len(detected_references),
             )
             bibliography = detected_bibliography
+        elif (
+            normalized_detected in normalized_pipeline
+            and len(normalized_detected) < len(normalized_pipeline)
+        ):
+            normalized_full_text = re.sub(r'\s+', ' ', full_text).casefold()
+            pipeline_position = normalized_full_text.find(
+                normalized_pipeline[:120].casefold()
+            )
+            detected_position = normalized_full_text.find(
+                normalized_detected[:120].casefold()
+            )
+            author_year_entries = (
+                _AUTHOR_YEAR_ENTRY_START_RE.findall(detected_bibliography)
+                or _AUTHOR_YEAR_REFERENCE_START_RE.findall(detected_bibliography)
+            )
+            if (
+                pipeline_position >= 0
+                and detected_position > pipeline_position
+                and len(author_year_entries) >= 2
+            ):
+                logger.warning(
+                    "Pipeline bibliography starts before a later, bounded "
+                    "author-year reference list; using the detected suffix "
+                    "with %d candidate entries",
+                    len(author_year_entries),
+                )
+                bibliography = detected_bibliography
+                bibliography_start = full_text.rfind(detected_bibliography)
+                if bibliography_start >= 0:
+                    recovered_body = full_text[:bibliography_start]
+                    heading_window_start = max(0, len(recovered_body) - 200)
+                    heading_match = re.search(
+                        r'(?i)\b(?:references|bibliography|works\s+cited|'
+                        r'literature\s+cited)\s*$',
+                        recovered_body[heading_window_start:],
+                    )
+                    if heading_match:
+                        recovered_body = recovered_body[
+                            : heading_window_start + heading_match.start()
+                        ]
+                    recovered_body = recovered_body.strip()
+                    if len(recovered_body) > len(body_text):
+                        body_text = recovered_body
 
         return full_text, body_text, bibliography
 
@@ -4997,6 +5050,209 @@ class ArxivReferenceChecker:
         flush_chunk()
         return extracted
 
+    def _split_author_year_reference_entries(self, bibliography_text):
+        """Split an unnumbered author-year bibliography into raw reference entries."""
+        if not bibliography_text:
+            return []
+
+        matches = list(_AUTHOR_YEAR_ENTRY_START_RE.finditer(bibliography_text))
+        if len(matches) < 2:
+            return []
+
+        entries = []
+        for index, match in enumerate(matches):
+            start = match.start(1)
+            end = matches[index + 1].start(1) if index + 1 < len(matches) else len(bibliography_text)
+            entry = bibliography_text[start:end].strip()
+            if len(entry) >= 15:
+                entries.append(entry)
+
+        return entries if len(entries) >= 2 else []
+
+    def _parse_author_year_authors(self, author_str):
+        """Parse author names from an author-year entry author segment."""
+        from refchecker.utils.text_utils import parse_authors_with_initials
+
+        author_str = re.sub(r'\s+', ' ', author_str).strip()
+        if not re.search(r'\b[A-Z]\.$', author_str):
+            author_str = author_str.rstrip('.,')
+        if not author_str:
+            return []
+
+        has_et_al = False
+        et_al_match = re.search(r'\b(et\s+al\.?)\b', author_str, re.IGNORECASE)
+        if et_al_match:
+            has_et_al = True
+            author_str = author_str[:et_al_match.start()].strip()
+            if not re.search(r'\b[A-Z]\.$', author_str):
+                author_str = author_str.rstrip('.,')
+
+        parsed = parse_authors_with_initials(author_str)
+        # Handle single inverted author e.g. ['Knuth, Donald E.']
+        if len(parsed) == 1 and ',' in parsed[0]:
+            parts = [p.strip() for p in parsed[0].split(',') if p.strip()]
+            if len(parts) == 2:
+                parsed = [f"{parts[1]} {parts[0]}"]
+        # Handle APA/Chicago style where first author is inverted ("Last, First")
+        # and subsequent authors are "First Last":
+        # e.g. ['Hu', 'Xiangkun', 'Dongyu Ru', ...] -> ['Xiangkun Hu', 'Dongyu Ru', ...]
+        elif len(parsed) >= 3 and len(parsed[0].split()) == 1 and len(parsed[1].split()) == 1:
+            if all(len(p.split()) >= 2 or p.lower() in ('et al', 'others') for p in parsed[2:]):
+                first_author = f"{parsed[1]} {parsed[0]}"
+                parsed = [first_author] + parsed[2:]
+        elif len(parsed) == 2 and len(parsed[0].split()) == 1 and len(parsed[1].split()) == 1:
+            parsed = [f"{parsed[1]} {parsed[0]}"]
+
+        cleaned = []
+        for p in parsed:
+            p = re.sub(r'^(?:and|&)\s+', '', p.strip())
+            if p and p not in cleaned:
+                cleaned.append(p)
+
+        if not cleaned and author_str:
+            cleaned = [author_str]
+
+        if has_et_al and 'et al' not in cleaned:
+            cleaned.append('et al')
+
+        return cleaned
+
+    def _parse_single_author_year_entry(self, raw_entry):
+        """Parse an individual author-year entry into a structured reference dict."""
+        from refchecker.utils.text_utils import clean_title
+        from refchecker.utils.url_utils import clean_url
+        from refchecker.utils.doi_utils import normalize_doi, construct_doi_url
+
+        match = _AUTHOR_YEAR_ENTRY_START_RE.search(raw_entry)
+        if not match:
+            return None
+
+        author_str = match.group(1).strip()
+        year_str = match.group(2)
+        year_match = re.search(r'\b((?:19|20)\d{2})[a-z]?\b', year_str, re.IGNORECASE)
+        year = int(year_match.group(1)) if year_match else None
+
+        authors = self._parse_author_year_authors(author_str)
+        if not authors:
+            return None
+
+        rest = raw_entry[match.end():].strip()
+        rest = re.sub(r'^[.):\s]+', '', rest)
+
+        # Detect merged multi-reference records
+        if _AUTHOR_YEAR_ENTRY_START_RE.search(rest):
+            return {
+                'title': 'Merged Multi-Reference Record',
+                'authors': authors,
+                'year': year,
+                'venue': '',
+                'journal': '',
+                'url': '',
+                'doi': None,
+                'raw_text': raw_entry,
+                'type': 'other',
+                'is_merged_artifact': True,
+            }
+
+        url = ""
+        arxiv_url = ""
+        url_match = re.search(r'https?:\s*//[^\s]+(?:\s+[^\s]+)*', rest)
+        if url_match:
+            candidate_url = re.sub(r'\s+', '', url_match.group(0))
+            candidate_url = re.sub(r'[.,;)]+$', '', candidate_url)
+            candidate_url = clean_url(candidate_url)
+            if candidate_url.startswith(('http://', 'https://')):
+                url = candidate_url
+                if 'arxiv.org' in url.lower():
+                    arxiv_url = url
+                rest = (rest[:url_match.start()] + ' ' + rest[url_match.end():]).strip()
+
+        doi = None
+        doi_match = re.search(r'\b(?:doi(?:\.org/|:)\s*|10\.\d{4,9}/)([^\s,]+)', rest, re.IGNORECASE)
+        if doi_match:
+            raw_doi = doi_match.group(1) if doi_match.group(1) else doi_match.group(0)
+            cleaned_d = normalize_doi(raw_doi)
+            if cleaned_d:
+                doi = cleaned_d
+                if not url:
+                    url = construct_doi_url(doi)
+            rest = (rest[:doi_match.start()] + ' ' + rest[doi_match.end():]).strip()
+
+        title = ""
+        venue = ""
+        quote_match = re.search(r'["“]([^"”]+)["”]', rest)
+        if not quote_match:
+            quote_match = re.search(r'‘([^’]+)’', rest)
+        if quote_match:
+            title = quote_match.group(1).strip()
+            venue_part = (rest[:quote_match.start()] + ' ' + rest[quote_match.end():]).strip()
+            venue = re.sub(r'^[.,\s]+|[.,\s]+$', '', venue_part)
+        else:
+            period_match = re.search(r'^([^.]+?\.)\s+(.+)$', rest)
+            if period_match:
+                title = period_match.group(1).rstrip('.')
+                venue = period_match.group(2).strip()
+            else:
+                title = rest.rstrip('.')
+                venue = ""
+
+        title = clean_title(title)
+        venue = re.sub(r'\s+', ' ', venue).strip().rstrip('.,')
+
+        arxiv_id = None
+        if not arxiv_url:
+            arxiv_id_match = re.search(
+                r'\barXiv:\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b', raw_entry, re.IGNORECASE
+            )
+            if arxiv_id_match:
+                arxiv_id = re.sub(r'v\d+$', '', arxiv_id_match.group(1))
+                arxiv_url = f"https://arxiv.org/abs/{arxiv_id_match.group(1)}"
+                if not url:
+                    url = arxiv_url
+        elif arxiv_url:
+            from refchecker.utils.url_utils import extract_arxiv_id_from_url
+            aid = extract_arxiv_id_from_url(arxiv_url)
+            if aid:
+                arxiv_id = re.sub(r'v\d+$', '', aid)
+
+        ref_type = 'arxiv' if arxiv_url else ('non-arxiv' if (url or doi) else 'other')
+
+        ref_dict = {
+            'title': title,
+            'authors': authors,
+            'year': year,
+            'venue': venue,
+            'journal': venue,
+            'url': url or arxiv_url or "",
+            'doi': doi,
+            'raw_text': raw_entry,
+            'type': ref_type,
+        }
+        if arxiv_id:
+            ref_dict['arxiv_id'] = arxiv_id
+        return ref_dict
+
+    def _parse_author_year_references(self, entries):
+        """Parse segmented author-year reference entries into structured reference dictionaries."""
+        parsed_references = []
+        for entry in entries:
+            parsed = self._parse_single_author_year_entry(entry)
+            if parsed:
+                parsed_references.append(parsed)
+            else:
+                parsed_references.append({
+                    'title': '',
+                    'authors': ['Unknown Author'],
+                    'year': None,
+                    'venue': '',
+                    'journal': '',
+                    'url': '',
+                    'doi': None,
+                    'raw_text': entry,
+                    'type': 'other',
+                })
+        return parsed_references
+
     def parse_references(self, bibliography_text, progress_callback=None):
         """
         Parse references from bibliography text
@@ -5021,6 +5277,9 @@ class ArxivReferenceChecker:
 
         numbered_entries = self._split_numbered_reference_entries(bibliography_text)
         expected_numbered_count = len(numbered_entries)
+        author_year_count = len(
+            _AUTHOR_YEAR_REFERENCE_START_RE.findall(bibliography_text)
+        )
 
         deterministic_references = []
         if self.extraction_mode == 'cascade' and expected_numbered_count:
@@ -5092,6 +5351,65 @@ class ArxivReferenceChecker:
                     f"{len(deterministic_references)} of {expected_numbered_count} references)"
                 )
             self.fatal_error, self.fatal_error_message = fatal_state_before_deterministic
+
+        author_year_entries = []
+        if not expected_numbered_count:
+            author_year_entries = self._split_author_year_reference_entries(bibliography_text)
+        expected_author_year_count = len(author_year_entries)
+        detected_author_year_count = max(
+            author_year_count,
+            expected_author_year_count,
+            len(_AUTHOR_YEAR_ENTRY_START_RE.findall(bibliography_text)),
+        )
+
+        if self.extraction_mode == 'cascade' and expected_author_year_count:
+            fatal_state_before_author_year = (
+                self.fatal_error,
+                self.fatal_error_message,
+            )
+            author_year_references = self._parse_author_year_references(author_year_entries)
+            if author_year_references:
+                from refchecker.utils.text_utils import validate_parsed_references
+                validation = validate_parsed_references(
+                    author_year_references,
+                    require_all=True,
+                    expected_count=expected_author_year_count,
+                )
+                complete = len(author_year_references) >= expected_author_year_count
+                if validation['is_valid'] and complete:
+                    logger.info(
+                        "Using deterministic author-year reference extraction "
+                        f"({len(author_year_references)} references; quality "
+                        f"{validation['quality_score']:.2f})"
+                    )
+                    self.last_reference_parser_method = 'regex'
+                    self.fatal_error = False
+                    self.fatal_error_message = None
+                    return author_year_references
+
+                logger.info(
+                    "Deterministic author-year extraction needs recovery "
+                    f"(quality {validation['quality_score']:.2f}, "
+                    f"{len(author_year_references)} of {expected_author_year_count} references)"
+                )
+            self.fatal_error, self.fatal_error_message = fatal_state_before_author_year
+
+        if (
+            self.extraction_mode == 'cascade'
+            and not self.llm_extractor
+            and not expected_numbered_count
+            and detected_author_year_count >= 2
+        ):
+            message = (
+                "Unsupported author-year bibliography format for offline "
+                f"deterministic parsing ({detected_author_year_count} entries detected). "
+                "Configure an LLM or GROBID to extract structured references."
+            )
+            logger.warning(message)
+            self.last_reference_parser_method = 'unsupported'
+            self.fatal_error = True
+            self.fatal_error_message = message
+            return []
 
         if self.llm_extractor:
             try:
@@ -5334,33 +5652,39 @@ class ArxivReferenceChecker:
         Parse references using regex-based approach (original implementation)
         """
         self.used_regex_extraction = True
+        from refchecker.utils.text_utils import normalize_reference_fields
+
+        def normalize_references(references):
+            return [
+                normalize_reference_fields(reference)
+                for reference in references
+            ]
         
         # Check if this is BibTeX format first
         from refchecker.utils.bibtex_parser import detect_bibtex_format
         if detect_bibtex_format(bibliography_text):
             logger.debug("Detected BibTeX format, using BibTeX-specific parsing")
             # BibTeX parsing is robust, so we don't set used_unreliable_extraction
-            return self._parse_bibtex_references(bibliography_text)
+            return normalize_references(
+                self._parse_bibtex_references(bibliography_text)
+            )
         
         # Check if this is biblatex format
         from refchecker.utils.biblatex_parser import detect_biblatex_format  
+        biblatex_parse_failed = False
         if detect_biblatex_format(bibliography_text):
             logger.debug("Detected biblatex format, using biblatex-specific parsing")
             # biblatex parsing is also robust, so we don't set used_unreliable_extraction
             biblatex_refs = self._parse_biblatex_references(bibliography_text)
             
-            # If biblatex parsing returned empty results (due to quality validation),
-            # cannot proceed without LLM
             if not biblatex_refs:
-                logger.error("Biblatex parser returned no valid references (failed quality validation). "
-                             "Use --llm-provider to enable LLM-based extraction.")
-                if not self.debug_mode:
-                    print(f"\n  ❌  Biblatex parser found no valid references (failed quality validation).")
-                    print(f"      Use --llm-provider openai (or anthropic/google) to enable LLM-based extraction.")
-                self.fatal_error = True
-                return []
+                biblatex_parse_failed = True
+                logger.warning(
+                    "Biblatex parsing found no valid references; "
+                    "continuing with the generic reference parser."
+                )
             else:
-                return biblatex_refs
+                return normalize_references(biblatex_refs)
         
         # --- IMPROVED SPLITTING: handle concatenated references like [3]... [4]... ---
         # First, normalize the bibliography text to handle multi-line references
@@ -5778,7 +6102,33 @@ class ArxivReferenceChecker:
         logger.debug(f"Extracted {len(non_arxiv_refs)} structured references without arxiv links")
         logger.debug(f"Extracted {len(other_refs)} structured references without URLs or DOIs")
         all_refs = arxiv_refs + non_arxiv_refs + other_refs
-        return all_refs
+        if biblatex_parse_failed:
+            from refchecker.utils.text_utils import validate_parsed_references
+
+            validation = validate_parsed_references(
+                all_refs,
+                expected_count=len(re.findall(r'\[\d+\]', normalized_bib)),
+            )
+            if not validation['is_valid']:
+                self.fatal_error = True
+                self.fatal_error_message = (
+                    "Biblatex parsing failed and the generic numbered-reference "
+                    f"fallback did not validate: {validation['issues']}"
+                )
+                logger.warning(self.fatal_error_message)
+                return []
+        normalized_references = normalize_references(all_refs)
+
+        def source_position(item):
+            raw_text = item.get('raw_text', '')
+            position = (
+                normalized_bib.find(raw_text)
+                if isinstance(raw_text, str) and raw_text
+                else -1
+            )
+            return position if position >= 0 else len(normalized_bib)
+
+        return sorted(normalized_references, key=source_position)
     
     def _parse_bibtex_references(self, bibliography_text):
         """

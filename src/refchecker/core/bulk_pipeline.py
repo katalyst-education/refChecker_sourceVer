@@ -1239,6 +1239,12 @@ def parse_references_bulk(checker: Any, bibliography_text: str, extraction_batch
         checker.fatal_error_message = None
         return deterministic_references
 
+    if (
+        getattr(checker, 'last_reference_parser_method', None) == 'unsupported'
+        and getattr(checker, 'fatal_error_message', None)
+    ):
+        return []
+
     _set_reference_extraction_fatal(
         checker,
         'Reference extraction failed because no LLM extractor is configured '
