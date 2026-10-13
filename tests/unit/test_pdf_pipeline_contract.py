@@ -148,6 +148,38 @@ def test_reference_split_keeps_appendices_out_of_bibliography():
     assert body_without_references.index("Appendix A") < len(body_without_references)
 
 
+@pytest.mark.parametrize(
+    "post_bibliography",
+    [
+        "Anhang A: Zusätzliche Tabellen\nAnhangstext bleibt erhalten.",
+        "7. Anhangsverzeichnis\nAnhang 1 Tabellen bleiben erhalten.",
+        "Eidesstattliche Erklärung\nDie Erklärung bleibt erhalten.",
+    ],
+)
+def test_german_post_bibliography_sections_remain_outside_references(
+    post_bibliography,
+):
+    text = (
+        "Paper body.\nReferences\n"
+        "[1] Alice Smith. First reference. 2024.\n"
+        "[2] Bob Jones. Second reference. 2023.\n"
+        f"{post_bibliography}"
+    )
+
+    body, bibliography, debug = split_text_and_references(text)
+    body_without_references, full_text = assemble_document_text(
+        body,
+        bibliography,
+        True,
+        debug,
+    )
+
+    assert "Anhang" not in bibliography
+    assert "Erklärung" not in bibliography
+    assert post_bibliography in body_without_references
+    assert post_bibliography in full_text
+
+
 def test_reference_heading_without_bibliographic_evidence_is_not_accepted():
     text = (
         "Short article body.\nReferences\n"
@@ -182,6 +214,265 @@ def test_reference_split_ignores_early_toc_heading_when_real_heading_follows():
     assert "The main body discusses" in body
     assert found_bibliography == bibliography
     assert debug["references_candidate_positions"][-1] > 0.60
+
+
+def test_cleaning_toc_reference_entry_does_not_create_a_bibliography_boundary():
+    toc_entry = "5. Literaturverzeichnis ........ 23"
+    body_sections = "\n".join(
+        f"{index}. Numbered chapter section with descriptive body text."
+        for index in range(1, 35)
+    )
+    actual_references = (
+        "Mueller, A. (2020): A grounded reference entry. Journal One.\n"
+        "Schmidt, B. (2021): Another grounded reference entry. Journal Two."
+    )
+    pages = [
+        {
+            "page_number": 1,
+            "blocks": [
+                {"text": "Inhaltsverzeichnis"},
+                {"text": toc_entry},
+                {"text": body_sections},
+            ],
+        },
+        {
+            "page_number": 12,
+            "blocks": [
+                {"text": "5. Literaturverzeichnis"},
+                {"text": actual_references},
+            ],
+        },
+    ]
+
+    paper = paper_helpers.build_clean_paper_text(pages)
+    body, bibliography, debug = split_text_and_references(paper["text"])
+
+    assert toc_entry in paper["text"]
+    assert debug["references_heading"].removeprefix("## ") == (
+        "5. Literaturverzeichnis"
+    )
+    assert bibliography == actual_references
+    assert body.startswith("Inhaltsverzeichnis")
+
+
+def test_directory_entry_page_numbers_are_preserved():
+    toc_entry = "1. Introduction ........ 3"
+    pages = [{
+        "page_number": 1,
+        "blocks": [
+            {"text": "Contents"},
+            {"text": toc_entry},
+            {"text": "Introduction starts here."},
+        ],
+    }]
+
+    paper = paper_helpers.build_clean_paper_text(pages)
+
+    assert toc_entry in paper["text"]
+
+
+def test_reference_heading_with_single_inline_author_year_entry_is_accepted():
+    text = (
+        "Paper body.\n"
+        "9. Literaturverzeichnis Bernhardsson-Laros, Nils (2016): "
+        "A supported reference entry. Journal One."
+    )
+
+    body, bibliography, debug = split_text_and_references(text)
+
+    assert body == "Paper body."
+    assert bibliography.startswith("Bernhardsson-Laros, Nils (2016)")
+    assert debug["references_found"] is True
+
+
+def test_reference_heading_at_page_start_is_not_joined_to_body_page():
+    parts = ["The body page ends with an unfinished sentence"]
+    page_text = (
+        "Literaturverzeichnis Collins, K. (2008). "
+        "Game Sound: An Introduction.\n"
+        "Second author reference (2020). Journal Two."
+    )
+
+    paper_helpers.append_page_text(parts, page_text)
+
+    assert parts[1].startswith("Literaturverzeichnis Collins")
+    body, bibliography, debug = split_text_and_references(
+        "\n\n".join(parts)
+    )
+    assert body == "The body page ends with an unfinished sentence"
+    assert bibliography.startswith("Collins, K. (2008)")
+    assert debug["references_found"] is True
+
+
+def test_similar_numbered_references_are_not_deduplicated():
+    first = (
+        "[133] J. Stamper, S. Ritter, and K. Koedinger, "
+        "Algebra I 2005-2006 Development Data Set, 2010."
+    )
+    second = (
+        "[134] J. Stamper, S. Ritter, and K. Koedinger, "
+        "Algebra I 2006-2007 Development Data Set, 2010."
+    )
+    pages = [
+        {
+            "page_number": 1,
+            "blocks": [
+                {"text": "Bibliography"},
+                {"text": first},
+                {"text": second},
+            ],
+        }
+    ]
+
+    assert paper_helpers.paper_normalize_for_repetition(first) == (
+        paper_helpers.paper_normalize_for_repetition(second)
+    )
+    extracted = paper_helpers.build_clean_paper_text(pages)
+
+    assert "[133]" in extracted["text"]
+    assert "[134]" in extracted["text"]
+
+
+def test_repeated_table_headers_at_distinct_positions_are_preserved():
+    blocks = []
+    for index in range(3):
+        y0 = 10 + index * 20
+        blocks.extend([
+            {
+                "text": "Summe Prozent",
+                "x0": 10,
+                "y0": y0,
+                "x1": 100,
+                "y1": y0 + 5,
+            },
+            {
+                "text": f"Group {index + 1} value {index + 10}",
+                "x0": 10,
+                "y0": y0 + 5,
+                "x1": 100,
+                "y1": y0 + 10,
+            },
+        ])
+    blocks.append({
+        "text": "Summe Prozent",
+        "x0": 10,
+        "y0": 10,
+        "x1": 100,
+        "y1": 15,
+    })
+
+    extracted = paper_helpers.build_clean_paper_text([
+        {"page_number": 1, "page_height": 100, "blocks": blocks},
+    ])
+
+    assert extracted["text"].count("Summe Prozent") == 3
+
+
+def test_character_extraction_preserves_short_table_cells():
+    from refchecker.services.pdf_pipeline.text_extractors.one_column_text_extractor import (
+        extract_text_units_from_chars,
+    )
+
+    class Page:
+        def get_text(self, mode):
+            assert mode == "rawdict"
+            chars = []
+            for row, value in enumerate(("A", "2", "M2")):
+                x = 20.0
+                row_chars = []
+                for character in value:
+                    row_chars.append({
+                        "c": character,
+                        "bbox": [x, 20 + row * 20, x + 5, 30 + row * 20],
+                    })
+                    x += 5
+                chars.append({
+                    "type": 0,
+                    "lines": [{
+                        "spans": [{
+                            "size": 10,
+                            "chars": row_chars,
+                        }],
+                    }],
+                })
+            return {"blocks": chars}
+
+    units = extract_text_units_from_chars(Page())
+    extracted = "\n".join(units)
+
+    assert "A" in extracted
+    assert "2" in extracted
+    assert "M2" in extracted
+
+
+def test_one_column_page_falls_back_to_native_text_when_character_text_loses_tokens(
+    monkeypatch,
+):
+    class Page:
+        rect = type("Rect", (), {"width": 600, "height": 800})()
+
+        def get_text(self, mode):
+            assert mode == "text"
+            return "The page source includes the missing table value 978."
+
+    class Pdf:
+        def __iter__(self):
+            return iter([Page()])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        one_column_module.pymupdf,
+        "open",
+        lambda _path: Pdf(),
+    )
+    monkeypatch.setattr(
+        one_column_module,
+        "extract_text_units_from_chars",
+        lambda _page: ["The page source includes"],
+    )
+
+    pages = one_column_module.extract_pages_text_char_based(
+        Path("table.pdf")
+    )
+
+    assert "978" in pages[0]["blocks"][0]["text"]
+
+
+def test_character_reconstruction_preserves_source_order_for_overlapping_glyphs():
+    from refchecker.services.pdf_pipeline.text_extractors.one_column_text_extractor import (
+        extract_text_units_from_chars,
+    )
+
+    class Page:
+        def get_text(self, mode):
+            assert mode == "rawdict"
+            chars = []
+            x = 100.0
+            for index, character in enumerate("Steffen"):
+                if index == 5:
+                    x -= 5.02
+                chars.append({
+                    "c": character,
+                    "bbox": [x, 20, x + 4.5, 30],
+                })
+                x += 5
+            return {
+                "blocks": [{
+                    "type": 0,
+                    "lines": [{
+                        "spans": [{
+                            "size": 10,
+                            "chars": chars,
+                        }],
+                    }],
+                }],
+            }
+
+    units = extract_text_units_from_chars(Page())
+
+    assert "Steffen" in units
 
 
 def test_no_detected_heading_is_distinct_from_detection_failure():
@@ -832,6 +1123,71 @@ def test_two_column_references_keep_column_and_page_order(monkeypatch):
     assert any(
         "GROBID metadata extraction failed" in warning
         for warning in document.metadata["extraction_diagnostics"]["warnings"]
+    )
+
+
+def test_fix_split_uppercase_words_preserves_articles_and_initials():
+    assert (
+        paper_helpers.fix_split_uppercase_words("OpenAlex: A Fully-Open Index")
+        == "OpenAlex: A Fully-Open Index"
+    )
+    assert (
+        paper_helpers.fix_split_uppercase_words("A Large Language Model")
+        == "A Large Language Model"
+    )
+    assert paper_helpers.fix_split_uppercase_words("I Believe") == "I Believe"
+    assert paper_helpers.fix_split_uppercase_words("John J Smith") == "John J Smith"
+    assert paper_helpers.fix_split_uppercase_words("S ICHERUNG") == "SICHERUNG"
+    assert (
+        paper_helpers.fix_split_uppercase_words("M ASCHINENDATEN")
+        == "MASCHINENDATEN"
+    )
+    assert (
+        paper_helpers.fix_split_uppercase_words(
+            "John J Smith and J R R Tolkien"
+        )
+        == "John J Smith and J R R Tolkien"
+    )
+    assert (
+        paper_helpers.fix_split_uppercase_words("NASA, AI, eBay, and iPhone")
+        == "NASA, AI, eBay, and iPhone"
+    )
+
+
+def test_paper_text_normalization_preserves_multilingual_names_and_case():
+    text = (
+        "J\u00fcrgen M\u00fcller, Garc\u00eda M\u00e1rquez, and "
+        "\u0141ukasz \u017b\u00f3\u0142\u0107"
+    )
+    assert paper_helpers.paper_clean_text(text) == text
+    assert (
+        paper_helpers.paper_clean_text(
+            "\u00c4u\u00dfere \u00d6konomie der \u00dcbertragung"
+        )
+        == "\u00c4u\u00dfere \u00d6konomie der \u00dcbertragung"
+    )
+
+
+def test_fix_broken_line_hyphenation_compound_titles_and_coordination():
+    assert (
+        paper_helpers.fix_broken_line_hyphenation("A Fully-\nOpen Index")
+        == "A Fully-Open Index"
+    )
+    assert (
+        paper_helpers.fix_broken_line_hyphenation("Fine-\nGrained Benchmark")
+        == "Fine-Grained Benchmark"
+    )
+    assert (
+        paper_helpers.fix_broken_line_hyphenation("Reference-\nBased Verification")
+        == "Reference-Based Verification"
+    )
+    assert (
+        paper_helpers.fix_broken_line_hyphenation("pre- and post-processing")
+        == "pre- and post-processing"
+    )
+    assert (
+        paper_helpers.fix_broken_line_hyphenation("differ- ent")
+        == "different"
     )
 
 

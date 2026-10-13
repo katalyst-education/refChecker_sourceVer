@@ -1,6 +1,8 @@
 import logging
+from collections import Counter
 from pathlib import Path
 import re
+import unicodedata
 
 import pymupdf  # PyMuPDF
 
@@ -14,7 +16,7 @@ from .base_text_extractor import BaseTextExtractor
 from .paper_helpers import (
     REPEATED_TEXT_MIN_FRACTION,
     paper_clean_text,
-    paper_is_probably_junk,
+    paper_clean_text_preserve_lines,
     merge_reconstructed_lines_into_text_units,
     find_repeated_paper_blocks,
     remove_repeated_paper_blocks,
@@ -69,12 +71,19 @@ def extract_text_units_from_chars(page) -> list[str]:
                         "y1": float(y1),
                         "y_center": (float(y0) + float(y1)) / 2,
                         "size": size,
+                        "source_order": len(chars),
                     })
 
     if not chars:
         return []
 
-    chars.sort(key=lambda item: (item["y_center"], item["x0"]))
+    chars.sort(
+        key=lambda item: (
+            item["y_center"],
+            round(item["x0"] * 2),
+            item["source_order"],
+        )
+    )
 
     visual_lines = []
     current_line = []
@@ -103,7 +112,12 @@ def extract_text_units_from_chars(page) -> list[str]:
     reconstructed_lines = []
 
     for line_chars in visual_lines:
-        line_chars.sort(key=lambda item: item["x0"])
+        line_chars.sort(
+            key=lambda item: (
+                round(item["x0"] * 2),
+                item["source_order"],
+            )
+        )
 
         line_font_size = sorted(
             char["size"] for char in line_chars
@@ -126,7 +140,7 @@ def extract_text_units_from_chars(page) -> list[str]:
 
         text = paper_clean_text("".join(parts))
 
-        if text and not paper_is_probably_junk(text):
+        if text:
             reconstructed_lines.append({
                 "text": text,
                 "x0": min(char["x0"] for char in line_chars),
@@ -141,12 +155,36 @@ def extract_text_units_from_chars(page) -> list[str]:
     return merge_reconstructed_lines_into_text_units(reconstructed_lines)
 
 
+def extract_page_text_units(page) -> list[str]:
+    """Prefer native page text when character reconstruction drops words."""
+    text_units = extract_text_units_from_chars(page)
+    native_text = page.get_text("text") or ""
+
+    if not native_text.strip():
+        return text_units
+
+    def word_counts(text: str) -> Counter:
+        normalized = unicodedata.normalize("NFKC", text).casefold()
+        return Counter(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
+
+    native_words = word_counts(native_text)
+    reconstructed_words = word_counts("\n".join(text_units))
+    if any(
+        count > reconstructed_words[word]
+        for word, count in native_words.items()
+    ):
+        native_text = paper_clean_text_preserve_lines(native_text)
+        return [native_text] if native_text else text_units
+
+    return text_units
+
+
 def extract_pages_text_char_based(pdf_path: Path) -> list[dict]:
     pdf = pymupdf.open(pdf_path)
     pages = []
 
     for page_index, page in enumerate(pdf, start=1):
-        text_units = extract_text_units_from_chars(page)
+        text_units = extract_page_text_units(page)
 
         blocks = [
             {

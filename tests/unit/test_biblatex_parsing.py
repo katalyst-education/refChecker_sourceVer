@@ -11,6 +11,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from refchecker.utils.biblatex_parser import detect_biblatex_format, parse_biblatex_references, parse_biblatex_entry_content
+from refchecker.core.refchecker import ArxivReferenceChecker
 
 
 class TestBiblatexParsing(unittest.TestCase):
@@ -48,6 +49,25 @@ class TestBiblatexParsing(unittest.TestCase):
         self.assertEqual(ref['authors'][0], 'Egor Zverev')
         self.assertEqual(ref['authors'][3], 'Christoph H Lampert')  # Should not have "and" prefix
         self.assertEqual(ref['year'], 2024)
+
+    def test_numbered_text_falls_back_when_not_valid_biblatex(self):
+        """A failed biblatex parse must not block the generic numbered parser."""
+        bibliography = (
+            "[1] Smith J. 2020. A clearly named paper title. Journal of Testing.\n"
+            "[2] Jones A. 2021. Another clear paper title. Systems Review."
+        )
+        checker = ArxivReferenceChecker(
+            llm_config={"disabled": True},
+            extraction_mode="cascade",
+        )
+        checker.debug_mode = True
+
+        references = checker._parse_references_regex(bibliography)
+
+        self.assertEqual(len(references), 2)
+        self.assertEqual(references[0]["title"], "A clearly named paper title")
+        self.assertEqual(references[1]["title"], "Another clear paper title")
+        self.assertFalse(checker.fatal_error)
         
     def test_parse_regular_quotes(self):
         """Test parsing entries with regular ASCII quotes"""

@@ -32,7 +32,10 @@ from backend.auth import is_multiuser_mode
 from backend.database import get_data_dir
 from backend.reference_status import classify_verification_result
 
-from refchecker.utils.text_utils import extract_latex_references
+from refchecker.utils.text_utils import (
+    extract_latex_references,
+    normalize_reference_fields,
+)
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
 from backend.reference_urls import build_authoritative_urls
 from backend.reference_result import project_verification_result
@@ -1072,59 +1075,8 @@ def _extract_pdf_text_cli_style(pdf_path: str, llm_provider) -> str:
 
 
 def _normalize_reference_fields(ref: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize reference field names for consistency.
-
-    The parser uses 'journal' but the rest of the pipeline expects 'venue'.
-    This function normalizes field names for consistent handling.
-
-    Also lifts DOIs and arXiv IDs out of cited_url / url / raw_text into
-    the top-level fields so the verifier's DOI/arXiv compare always
-    has them. The LaTeX bibitem parser was leaving DOIs embedded in
-    the trailing URL ("…1992. https://doi.org/10.xxxx/yyyy"), which
-    meant the cited DOI never reached the checkers — so DOI mismatches
-    were silently missed when the cited DOI differed from the verified
-    one.
-    """
-    # Map 'journal' to 'venue' if venue is not set
-    if ref.get('journal') and not ref.get('venue'):
-        ref['venue'] = ref['journal']
-
-    # Backfill top-level doi / arxiv_id from cited_url / raw_text when
-    # missing — covers LaTeX bibitems where the DOI URL is the last
-    # token of the entry.
-    if not ref.get('doi'):
-        import re as _re
-        scan_blobs = []
-        for key in ('cited_url', 'url', 'raw_text', 'raw'):
-            v = ref.get(key)
-            if isinstance(v, str) and v:
-                scan_blobs.append(v)
-        for blob in scan_blobs:
-            m = _re.search(r'(?:10\.\d{4,9}/[\w.\-;()/:%]+)', blob)
-            if m:
-                # Strip trailing punctuation that often follows the URL
-                # in flowing prose ("…10.xxxx/yyyy. The paper shows…").
-                doi = m.group(0).rstrip('.,;)')
-                ref['doi'] = doi
-                break
-
-    if not ref.get('arxiv_id'):
-        import re as _re
-        for key in ('cited_url', 'url', 'raw_text', 'raw'):
-            v = ref.get(key)
-            if isinstance(v, str) and v:
-                m = _re.search(r'arxiv\.org/abs/([\w.\-/]+)', v, _re.IGNORECASE)
-                if m:
-                    aid = m.group(1).rstrip('.,;)')
-                    # Strip version suffix so 2410.10150v2 → 2410.10150.
-                    ref['arxiv_id'] = _re.sub(r'v\d+$', '', aid)
-                    break
-                m2 = _re.search(r'arxiv[: ]\s*(\d{4}\.\d{4,5})', v, _re.IGNORECASE)
-                if m2:
-                    ref['arxiv_id'] = m2.group(1)
-                    break
-
-    return ref
+    """Apply the shared core's reference-field normalization."""
+    return normalize_reference_fields(ref)
 
 
 # Default max concurrent reference checks (similar to CLI default)
@@ -1197,6 +1149,7 @@ class ProgressRefChecker:
         from refchecker.utils.extraction_policy import normalize_extraction_mode
         self.extraction_mode = normalize_extraction_mode(extraction_mode)
         self._last_reference_parser_method = None
+        self._last_reference_parse_error = None
         self.progress_callback = progress_callback
         self.cancel_event = cancel_event
         self.check_id = check_id
@@ -2779,7 +2732,9 @@ class ProgressRefChecker:
                     detail_msg = "AI-text detection only — reference checking was skipped for this run."
                 else:
                     detail_msg = "No references could be extracted from this paper."
-                    if not self.llm and extraction_method in ('pdf', 'file', 'text'):
+                    if self._last_reference_parse_error:
+                        detail_msg = self._last_reference_parse_error
+                    elif not self.llm and extraction_method in ('pdf', 'file', 'text'):
                         detail_msg += " No LLM is configured — set one up in Settings → LLM provider to enable LLM-assisted extraction."
                     elif not paper_text or len(paper_text or "") < 200:
                         detail_msg += " The file's text content looks empty or too short."
@@ -3406,6 +3361,7 @@ class ProgressRefChecker:
         bibliography_text: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Extract references using the same pipeline/order as the CLI."""
+        self._last_reference_parse_error = None
         try:
             cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
 
@@ -3484,6 +3440,11 @@ class ProgressRefChecker:
 
             refs = await asyncio.to_thread(_parse_with_scope)
             self._last_reference_parser_method = cli_checker.last_reference_parser_method
+            self._last_reference_parse_error = (
+                cli_checker.fatal_error_message
+                if cli_checker.last_reference_parser_method == 'unsupported'
+                else None
+            )
             if cli_checker.fatal_error:
                 logger.error("Reference parsing failed (CLI fatal_error)")
                 return []
@@ -3622,6 +3583,19 @@ class ProgressRefChecker:
         )
         if parsed_references:
             return parsed_references, self._last_reference_parser_method or 'pdf'
+
+        if (
+            self._last_reference_parser_method == 'unsupported'
+            and getattr(self, '_last_reference_parse_error', None)
+            and not grobid_candidate
+        ):
+            if grobid_error is not None:
+                logger.warning(
+                    "GROBID fallback unavailable after deterministic parser "
+                    "reported an unsupported bibliography format: %s",
+                    grobid_error,
+                )
+            return [], 'unsupported'
 
         if grobid_candidate:
             logger.warning("Using weak GROBID candidate because no parser produced a replacement")
