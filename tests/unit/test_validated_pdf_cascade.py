@@ -26,6 +26,50 @@ def test_grounded_merge_recovers_truncated_grobid_author_list():
     assert merged[0]['raw_text'].startswith('Alice Smith')
 
 
+def test_grounded_merge_recovers_truncated_grobid_url_from_pdf_text():
+    grobid = [{
+        'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+        'authors': ['N. Kara', 'N. Sevim'],
+        'year': 2013,
+        'url': 'https://www.cedtech.net/article/',
+    }]
+    text_parser = [{
+        'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+        'authors': ['N. Kara', 'N. Sevim'],
+        'year': 2013,
+        'url': 'https://www.cedtech.net/article/adaptive-learning-systems-beyond-teaching-machines-6095',
+        'raw_text': (
+            '[39] N. Kara and N. Sevim, "Adaptive Learning Systems: Beyond '
+            'Teaching Machines," Contemporary Educational Technology, vol. 4, '
+            'no. 2, Jun. 2013. [Online]. Available: '
+            'https://www.cedtech.net/article/\n'
+            'adaptive-learning-systems-beyond-teaching-machines-6095'
+        ),
+    }]
+
+    merged = merge_grounded_reference_candidates(grobid, text_parser)
+
+    assert merged[0]['url'] == text_parser[0]['url']
+    assert merged[0]['raw_text'] == text_parser[0]['raw_text']
+
+
+def test_grounded_merge_keeps_non_prefix_grobid_url():
+    grobid = [{
+        'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+        'authors': ['N. Kara', 'N. Sevim'],
+        'url': 'https://publisher.example/paper',
+    }]
+    text_parser = [{
+        'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+        'authors': ['N. Kara', 'N. Sevim'],
+        'url': 'https://www.cedtech.net/article/adaptive-learning-systems-beyond-teaching-machines-6095',
+    }]
+
+    merged = merge_grounded_reference_candidates(grobid, text_parser)
+
+    assert merged[0]['url'] == grobid[0]['url']
+
+
 def test_grounded_merge_does_not_mix_different_references():
     grobid = [{'title': 'First Paper', 'authors': ['Alice Smith'], 'year': 2024}]
     text_parser = [{'title': 'Entirely Different Work', 'authors': ['Alice Smith', 'Bob Jones'], 'year': 2024}]

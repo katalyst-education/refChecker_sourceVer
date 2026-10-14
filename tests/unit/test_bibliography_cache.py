@@ -61,3 +61,20 @@ def test_bibliography_cache_ignores_previous_extraction_version(tmp_path):
     cache_bibliography(str(tmp_path), input_spec, stale_bibliography, "_Provider:gpt-4.1:https://api.example.test/v1")
 
     assert cached_bibliography(str(tmp_path), input_spec, llm_cache_identity_from_extractor(_Extractor())) is None
+
+
+def test_bibliography_cache_invalidates_pre_multiline_url_parser_results(tmp_path):
+    input_spec = "https://arxiv.org/pdf/2602.06718"
+    old_identity = "_Provider:gpt-4.1:https://api.example.test/v1:refparse-v5"
+    stale_bibliography = [{
+        "title": "Adaptive Learning Systems: Beyond Teaching Machines",
+        "url": "https://www.cedtech.net/article/",
+    }]
+
+    cache_bibliography(str(tmp_path), input_spec, stale_bibliography, old_identity)
+
+    assert cached_bibliography(
+        str(tmp_path),
+        input_spec,
+        llm_cache_identity_from_extractor(_Extractor()),
+    ) is None
