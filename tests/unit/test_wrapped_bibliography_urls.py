@@ -9,6 +9,13 @@ LASEK_ENTRY = (
     "Available: http://www.inderscience.com/link.php?id=\n52339"
 )
 
+CEDTECH_ENTRY = (
+    '[2] N. Kara and N. Sevim, "Adaptive Learning Systems: Beyond Teaching '
+    'Machines," Contemporary Educational Technology, vol. 4, no. 2, Jun. '
+    '2013. [Online]. Available: https://www.cedtech.net/article/\n'
+    'adaptive-learning-systems-beyond-teaching-machines-6095'
+)
+
 
 def _numbered_bibliography(entry):
     return (
@@ -47,6 +54,17 @@ def test_join_wrapped_url_lines_does_not_merge_next_entry_or_prose():
     assert join_wrapped_url_lines(text_after) == text_after
 
 
+def test_join_wrapped_url_with_newline_normalized_to_space():
+    text = (
+        "[Online]. Available: https://www.cedtech.net/article/ "
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+    assert join_wrapped_url_lines(text) == (
+        "[Online]. Available: https://www.cedtech.net/article/"
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+
+
 def test_numbered_pdf_reference_keeps_complete_wrapped_url():
     checker = ArxivReferenceChecker()
 
@@ -69,3 +87,35 @@ def test_parse_references_cascade_keeps_complete_wrapped_url_offline():
     urls = [reference.get("url") for reference in references]
     assert "http://www.inderscience.com/link.php?id=52339" in urls
     assert len(references) == 3
+
+
+def test_screenshot_shaped_cedtech_url_is_complete_in_shared_parser():
+    checker = ArxivReferenceChecker()
+    checker.extraction_mode = "cascade"
+    bibliography = _numbered_bibliography(CEDTECH_ENTRY)
+
+    references = checker.parse_references(bibliography)
+
+    kara = next(reference for reference in references if "Kara" in reference.get("raw_text", ""))
+    assert kara["url"] == (
+        "https://www.cedtech.net/article/"
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+    assert "article/\nadaptive-learning" in bibliography
+
+
+def test_screenshot_shaped_cedtech_url_is_complete_after_line_whitespace_normalization():
+    checker = ArxivReferenceChecker()
+    checker.extraction_mode = "cascade"
+    bibliography = _numbered_bibliography(CEDTECH_ENTRY).replace(
+        "article/\nadaptive-learning",
+        "article/ adaptive-learning",
+    )
+
+    references = checker.parse_references(bibliography)
+
+    kara = next(reference for reference in references if "Kara" in reference.get("raw_text", ""))
+    assert kara["url"] == (
+        "https://www.cedtech.net/article/"
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )

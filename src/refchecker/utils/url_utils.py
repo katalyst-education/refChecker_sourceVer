@@ -525,6 +525,11 @@ _URL_CONTINUATION_LINE_RE = re.compile(
     r"^[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+$"
 )
 _REFERENCE_MARKER_LINE_RE = re.compile(r'^(?:\[\d+\]|\(?\d{1,4}[.)])$')
+_SPACE_WRAPPED_AVAILABLE_URL_RE = re.compile(
+    r"(?i)(Available:\s*https?://[^\s,)\]]*[=/\-_&?#%+~])"
+    r"[ \t]+([A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+)"
+    r"(?=\s*(?:\[\d+\]|$))"
+)
 
 
 def join_wrapped_url_lines(text: str) -> str:
@@ -556,7 +561,21 @@ def join_wrapped_url_lines(text: str) -> str:
             current = stripped + candidate
             index += 1
         joined.append(current)
-    return '\n'.join(joined)
+    joined_text = '\n'.join(joined)
+
+    def join_available_url_suffix(match: re.Match) -> str:
+        continuation = match.group(2)
+        if (
+            _REFERENCE_MARKER_LINE_RE.match(continuation)
+            or not re.search(r'[-._~:/?#&=%]', continuation)
+        ):
+            return match.group(0)
+        return match.group(1) + continuation
+
+    return _SPACE_WRAPPED_AVAILABLE_URL_RE.sub(
+        join_available_url_suffix,
+        joined_text,
+    )
 
 
 def _strip_glued_pdf_citation_tail(url: str) -> str:

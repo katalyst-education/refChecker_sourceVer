@@ -39,9 +39,20 @@ def merge_grounded_reference_candidates(
                 return structured
 
         combined = dict(structured_ref)
-        for field in ('title', 'year', 'venue', 'journal', 'doi', 'arxiv_id', 'url', 'raw_text'):
+        for field in ('title', 'year', 'venue', 'journal', 'doi', 'arxiv_id', 'raw_text'):
             if not combined.get(field) and text_ref.get(field):
                 combined[field] = text_ref[field]
+
+        structured_url = combined.get('url') or ''
+        text_url = text_ref.get('url') or ''
+        if not structured_url:
+            if text_url:
+                combined['url'] = text_url
+        elif (
+            text_url.startswith(structured_url)
+            and len(text_url) > len(structured_url)
+        ):
+            combined['url'] = text_url
 
         structured_authors = [
             author for author in (structured_ref.get('authors') or [])
