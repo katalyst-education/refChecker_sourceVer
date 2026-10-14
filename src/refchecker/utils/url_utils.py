@@ -517,6 +517,48 @@ def clean_url_punctuation(url: str) -> str:
     return url
 
 
+_WRAPPED_URL_LINE_END_RE = re.compile(
+    r'https?://(?:[^\s/]*\.|\S*[=/\-_&?#%+~])$',
+    re.IGNORECASE,
+)
+_URL_CONTINUATION_LINE_RE = re.compile(
+    r"^[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+$"
+)
+_REFERENCE_MARKER_LINE_RE = re.compile(r'^(?:\[\d+\]|\(?\d{1,4}[.)])$')
+
+
+def join_wrapped_url_lines(text: str) -> str:
+    """Rejoin URLs that a PDF wrapped onto following physical lines.
+
+    A line is joined only when it ends in a URL fragment that cannot be a
+    complete URL (open host or a trailing path/query delimiter) and the next
+    line is a single URL-like token. Printed characters, including hyphens,
+    are preserved; only the line break is removed.
+    """
+    if not text or '://' not in text:
+        return text
+
+    lines = text.split('\n')
+    joined = []
+    index = 0
+    while index < len(lines):
+        current = lines[index]
+        index += 1
+        while index < len(lines):
+            stripped = current.rstrip()
+            candidate = lines[index].strip()
+            if not (
+                _WRAPPED_URL_LINE_END_RE.search(stripped)
+                and _URL_CONTINUATION_LINE_RE.match(candidate)
+                and not _REFERENCE_MARKER_LINE_RE.match(candidate)
+            ):
+                break
+            current = stripped + candidate
+            index += 1
+        joined.append(current)
+    return '\n'.join(joined)
+
+
 def _strip_glued_pdf_citation_tail(url: str) -> str:
     """Trim a next-reference citation accidentally appended after a PDF URL."""
     if not url:

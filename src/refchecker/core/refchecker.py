@@ -5275,6 +5275,9 @@ class ArxivReferenceChecker:
                 self.last_reference_parser_method = 'bib'
                 return references
 
+        from refchecker.utils.url_utils import join_wrapped_url_lines
+        bibliography_text = join_wrapped_url_lines(bibliography_text)
+
         numbered_entries = self._split_numbered_reference_entries(bibliography_text)
         expected_numbered_count = len(numbered_entries)
         author_year_count = len(
@@ -5653,6 +5656,8 @@ class ArxivReferenceChecker:
         """
         self.used_regex_extraction = True
         from refchecker.utils.text_utils import normalize_reference_fields
+        from refchecker.utils.url_utils import join_wrapped_url_lines
+        bibliography_text = join_wrapped_url_lines(bibliography_text)
 
         def normalize_references(references):
             return [
