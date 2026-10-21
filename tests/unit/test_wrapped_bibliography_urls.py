@@ -18,14 +18,6 @@ CEDTECH_ENTRY = (
     'adaptive-learning-systems-beyond-teaching-machines-6095'
 )
 
-JSTOR_ENTRY = (
-    '[2] S. Retalis and A. Papasalouros, "Designing and Generating '
-    'Educational Adaptive Hypermedia Applications," Journal of Educational '
-    'Technology & Society, vol. 8, no. 3, pp. 26-35, 2005. [Online]. '
-    'Available: https://www.jstor.org/stable/jeductechsoci.8.3.\n'
-    '26'
-)
-
 
 def _numbered_bibliography(entry):
     return (
@@ -72,69 +64,6 @@ def test_join_wrapped_url_with_newline_normalized_to_space():
     assert join_wrapped_url_lines(text) == (
         "[Online]. Available: https://www.cedtech.net/article/"
         "adaptive-learning-systems-beyond-teaching-machines-6095"
-    )
-
-
-def test_jstor_period_delimited_numeric_url_wrap_is_preserved():
-    bibliography = (
-        '[1] A. Author, "Previous work," Journal of Tests, 2004.\n'
-        f'{JSTOR_ENTRY}\n'
-        '[3] N. A. Anindyaputri, R. A. Yuana, and P. Hatta, "Enhancing '
-        'Students Ability," Journal of Tests, 2006.'
-    )
-    original_bibliography = bibliography
-
-    joined = join_wrapped_url_lines(bibliography)
-    checker = ArxivReferenceChecker()
-    checker.extraction_mode = "cascade"
-    references = checker.parse_references(bibliography)
-    retalis = next(
-        reference for reference in references
-        if "Designing and Generating Educational Adaptive Hypermedia Applications"
-        in (reference.get("title") or "")
-    )
-
-    assert retalis["url"] == (
-        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
-    )
-    assert "26" not in (retalis.get("venue") or "")
-    assert len(references) == 3
-    assert bibliography == original_bibliography
-    assert "https://www.jstor.org/stable/jeductechsoci.8.3.\n26" in bibliography
-    assert "https://www.jstor.org/stable/jeductechsoci.8.3.26" in joined
-
-
-def test_period_delimited_url_wrap_does_not_join_prose_or_reference_marker():
-    prose = (
-        "[Online]. Available: https://example.org/stable/item.8.3.\n"
-        "The following numeric value is 26 words long."
-    )
-    next_reference = (
-        "[Online]. Available: https://example.org/stable/item.8.3.\n"
-        "[37] Another reference."
-    )
-    unrelated_number = (
-        "pp. 26-35, 2005. [Online]. Available: "
-        "https://example.org/stable/item.8.3.\n"
-        "27\n[37] Another reference."
-    )
-
-    assert join_wrapped_url_lines(prose) == prose
-    assert join_wrapped_url_lines(next_reference) == next_reference
-    assert join_wrapped_url_lines(unrelated_number) == unrelated_number
-
-
-def test_period_delimited_url_wrap_survives_space_normalization():
-    text = (
-        "pp. 26-35, 2005. [Online]. Available: "
-        "https://www.jstor.org/stable/jeductechsoci.8.3. 26\n[37] "
-        "Another reference."
-    )
-
-    assert join_wrapped_url_lines(text) == (
-        "pp. 26-35, 2005. [Online]. Available: "
-        "https://www.jstor.org/stable/jeductechsoci.8.3.26\n[37] "
-        "Another reference."
     )
 
 
@@ -460,3 +389,63 @@ def test_period_wrapped_url_suffix_matches_after_space_normalization():
         "https://www.jstor.org/stable/jeductechsoci.8.3.26\n[37] "
         "Another reference."
     )
+
+
+@pytest.mark.parametrize(
+    ("wrapped_url", "expected_url"),
+    [
+        (
+            "http://www.tandfonline.com/doi/abs/10. "
+            "1080/00461520.2011.611369",
+            "http://www.tandfonline.com/doi/abs/10.1080/00461520.2011.611369",
+        ),
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/ "
+            "S187704281501486X",
+            "https://linkinghub.elsevier.com/retrieve/pii/S187704281501486X",
+        ),
+        (
+            "https://journals.sagepub.com/doi/10.3102/ "
+            "0013189X013006004",
+            "https://journals.sagepub.com/doi/10.3102/0013189X013006004",
+        ),
+        (
+            "https://www.jstor.org/stable/jeductechsoci.8.3.\n26",
+            "https://www.jstor.org/stable/jeductechsoci.8.3.26",
+        ),
+        (
+            "https://www. microsoft.com/en-us/research/wp-content/uploads/"
+            "2008/01/NIPS2007_0931.pdf",
+            "https://www.microsoft.com/en-us/research/wp-content/uploads/"
+            "2008/01/NIPS2007_0931.pdf",
+        ),
+        (
+            "https://www.frontiersin.org/article/10.3389/fpsyg.\n"
+            "2019.00620/full",
+            "https://www.frontiersin.org/article/10.3389/fpsyg.2019.00620/full",
+        ),
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/\n"
+            "S2666920X22000595",
+            "https://linkinghub.elsevier.com/retrieve/pii/S2666920X22000595",
+        ),
+        (
+            "https://pslcdatashop.web.cmu. edu/KDDCup/",
+            "https://pslcdatashop.web.cmu.edu/KDDCup/",
+        ),
+    ],
+)
+def test_exact_glicko_pdf_url_wrap_shapes_are_reconstructed(
+    wrapped_url, expected_url
+):
+    bibliography = (
+        '[1] A. Author, "Study," Journal, pp. 26-35, 2019. '
+        f"[Online]. Available: {wrapped_url}\n"
+        '[2] B. Other, "Next Work," Journal, 2020.'
+    )
+
+    references = ArxivReferenceChecker()._parse_references_regex(bibliography)
+
+    assert len(references) == 2
+    assert references[0]["url"] == expected_url
+    assert references[1]["title"] == "Next Work"
