@@ -5360,6 +5360,13 @@ class ArxivReferenceChecker:
                             repaired_ref = dict(repaired_ref)
                             repaired_ref.setdefault('raw_text', raw_entry)
                             repaired_candidate[index] = repaired_ref
+                        from refchecker.utils.extraction_quality import (
+                            preserve_grounded_reference_urls,
+                        )
+                        repaired_candidate = preserve_grounded_reference_urls(
+                            repaired_candidate,
+                            deterministic_references,
+                        )
                         repaired_validation = validate_parsed_references(
                             repaired_candidate,
                             require_all=True,
@@ -5457,6 +5464,17 @@ class ArxivReferenceChecker:
                         if chunked_references:
                             chunked_processed = self._process_llm_extracted_references(chunked_references)
                             if len(chunked_processed) >= expected_numbered_count:
+                                if (
+                                    self.extraction_mode == 'cascade'
+                                    and len(chunked_processed) == len(deterministic_references)
+                                ):
+                                    from refchecker.utils.extraction_quality import (
+                                        preserve_grounded_reference_urls,
+                                    )
+                                    chunked_processed = preserve_grounded_reference_urls(
+                                        chunked_processed,
+                                        deterministic_references,
+                                    )
                                 self.last_reference_parser_method = 'llm'
                                 return chunked_processed
                             if len(chunked_processed) > len(processed_references):
@@ -5476,6 +5494,17 @@ class ArxivReferenceChecker:
                                 self.last_reference_parser_method = 'regex'
                                 return deterministic_references
                             self.fatal_error = fatal_error_before_fallback
+                    if (
+                        self.extraction_mode == 'cascade'
+                        and len(processed_references) == len(deterministic_references)
+                    ):
+                        from refchecker.utils.extraction_quality import (
+                            preserve_grounded_reference_urls,
+                        )
+                        processed_references = preserve_grounded_reference_urls(
+                            processed_references,
+                            deterministic_references,
+                        )
                     self.last_reference_parser_method = 'llm'
                     return processed_references
                 else:

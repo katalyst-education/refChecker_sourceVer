@@ -71,6 +71,62 @@ def merge_grounded_reference_candidates(
     return merged
 
 
+def preserve_grounded_reference_urls(
+    candidates: List[Dict[str, Any]],
+    text_parsed: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Restore missing or truncated URLs from positionally aligned text parses."""
+    from refchecker.utils.text_utils import calculate_title_similarity
+
+    if len(candidates) != len(text_parsed):
+        return candidates
+
+    grounded_candidates = []
+    for candidate, text_ref in zip(candidates, text_parsed):
+        grounded_url = text_ref.get('url') or ''
+        if not grounded_url:
+            grounded_candidates.append(candidate)
+            continue
+
+        candidate_title = candidate.get('title') or ''
+        grounded_title = text_ref.get('title') or ''
+        if (
+            candidate_title
+            and grounded_title
+            and calculate_title_similarity(
+                candidate_title.lower(),
+                grounded_title.lower(),
+            ) < 0.72
+        ):
+            grounded_candidates.append(candidate)
+            continue
+
+        candidate_url = candidate.get('url') or ''
+        url_is_grounded_prefix = not candidate_url or (
+            grounded_url.startswith(candidate_url)
+            and len(grounded_url) > len(candidate_url)
+        )
+        recovered_fields = {}
+        if url_is_grounded_prefix:
+            recovered_fields['url'] = grounded_url
+
+        candidate_cited_url = candidate.get('cited_url') or ''
+        if not candidate_cited_url:
+            if url_is_grounded_prefix:
+                recovered_fields['cited_url'] = grounded_url
+        elif (
+            grounded_url.startswith(candidate_cited_url)
+            and len(grounded_url) > len(candidate_cited_url)
+        ):
+            recovered_fields['cited_url'] = grounded_url
+        if recovered_fields:
+            candidate = dict(candidate)
+            candidate.update(recovered_fields)
+        grounded_candidates.append(candidate)
+
+    return grounded_candidates
+
+
 def strict_numbered_text_candidate(
     checker: Any,
     bibliography_text: Optional[str],
