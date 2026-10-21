@@ -2651,6 +2651,9 @@ class ArxivReferenceChecker:
         Returns:
             Tuple of (authors list, title) or None if extraction failed
         """
+        from refchecker.utils.url_utils import clean_url_punctuation, join_wrapped_url_lines
+
+        ref_text = join_wrapped_url_lines(ref_text)
         # First, normalize the text - replace newlines with spaces
         cleaned_ref = re.sub(r'\s+', ' ', ref_text).strip()
         
@@ -2721,17 +2724,17 @@ class ArxivReferenceChecker:
         # Check if this is a URL-based reference (common in some papers)
         if re.search(r'https?://', cleaned_ref):
             # This is likely a URL reference, not a standard academic citation
-            # Handle multi-line URLs by removing newlines and reconstructing
-            url_pattern = r'(https?://[^\s]*(?:\n[^\s\[\]]*)*)'
+            url_pattern = r'(https?://[^\s\[\]]+)'
             url_match = re.search(url_pattern, cleaned_ref)
             if url_match:
-                # Extract and reconstruct the URL
                 raw_url = url_match.group(1).strip()
-                # Remove newlines and spaces within the URL
-                url = re.sub(r'\s+', '', raw_url)
+                url = clean_url_punctuation(raw_url)
                 
                 # For URL references, extract any remaining text as title
-                remaining_text = cleaned_ref.replace(raw_url, '').strip()
+                remaining_text = (
+                    cleaned_ref[:url_match.start()]
+                    + cleaned_ref[url_match.end():]
+                ).strip()
                 # Remove trailing periods and clean up
                 remaining_text = re.sub(r'^\s*[.\s]*|[.\s]*$', '', remaining_text)
                 
@@ -2740,13 +2743,15 @@ class ArxivReferenceChecker:
         
         # Also check if the reference contains only a URL (possibly with some ID)
         if re.search(r'^https?://', cleaned_ref) and not re.search(r'[A-Z][a-z]+ [A-Z][a-z]+', cleaned_ref):
-            # This is likely just a URL with maybe some ID
-            url_pattern = r'(https?://[^\s]*(?:\n[^\s\[\]]*)*)'
+            url_pattern = r'(https?://[^\s\[\]]+)'
             url_match = re.search(url_pattern, cleaned_ref)
             if url_match:
                 raw_url = url_match.group(1).strip()
-                url = re.sub(r'\s+', '', raw_url)
-                remaining_text = cleaned_ref.replace(raw_url, '').strip()
+                url = clean_url_punctuation(raw_url)
+                remaining_text = (
+                    cleaned_ref[:url_match.start()]
+                    + cleaned_ref[url_match.end():]
+                ).strip()
                 # Remove trailing periods and clean up
                 remaining_text = re.sub(r'^\s*[.\s]*|[.\s]*$', '', remaining_text)
                 
@@ -5120,7 +5125,7 @@ class ArxivReferenceChecker:
     def _parse_single_author_year_entry(self, raw_entry):
         """Parse an individual author-year entry into a structured reference dict."""
         from refchecker.utils.text_utils import clean_title
-        from refchecker.utils.url_utils import clean_url
+        from refchecker.utils.url_utils import clean_url, join_wrapped_url_lines
         from refchecker.utils.doi_utils import normalize_doi, construct_doi_url
 
         match = _AUTHOR_YEAR_ENTRY_START_RE.search(raw_entry)
@@ -5136,7 +5141,7 @@ class ArxivReferenceChecker:
         if not authors:
             return None
 
-        rest = raw_entry[match.end():].strip()
+        rest = join_wrapped_url_lines(raw_entry[match.end():]).strip()
         rest = re.sub(r'^[.):\s]+', '', rest)
 
         # Detect merged multi-reference records
@@ -5156,10 +5161,14 @@ class ArxivReferenceChecker:
 
         url = ""
         arxiv_url = ""
-        url_match = re.search(r'https?:\s*//[^\s]+(?:\s+[^\s]+)*', rest)
+        url_match = re.search(r'https?:\s*//[^\s\[\]]+', rest)
         if url_match:
-            candidate_url = re.sub(r'\s+', '', url_match.group(0))
-            candidate_url = re.sub(r'[.,;)]+$', '', candidate_url)
+            candidate_url = re.sub(
+                r'^(https?):\s*//',
+                r'\1://',
+                url_match.group(0),
+                flags=re.IGNORECASE,
+            )
             candidate_url = clean_url(candidate_url)
             if candidate_url.startswith(('http://', 'https://')):
                 url = candidate_url
@@ -5801,13 +5810,20 @@ class ArxivReferenceChecker:
         if not references:
             references = [line.strip() for line in normalized_bib.split('\n') if line.strip()]
             logger.debug(f"Using line-by-line splitting, found {len(references)} potential references")
-        references = [ref.strip() for ref in references if ref.strip()]
+        references = [
+            join_wrapped_url_lines(ref).strip()
+            for ref in references
+            if ref.strip()
+        ]
 
         # --- POST-PROCESSING: fix malformed DOIs/URLs and edge cases ---
         def clean_url(url):
             if not url:
                 return url
+            from refchecker.utils.url_utils import clean_url_punctuation
+
             url = url.strip()
+            url = clean_url_punctuation(url)
             # Remove trailing punctuation, but preserve file extensions
             # Only remove trailing punctuation if it's not part of a file extension
             if not re.search(r'\.[a-zA-Z]{2,4}$', url):
@@ -5845,7 +5861,7 @@ class ArxivReferenceChecker:
             r'DOI:([^\s,\)]+)',
         ]
         url_patterns = [
-            r'https?://(?!arxiv\.org)[^\s,\)]+',
+            r'https?://(?!arxiv\.org)[^\s,]+',
         ]
         for i, ref in enumerate(references):
             logger.debug(f"Processing reference {i+1}: {ref[:100]}...")
@@ -5973,27 +5989,6 @@ class ArxivReferenceChecker:
                             url = clean_url(raw_url)
                             break
                     
-                    # Handle multi-line URLs specifically
-                    if not url and re.search(r'https?://', ref):
-                        # Try to reconstruct multi-line URLs
-                        url_start_match = re.search(r'https?://[^\s\n]*', ref)
-                        if url_start_match:
-                            url_start = url_start_match.group(0)
-                            # Look for continuation on the next line(s)
-                            remaining_ref = ref[url_start_match.end():].strip()
-                            # Remove leading whitespace and reference numbers
-                            remaining_ref = re.sub(r'^\s*\[\d+\]?\s*', '', remaining_ref)
-                            
-                            # Check if the remaining part looks like a URL continuation
-                            # (alphanumeric characters, hyphens, slashes, etc.)
-                            if re.match(r'^[a-zA-Z0-9\-_/.=?&%\n\s]+\s*\.?\s*$', remaining_ref):
-                                # Combine the URL parts, removing newlines and spaces
-                                # Don't strip dots from URLs as they might be file extensions
-                                url_continuation = re.sub(r'\s+', '', remaining_ref.strip())
-                                # Only remove trailing dot if it's not part of a file extension
-                                if url_continuation.endswith('.') and not re.search(r'\.[a-zA-Z]{2,4}\.?$', url_continuation):
-                                    url_continuation = url_continuation.rstrip('.')
-                                url = url_start + url_continuation
                 if url or doi:
                     logger.debug(f"Found non-arXiv reference {i+1}: {url or doi}")
                     year = None
