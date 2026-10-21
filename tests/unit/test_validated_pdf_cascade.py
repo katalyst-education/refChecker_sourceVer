@@ -85,7 +85,7 @@ def test_numbered_parser_repairs_only_invalid_entries_with_llm():
     checker.fatal_error_message = None
     checker.last_reference_parser_method = None
     checker._split_numbered_reference_entries = lambda _text: ['raw good', 'raw weak']
-    checker._parse_references_regex = lambda _text: [
+    checker._parse_references_regex = lambda _text, **_kwargs: [
         {'title': 'Good Paper', 'authors': ['Alice Smith'], 'year': 2023},
         {'title': 'Weak Paper', 'authors': ['Bob Jones and Carol Brown'], 'year': 2024},
     ]
