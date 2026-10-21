@@ -457,6 +457,8 @@ def clean_url(url: str) -> str:
     
     url = _strip_glued_pdf_citation_tail(url)
 
+    # Remove trailing punctuation that's commonly part of sentence structure
+    # but preserve legitimate URL characters
     url = _strip_url_terminating_punctuation(url)
     
     # Note: Preserving query parameters for all URLs now
@@ -508,7 +510,9 @@ def clean_url_punctuation(url: str) -> str:
     
     url = _strip_glued_pdf_citation_tail(url)
 
-    url = _strip_url_terminating_punctuation(url)
+    # Remove trailing punctuation that's commonly part of sentence structure
+    # but preserve legitimate URL characters
+    url = url.rstrip('.,;!?)')
     
     return url
 
@@ -538,6 +542,7 @@ def _is_url_continuation(
     current_url: str,
     next_fragment: str,
     line_break: bool = False,
+    expected_page: str = None,
 ) -> bool:
     """Return whether a whitespace-delimited fragment plausibly continues a URL."""
     if not next_fragment or not _URL_FRAGMENT_RE.fullmatch(next_fragment):
@@ -576,6 +581,13 @@ def _is_url_continuation(
                 not parsed
                 or not parsed.path
                 or re.fullmatch(r'(?:19|20)\d{2}', next_fragment)
+            ):
+                return False
+            if (
+                expected_page
+                and next_fragment.isdigit()
+                and len(next_fragment) < 4
+                and next_fragment != expected_page
             ):
                 return False
             return bool(
@@ -637,9 +649,22 @@ def join_wrapped_url_lines(text: str) -> str:
             continue
 
         current_url = match.group('scheme') + '://' + fragment_match.group(0)
-        # LaTeX often escapes underscores in extracted PDF text; the URL uses
-        # the underscore itself, not the escape marker.
         current_url = current_url.replace(r'\_', '_')
+        preceding_text = text[:match.start()]
+        entry_markers = list(
+            re.finditer(r'(?m)^\s*\[\d{1,4}\]\s+', preceding_text)
+        )
+        reference_context = (
+            preceding_text[entry_markers[-1].start():]
+            if entry_markers
+            else preceding_text
+        )
+        page_range_match = re.search(
+            r'\bpp\.\s*(\d+)\s*[-\u2013]\s*\d+',
+            reference_context,
+            re.IGNORECASE,
+        )
+        expected_page = page_range_match.group(1) if page_range_match else None
         end = fragment_match.end()
         while end < len(text):
             separator = re.match(r'\s+', text[end:])
@@ -651,6 +676,7 @@ def join_wrapped_url_lines(text: str) -> str:
                 current_url,
                 next_match.group(0),
                 line_break=('\n' in separator.group(0) or '\r' in separator.group(0)),
+                expected_page=expected_page,
             ):
                 break
             current_url += next_match.group(0).replace(r'\_', '_')

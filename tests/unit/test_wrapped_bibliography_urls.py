@@ -18,6 +18,14 @@ CEDTECH_ENTRY = (
     'adaptive-learning-systems-beyond-teaching-machines-6095'
 )
 
+JSTOR_ENTRY = (
+    '[2] S. Retalis and A. Papasalouros, "Designing and Generating '
+    'Educational Adaptive Hypermedia Applications," Journal of Educational '
+    'Technology & Society, vol. 8, no. 3, pp. 26-35, 2005. [Online]. '
+    'Available: https://www.jstor.org/stable/jeductechsoci.8.3.\n'
+    '26'
+)
+
 
 def _numbered_bibliography(entry):
     return (
@@ -64,6 +72,69 @@ def test_join_wrapped_url_with_newline_normalized_to_space():
     assert join_wrapped_url_lines(text) == (
         "[Online]. Available: https://www.cedtech.net/article/"
         "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+
+
+def test_jstor_period_delimited_numeric_url_wrap_is_preserved():
+    bibliography = (
+        '[1] A. Author, "Previous work," Journal of Tests, 2004.\n'
+        f'{JSTOR_ENTRY}\n'
+        '[3] N. A. Anindyaputri, R. A. Yuana, and P. Hatta, "Enhancing '
+        'Students Ability," Journal of Tests, 2006.'
+    )
+    original_bibliography = bibliography
+
+    joined = join_wrapped_url_lines(bibliography)
+    checker = ArxivReferenceChecker()
+    checker.extraction_mode = "cascade"
+    references = checker.parse_references(bibliography)
+    retalis = next(
+        reference for reference in references
+        if "Designing and Generating Educational Adaptive Hypermedia Applications"
+        in (reference.get("title") or "")
+    )
+
+    assert retalis["url"] == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+    assert "26" not in (retalis.get("venue") or "")
+    assert len(references) == 3
+    assert bibliography == original_bibliography
+    assert "https://www.jstor.org/stable/jeductechsoci.8.3.\n26" in bibliography
+    assert "https://www.jstor.org/stable/jeductechsoci.8.3.26" in joined
+
+
+def test_period_delimited_url_wrap_does_not_join_prose_or_reference_marker():
+    prose = (
+        "[Online]. Available: https://example.org/stable/item.8.3.\n"
+        "The following numeric value is 26 words long."
+    )
+    next_reference = (
+        "[Online]. Available: https://example.org/stable/item.8.3.\n"
+        "[37] Another reference."
+    )
+    unrelated_number = (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://example.org/stable/item.8.3.\n"
+        "27\n[37] Another reference."
+    )
+
+    assert join_wrapped_url_lines(prose) == prose
+    assert join_wrapped_url_lines(next_reference) == next_reference
+    assert join_wrapped_url_lines(unrelated_number) == unrelated_number
+
+
+def test_period_delimited_url_wrap_survives_space_normalization():
+    text = (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://www.jstor.org/stable/jeductechsoci.8.3. 26\n[37] "
+        "Another reference."
+    )
+
+    assert join_wrapped_url_lines(text) == (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26\n[37] "
+        "Another reference."
     )
 
 
@@ -121,8 +192,6 @@ def test_screenshot_shaped_cedtech_url_is_complete_after_line_whitespace_normali
         "https://www.cedtech.net/article/"
         "adaptive-learning-systems-beyond-teaching-machines-6095"
     )
-
-
 def test_wrapped_tu_darmstadt_hostname_and_escaped_underscores_are_repaired():
     text = (
         "https://ww\n"
@@ -331,3 +400,63 @@ def test_page_label_after_complete_url_does_not_extend_url():
         bibliography
     )
     assert "https://example.com/article\n90" not in cleaned
+
+
+def test_period_wrapped_url_suffix_matches_reference_page_range():
+    bibliography = (
+        '[1] A. Author, "Previous work," Journal, 2004.\n'
+        '[2] S. Retalis, "Adaptive Hypermedia," Journal, vol. 8, '
+        'pp. 26-35, 2005. [Online]. Available: '
+        "https://www.jstor.org/stable/jeductechsoci.8.3.\n"
+        "26\n"
+        '[3] N. Anindyaputri, "Next work," Journal, 2006.'
+    )
+
+    joined = join_wrapped_url_lines(bibliography)
+    references = ArxivReferenceChecker().parse_references(bibliography)
+    retalis = next(
+        reference for reference in references
+        if "Adaptive Hypermedia" in (reference.get("title") or "")
+    )
+
+    assert retalis["url"] == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+    assert len(references) == 3
+    assert "https://www.jstor.org/stable/jeductechsoci.8.3.26" in joined
+
+
+def test_period_wrapped_url_rejects_mismatched_page_number_and_prose():
+    unrelated_number = (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://example.org/stable/item.8.3.\n"
+        "27\n[37] Another reference."
+    )
+    prose = (
+        "[Online]. Available: https://example.org/stable/item.8.3.\n"
+        "The following numeric value is 26 words long."
+    )
+    next_reference = (
+        "[Online]. Available: https://example.org/stable/item.8.3.\n"
+        "[37] Another reference."
+    )
+
+    assert join_wrapped_url_lines(unrelated_number).startswith(
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://example.org/stable/item.8.3.\n27"
+    )
+    assert join_wrapped_url_lines(prose) == prose
+    assert join_wrapped_url_lines(next_reference) == next_reference
+
+
+def test_period_wrapped_url_suffix_matches_after_space_normalization():
+    text = (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://www.jstor.org/stable/jeductechsoci.8.3. 26\n[37] "
+        "Another reference."
+    )
+    assert join_wrapped_url_lines(text) == (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26\n[37] "
+        "Another reference."
+    )
