@@ -56,7 +56,11 @@ from refchecker.utils.text_utils import (clean_author_name, clean_title, clean_t
                        calculate_title_similarity, normalize_arxiv_url, deduplicate_urls,
                        display_reference_value,
                        compare_authors)
-from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
+from refchecker.utils.url_utils import (
+    construct_semantic_scholar_url,
+    extract_arxiv_id_from_url,
+    join_wrapped_url_lines,
+)
 from refchecker.utils.database_config import resolve_database_paths, resolve_database_update_paths, DATABASE_LABELS, DATABASE_UPDATE_ORDER
 from refchecker.utils.config_validator import ConfigValidator
 from refchecker.utils.reference_fixups import (
@@ -1699,6 +1703,23 @@ class ArxivReferenceChecker:
                 continue
 
             if re.fullmatch(r'\d{1,4}', stripped):
+                preceding_context = '\n'.join(cleaned_lines[-6:])
+                previous_line = cleaned_lines[-1].strip() if cleaned_lines else ''
+                if (
+                    re.search(
+                        r'\[Online\].{0,500}?Available:',
+                        preceding_context,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    and re.search(r'https?:', previous_line, re.IGNORECASE)
+                    and join_wrapped_url_lines(
+                        previous_line + '\n' + stripped
+                    ) != previous_line + '\n' + stripped
+                ):
+                    cleaned_lines.append(line)
+                    i += 1
+                    continue
+
                 block_start = len(cleaned_lines)
                 while block_start > 0 and cleaned_lines[block_start - 1].strip():
                     block_start -= 1
@@ -5275,7 +5296,10 @@ class ArxivReferenceChecker:
                 self.last_reference_parser_method = 'bib'
                 return references
 
-        from refchecker.utils.url_utils import join_wrapped_url_lines
+        raw_bibliography_text = bibliography_text
+        raw_numbered_entries = self._split_numbered_reference_entries(
+            raw_bibliography_text
+        )
         bibliography_text = join_wrapped_url_lines(bibliography_text)
 
         numbered_entries = self._split_numbered_reference_entries(bibliography_text)
@@ -5290,7 +5314,10 @@ class ArxivReferenceChecker:
                 self.fatal_error,
                 self.fatal_error_message,
             )
-            deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
+            deterministic_references = self._parse_references_regex(
+                '\n'.join(numbered_entries),
+                raw_bibliography_text='\n'.join(raw_numbered_entries),
+            )
             if deterministic_references:
                 from refchecker.utils.text_utils import validate_parsed_references
                 validation = validate_parsed_references(
@@ -5437,7 +5464,10 @@ class ArxivReferenceChecker:
 
                         if self.extraction_mode == 'cascade':
                             fatal_error_before_fallback = self.fatal_error
-                            deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
+                            deterministic_references = self._parse_references_regex(
+                                '\n'.join(numbered_entries),
+                                raw_bibliography_text='\n'.join(raw_numbered_entries),
+                            )
                             if len(deterministic_references) > len(processed_references):
                                 logger.warning(
                                     "Using deterministic numbered-reference fallback "
@@ -5455,7 +5485,10 @@ class ArxivReferenceChecker:
 
         if self.extraction_mode == 'cascade' and expected_numbered_count:
             if not deterministic_references:
-                deterministic_references = self._parse_references_regex('\n'.join(numbered_entries))
+                deterministic_references = self._parse_references_regex(
+                    '\n'.join(numbered_entries),
+                    raw_bibliography_text='\n'.join(raw_numbered_entries),
+                )
             if deterministic_references:
                 logger.warning(
                     "Using deterministic numbered-reference extraction "
@@ -5650,20 +5683,39 @@ class ArxivReferenceChecker:
         if url_match:
             ref['url'] = url_match.group(1).strip()
 
-    def _parse_references_regex(self, bibliography_text):
+    def _parse_references_regex(
+        self,
+        bibliography_text,
+        raw_bibliography_text=None,
+    ):
         """
         Parse references using regex-based approach (original implementation)
         """
         self.used_regex_extraction = True
         from refchecker.utils.text_utils import normalize_reference_fields
-        from refchecker.utils.url_utils import join_wrapped_url_lines
+        raw_bibliography_text = (
+            bibliography_text
+            if raw_bibliography_text is None
+            else raw_bibliography_text
+        )
+        original_numbered_entries = self._split_numbered_reference_entries(
+            raw_bibliography_text
+        )
         bibliography_text = join_wrapped_url_lines(bibliography_text)
-
         def normalize_references(references):
             return [
                 normalize_reference_fields(reference)
                 for reference in references
             ]
+
+        def preserve_source_entries(references):
+            if len(original_numbered_entries) == len(references):
+                for reference, raw_entry in zip(
+                    references,
+                    original_numbered_entries,
+                ):
+                    reference['raw_text'] = raw_entry
+            return references
         
         # Check if this is BibTeX format first
         from refchecker.utils.bibtex_parser import detect_bibtex_format
@@ -5689,7 +5741,9 @@ class ArxivReferenceChecker:
                     "continuing with the generic reference parser."
                 )
             else:
-                return normalize_references(biblatex_refs)
+                return preserve_source_entries(
+                    normalize_references(biblatex_refs)
+                )
         
         # --- IMPROVED SPLITTING: handle concatenated references like [3]... [4]... ---
         # First, normalize the bibliography text to handle multi-line references
@@ -5801,8 +5855,11 @@ class ArxivReferenceChecker:
         if not references:
             references = [line.strip() for line in normalized_bib.split('\n') if line.strip()]
             logger.debug(f"Using line-by-line splitting, found {len(references)} potential references")
-        references = [ref.strip() for ref in references if ref.strip()]
-
+        references = [
+            join_wrapped_url_lines(ref).strip()
+            for ref in references
+            if ref.strip()
+        ]
         # --- POST-PROCESSING: fix malformed DOIs/URLs and edge cases ---
         def clean_url(url):
             if not url:
@@ -5983,7 +6040,7 @@ class ArxivReferenceChecker:
                             remaining_ref = ref[url_start_match.end():].strip()
                             # Remove leading whitespace and reference numbers
                             remaining_ref = re.sub(r'^\s*\[\d+\]?\s*', '', remaining_ref)
-                            
+
                             # Check if the remaining part looks like a URL continuation
                             # (alphanumeric characters, hyphens, slashes, etc.)
                             if re.match(r'^[a-zA-Z0-9\-_/.=?&%\n\s]+\s*\.?\s*$', remaining_ref):
@@ -6133,7 +6190,14 @@ class ArxivReferenceChecker:
             )
             return position if position >= 0 else len(normalized_bib)
 
-        return sorted(normalized_references, key=source_position)
+        sorted_references = sorted(normalized_references, key=source_position)
+        if len(original_numbered_entries) == len(sorted_references):
+            for reference, raw_entry in zip(
+                sorted_references,
+                original_numbered_entries,
+            ):
+                reference['raw_text'] = raw_entry
+        return sorted_references
     
     def _parse_bibtex_references(self, bibliography_text):
         """

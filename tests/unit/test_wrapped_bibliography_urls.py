@@ -1,5 +1,7 @@
+import pytest
+
 from refchecker.core.refchecker import ArxivReferenceChecker
-from refchecker.utils.url_utils import join_wrapped_url_lines
+from refchecker.utils.url_utils import clean_url, join_wrapped_url_lines
 
 
 LASEK_ENTRY = (
@@ -189,4 +191,272 @@ def test_screenshot_shaped_cedtech_url_is_complete_after_line_whitespace_normali
     assert kara["url"] == (
         "https://www.cedtech.net/article/"
         "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+def test_wrapped_tu_darmstadt_hostname_and_escaped_underscores_are_repaired():
+    text = (
+        "https://ww\n"
+        "w.tu-darmstadt.de/universitaet/aktuelles\\_meldungen/"
+        "einzelansicht\\_525\n"
+        "888.de.jsp"
+    )
+    assert join_wrapped_url_lines(text) == (
+        "https://www.tu-darmstadt.de/universitaet/aktuelles_meldungen/"
+        "einzelansicht_525888.de.jsp"
+    )
+
+
+def test_wrapped_jstor_numeric_suffix_is_repaired():
+    text = "https://www.jstor.org/stable/jeductechsoci.8.3.\n26"
+    assert join_wrapped_url_lines(text) == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+
+
+def test_wrapped_cedtech_path_is_repaired_after_space_normalization():
+    text = (
+        "https://www.cedtech.net/article/ "
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+    assert join_wrapped_url_lines(text) == (
+        "https://www.cedtech.net/article/"
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+
+
+def test_wrapped_query_value_and_following_parameter_are_repaired():
+    text = "https://example.org/article?id=\n12345&lang=en"
+    assert join_wrapped_url_lines(text) == (
+        "https://example.org/article?id=12345&lang=en"
+    )
+
+
+@pytest.mark.parametrize(
+    ("wrapped_url", "expected_url"),
+    [
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/\n"
+            "S187704281501486X",
+            "https://linkinghub.elsevier.com/retrieve/pii/S187704281501486X",
+        ),
+        (
+            "https://www.tandfonline.com/doi/abs/10.\n"
+            "1080/00461520.2011.611369",
+            "https://www.tandfonline.com/doi/abs/10.1080/00461520.2011.611369",
+        ),
+        (
+            "https://journals.sagepub.com/doi/10.3102/\n"
+            "0013189X013006004",
+            "https://journals.sagepub.com/doi/10.3102/0013189X013006004",
+        ),
+        (
+            "http://journal.frontiersin.org/article/10.3389/fpsyg.\n"
+            "2017.01739/full",
+            "http://journal.frontiersin.org/article/10.3389/fpsyg.2017.01739/full",
+        ),
+        (
+            "https://www.\nmicrosoft.com/en-us/research/page",
+            "https://www.microsoft.com/en-us/research/page",
+        ),
+        (
+            "https://www.web.cmu.\nedu/project/resource",
+            "https://www.web.cmu.edu/project/resource",
+        ),
+        (
+            "https:\n//dl.acm.org/doi/10.1145/3544549.3585758",
+            "https://dl.acm.org/doi/10.1145/3544549.3585758",
+        ),
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/ "
+            "S2666920X22000595",
+            "https://linkinghub.elsevier.com/retrieve/pii/S2666920X22000595",
+        ),
+    ],
+)
+def test_reconstructs_url_fragments_seen_in_glicko_pdf(wrapped_url, expected_url):
+    assert join_wrapped_url_lines(
+        "[Online]. Available: " + wrapped_url
+    ) == "[Online]. Available: " + expected_url
+
+
+def test_all_supplied_wrapped_urls_are_extracted_from_reference_text():
+    wrapped_urls = [
+        (
+            "https://ww\n"
+            "w.tu-darmstadt.de/universitaet/aktuelles\\_meldungen/"
+            "einzelansicht\\_525\n"
+            "888.de.jsp",
+            "https://www.tu-darmstadt.de/universitaet/aktuelles_meldungen/"
+            "einzelansicht_525888.de.jsp",
+        ),
+        (
+            "https://www.jstor.org/stable/jeductechsoci.8.3.\n26",
+            "https://www.jstor.org/stable/jeductechsoci.8.3.26",
+        ),
+        (
+            "https://www.cedtech.net/article/\n"
+            "adaptive-learning-systems-beyond-teaching-machines-6095",
+            "https://www.cedtech.net/article/"
+            "adaptive-learning-systems-beyond-teaching-machines-6095",
+        ),
+        (
+            "http://www.inderscience.com/link.php?id=\n52339",
+            "http://www.inderscience.com/link.php?id=52339",
+        ),
+    ]
+    for index, (wrapped_url, expected_url) in enumerate(wrapped_urls):
+        entry = (
+            f'[1] A. Author, "Title {index}," Journal, 2020. {wrapped_url}'
+        )
+        references = ArxivReferenceChecker()._parse_references_regex(entry)
+        assert references[0]["url"] == expected_url
+
+
+def test_wrapped_url_repair_stops_at_access_metadata_and_strips_final_period():
+    text = "https://example.com.\naccessed: Nov. 07, 2025"
+    assert join_wrapped_url_lines(text) == text
+    assert clean_url(text.splitlines()[0]) == "https://example.com"
+
+    year_after_url = "https://example.com/article.\n2025"
+    assert join_wrapped_url_lines(year_after_url) == year_after_url
+    checker = ArxivReferenceChecker()
+    references = checker._parse_references_regex(
+        '[1] A. Author, "A title," Journal, 2020. ' + text
+    )
+    assert references[0]["url"] == "https://example.com"
+
+
+def test_wrapped_url_repair_does_not_consume_next_reference_marker():
+    text = "https://example.com/page [37] Smith, J..."
+    assert join_wrapped_url_lines(text) == text
+    checker = ArxivReferenceChecker()
+    references = checker._parse_references_regex(
+        '[1] A. Author, "A title," Journal, 2020. ' + text
+    )
+    assert references[0]["url"] == "https://example.com/page"
+
+
+def test_wrapped_url_repair_does_not_join_ordinary_prose():
+    text = "https://example.com/some-path\nand normal prose follows here"
+    assert join_wrapped_url_lines(text) == text
+    after_slash = "https://example.com/article/\nSmith et al. continue here"
+    assert join_wrapped_url_lines(after_slash) == after_slash
+
+
+def test_complete_doi_url_is_unchanged():
+    text = "https://doi.org/10.1234/example.123"
+    assert join_wrapped_url_lines(text) == text
+
+
+def test_clean_url_preserves_balanced_parentheses():
+    assert clean_url("https://example.org/wiki/Title_(example).") == (
+        "https://example.org/wiki/Title_(example)"
+    )
+
+
+def test_two_references_with_wrapped_urls_remain_separate():
+    bibliography = (
+        '[1] A. Author, "First title," Journal, 2020. '
+        "https://example.org/article?id=\n12345\n"
+        '[2] B. Author, "Second title," Journal, 2021. '
+        "https://example.net/item/456"
+    )
+    checker = ArxivReferenceChecker()
+    references = checker._parse_references_regex(bibliography)
+    assert len(references) == 2
+    assert [reference["url"] for reference in references] == [
+        "https://example.org/article?id=12345",
+        "https://example.net/item/456",
+    ]
+
+
+def test_pdf_page_header_cleanup_preserves_jstor_numeric_url_suffix():
+    bibliography = (
+        '[1] S. Retalis, "Title," Journal, 2005. [Online]. Available: '
+        "https://www.jstor.org/stable/jeductechsoci.8.3.\n"
+        "26\n"
+        '[2] N. Anindyaputri, "Next title," Journal, 2020.\n'
+        '[3] C. Author, "Another title," Journal, 2021.'
+    )
+    cleaned = ArxivReferenceChecker._strip_pdf_page_headers_from_bibliography(
+        bibliography
+    )
+    assert "8.3.\n26\n[2]" in cleaned
+    references = ArxivReferenceChecker()._parse_references_regex(cleaned)
+    assert references[0]["url"] == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+    assert references[0]["raw_text"].endswith("8.3.\n26")
+
+
+def test_page_label_after_complete_url_does_not_extend_url():
+    bibliography = (
+        '[1] A. Author, "First title," Journal, 2020. [Online]. Available: '
+        "https://example.com/article\n"
+        "90\n"
+        '[2] B. Author, "Second title," Journal, 2021.\n'
+        '[3] C. Author, "Third title," Journal, 2022.'
+    )
+    cleaned = ArxivReferenceChecker._strip_pdf_page_headers_from_bibliography(
+        bibliography
+    )
+    assert "https://example.com/article\n90" not in cleaned
+
+
+def test_period_wrapped_url_suffix_matches_reference_page_range():
+    bibliography = (
+        '[1] A. Author, "Previous work," Journal, 2004.\n'
+        '[2] S. Retalis, "Adaptive Hypermedia," Journal, vol. 8, '
+        'pp. 26-35, 2005. [Online]. Available: '
+        "https://www.jstor.org/stable/jeductechsoci.8.3.\n"
+        "26\n"
+        '[3] N. Anindyaputri, "Next work," Journal, 2006.'
+    )
+
+    joined = join_wrapped_url_lines(bibliography)
+    references = ArxivReferenceChecker().parse_references(bibliography)
+    retalis = next(
+        reference for reference in references
+        if "Adaptive Hypermedia" in (reference.get("title") or "")
+    )
+
+    assert retalis["url"] == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+    assert len(references) == 3
+    assert "https://www.jstor.org/stable/jeductechsoci.8.3.26" in joined
+
+
+def test_period_wrapped_url_rejects_mismatched_page_number_and_prose():
+    unrelated_number = (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://example.org/stable/item.8.3.\n"
+        "27\n[37] Another reference."
+    )
+    prose = (
+        "[Online]. Available: https://example.org/stable/item.8.3.\n"
+        "The following numeric value is 26 words long."
+    )
+    next_reference = (
+        "[Online]. Available: https://example.org/stable/item.8.3.\n"
+        "[37] Another reference."
+    )
+
+    assert join_wrapped_url_lines(unrelated_number).startswith(
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://example.org/stable/item.8.3.\n27"
+    )
+    assert join_wrapped_url_lines(prose) == prose
+    assert join_wrapped_url_lines(next_reference) == next_reference
+
+
+def test_period_wrapped_url_suffix_matches_after_space_normalization():
+    text = (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://www.jstor.org/stable/jeductechsoci.8.3. 26\n[37] "
+        "Another reference."
+    )
+    assert join_wrapped_url_lines(text) == (
+        "pp. 26-35, 2005. [Online]. Available: "
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26\n[37] "
+        "Another reference."
     )
