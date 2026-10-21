@@ -1,3 +1,5 @@
+import pytest
+
 from refchecker.core.refchecker import ArxivReferenceChecker
 from refchecker.utils.url_utils import clean_url, join_wrapped_url_lines
 
@@ -159,6 +161,54 @@ def test_wrapped_query_value_and_following_parameter_are_repaired():
     )
 
 
+@pytest.mark.parametrize(
+    ("wrapped_url", "expected_url"),
+    [
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/\n"
+            "S187704281501486X",
+            "https://linkinghub.elsevier.com/retrieve/pii/S187704281501486X",
+        ),
+        (
+            "https://www.tandfonline.com/doi/abs/10.\n"
+            "1080/00461520.2011.611369",
+            "https://www.tandfonline.com/doi/abs/10.1080/00461520.2011.611369",
+        ),
+        (
+            "https://journals.sagepub.com/doi/10.3102/\n"
+            "0013189X013006004",
+            "https://journals.sagepub.com/doi/10.3102/0013189X013006004",
+        ),
+        (
+            "http://journal.frontiersin.org/article/10.3389/fpsyg.\n"
+            "2017.01739/full",
+            "http://journal.frontiersin.org/article/10.3389/fpsyg.2017.01739/full",
+        ),
+        (
+            "https://www.\nmicrosoft.com/en-us/research/page",
+            "https://www.microsoft.com/en-us/research/page",
+        ),
+        (
+            "https://www.web.cmu.\nedu/project/resource",
+            "https://www.web.cmu.edu/project/resource",
+        ),
+        (
+            "https:\n//dl.acm.org/doi/10.1145/3544549.3585758",
+            "https://dl.acm.org/doi/10.1145/3544549.3585758",
+        ),
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/ "
+            "S2666920X22000595",
+            "https://linkinghub.elsevier.com/retrieve/pii/S2666920X22000595",
+        ),
+    ],
+)
+def test_reconstructs_url_fragments_seen_in_glicko_pdf(wrapped_url, expected_url):
+    assert join_wrapped_url_lines(
+        "[Online]. Available: " + wrapped_url
+    ) == "[Online]. Available: " + expected_url
+
+
 def test_all_supplied_wrapped_urls_are_extracted_from_reference_text():
     wrapped_urls = [
         (
@@ -248,3 +298,36 @@ def test_two_references_with_wrapped_urls_remain_separate():
         "https://example.org/article?id=12345",
         "https://example.net/item/456",
     ]
+
+
+def test_pdf_page_header_cleanup_preserves_jstor_numeric_url_suffix():
+    bibliography = (
+        '[1] S. Retalis, "Title," Journal, 2005. [Online]. Available: '
+        "https://www.jstor.org/stable/jeductechsoci.8.3.\n"
+        "26\n"
+        '[2] N. Anindyaputri, "Next title," Journal, 2020.\n'
+        '[3] C. Author, "Another title," Journal, 2021.'
+    )
+    cleaned = ArxivReferenceChecker._strip_pdf_page_headers_from_bibliography(
+        bibliography
+    )
+    assert "8.3.\n26\n[2]" in cleaned
+    references = ArxivReferenceChecker()._parse_references_regex(cleaned)
+    assert references[0]["url"] == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+    assert references[0]["raw_text"].endswith("8.3.\n26")
+
+
+def test_page_label_after_complete_url_does_not_extend_url():
+    bibliography = (
+        '[1] A. Author, "First title," Journal, 2020. [Online]. Available: '
+        "https://example.com/article\n"
+        "90\n"
+        '[2] B. Author, "Second title," Journal, 2021.\n'
+        '[3] C. Author, "Third title," Journal, 2022.'
+    )
+    cleaned = ArxivReferenceChecker._strip_pdf_page_headers_from_bibliography(
+        bibliography
+    )
+    assert "https://example.com/article\n90" not in cleaned

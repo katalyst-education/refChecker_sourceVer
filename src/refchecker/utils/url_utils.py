@@ -513,7 +513,10 @@ def clean_url_punctuation(url: str) -> str:
     return url
 
 
-_URL_START_RE = re.compile(r'https?://', re.IGNORECASE)
+_URL_START_RE = re.compile(
+    r'(?P<scheme>https?):[ \t]*(?:\r?\n[ \t]*)?//',
+    re.IGNORECASE,
+)
 _URL_FRAGMENT_RE = re.compile(r"(?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]|\\_)+")
 _URL_STOP_WORDS = {
     'accessed',
@@ -558,8 +561,12 @@ def _is_url_continuation(
         return True
 
     if previous.endswith('/'):
-        return next_fragment.isdigit() or bool(
-            re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment)
+        return (
+            (next_fragment.isdigit() and len(next_fragment) >= 4)
+            or bool(re.search(r'\d', next_fragment))
+            or bool(
+                re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment)
+            )
         )
     if previous.endswith(('=', '?', '&', '#', '.', '-', '_', '%')):
         # A period is useful evidence for a split numeric suffix, but prose such
@@ -571,8 +578,16 @@ def _is_url_continuation(
                 or re.fullmatch(r'(?:19|20)\d{2}', next_fragment)
             ):
                 return False
-            return next_fragment.isdigit() or bool(
-                re.match(r'^\d+[A-Za-z0-9._~:/?#@!$&\'()*+,;=%\-]*$', next_fragment)
+            return bool(
+                re.match(
+                    r'^\d+[A-Za-z0-9._~:/?#@!$&\'()*+,;=%\-]*$',
+                    next_fragment,
+                )
+                and (
+                    re.search(r'\d+\.(?:\d+\.)+$', parsed.path)
+                    or re.search(r'\d', next_fragment[1:])
+                    or re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment[1:])
+                )
             )
         if previous.endswith(('=', '?', '&', '#')):
             return next_fragment.isdigit() or bool(
@@ -606,7 +621,7 @@ def _is_url_continuation(
 
 def join_wrapped_url_lines(text: str) -> str:
     """Conservatively rejoin URL fragments separated by PDF line/space wraps."""
-    if not text or '://' not in text:
+    if not text or not _URL_START_RE.search(text):
         return text
 
     output = []
@@ -621,7 +636,7 @@ def join_wrapped_url_lines(text: str) -> str:
             cursor = match.end()
             continue
 
-        current_url = match.group(0) + fragment_match.group(0)
+        current_url = match.group('scheme') + '://' + fragment_match.group(0)
         # LaTeX often escapes underscores in extracted PDF text; the URL uses
         # the underscore itself, not the escape marker.
         current_url = current_url.replace(r'\_', '_')
