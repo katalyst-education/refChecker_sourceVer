@@ -3,7 +3,10 @@
 from pathlib import Path
 
 from refchecker.core.refchecker import ArxivReferenceChecker
-from refchecker.utils.extraction_quality import merge_grounded_reference_candidates
+from refchecker.utils.extraction_quality import (
+    merge_grounded_reference_candidates,
+    preserve_grounded_reference_urls,
+)
 
 
 def test_grounded_merge_recovers_truncated_grobid_author_list():
@@ -70,6 +73,55 @@ def test_grounded_merge_keeps_non_prefix_grobid_url():
     assert merged[0]['url'] == grobid[0]['url']
 
 
+def test_llm_candidates_recover_screenshot_shaped_truncated_urls():
+    llm_candidates = [
+        {
+            'title': 'Adaptive Hypermedia',
+            'url': 'https://www.jstor.org/stable/jeductechsoci.8.3',
+            'cited_url': 'https://www.jstor.org/stable/jeductechsoci.8.3',
+        },
+        {
+            'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+            'url': 'https://www.cedtech.net/article/',
+            'cited_url': 'https://www.cedtech.net/article/',
+        },
+    ]
+    text_candidates = [
+        {
+            'title': 'Adaptive Hypermedia',
+            'url': 'https://www.jstor.org/stable/jeductechsoci.8.3.26',
+        },
+        {
+            'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+            'url': (
+                'https://www.cedtech.net/article/'
+                'adaptive-learning-systems-beyond-teaching-machines-6095'
+            ),
+        },
+    ]
+
+    recovered = preserve_grounded_reference_urls(llm_candidates, text_candidates)
+
+    assert [reference['url'] for reference in recovered] == [
+        'https://www.jstor.org/stable/jeductechsoci.8.3.26',
+        (
+            'https://www.cedtech.net/article/'
+            'adaptive-learning-systems-beyond-teaching-machines-6095'
+        ),
+    ]
+    assert [reference['cited_url'] for reference in recovered] == [
+        'https://www.jstor.org/stable/jeductechsoci.8.3.26',
+        (
+            'https://www.cedtech.net/article/'
+            'adaptive-learning-systems-beyond-teaching-machines-6095'
+        ),
+    ]
+    assert [reference['url'] for reference in llm_candidates] == [
+        'https://www.jstor.org/stable/jeductechsoci.8.3',
+        'https://www.cedtech.net/article/',
+    ]
+
+
 def test_grounded_merge_does_not_mix_different_references():
     grobid = [{'title': 'First Paper', 'authors': ['Alice Smith'], 'year': 2024}]
     text_parser = [{'title': 'Entirely Different Work', 'authors': ['Alice Smith', 'Bob Jones'], 'year': 2024}]
@@ -87,7 +139,12 @@ def test_numbered_parser_repairs_only_invalid_entries_with_llm():
     checker._split_numbered_reference_entries = lambda _text: ['raw good', 'raw weak']
     checker._parse_references_regex = lambda _text, **_kwargs: [
         {'title': 'Good Paper', 'authors': ['Alice Smith'], 'year': 2023},
-        {'title': 'Weak Paper', 'authors': ['Bob Jones and Carol Brown'], 'year': 2024},
+        {
+            'title': 'Weak Paper',
+            'authors': ['Bob Jones and Carol Brown'],
+            'year': 2024,
+            'url': 'https://www.jstor.org/stable/jeductechsoci.8.3.26',
+        },
     ]
     captured = {}
 
@@ -97,6 +154,7 @@ def test_numbered_parser_repairs_only_invalid_entries_with_llm():
             'title': 'Weak Paper',
             'authors': ['Bob Jones', 'Carol Brown'],
             'year': 2024,
+            'url': 'https://www.jstor.org/stable/jeductechsoci.8.3',
         }]
 
     checker._extract_numbered_references_with_llm_chunks = repair
@@ -107,6 +165,8 @@ def test_numbered_parser_repairs_only_invalid_entries_with_llm():
     assert captured['entries'] == ['raw weak']
     assert references[0]['authors'] == ['Alice Smith']
     assert references[1]['authors'] == ['Bob Jones', 'Carol Brown']
+    assert references[1]['url'] == 'https://www.jstor.org/stable/jeductechsoci.8.3.26'
+    assert references[1]['cited_url'] == 'https://www.jstor.org/stable/jeductechsoci.8.3.26'
     assert references[1]['raw_text'] == 'raw weak'
 
 

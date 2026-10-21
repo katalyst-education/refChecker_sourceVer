@@ -65,7 +65,7 @@ def test_bibliography_cache_ignores_previous_extraction_version(tmp_path):
 
 def test_bibliography_cache_invalidates_previous_url_parser_results(tmp_path):
     input_spec = "https://arxiv.org/pdf/2602.06718"
-    old_identity = "_Provider:gpt-4.1:https://api.example.test/v1:refparse-v6"
+    old_identity = "_Provider:gpt-4.1:https://api.example.test/v1:refparse-v7"
     stale_bibliography = [{
         "title": "Adaptive Learning Systems: Beyond Teaching Machines",
         "url": "https://www.cedtech.net/article/",
