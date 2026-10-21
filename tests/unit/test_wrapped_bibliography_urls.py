@@ -389,3 +389,63 @@ def test_period_wrapped_url_suffix_matches_after_space_normalization():
         "https://www.jstor.org/stable/jeductechsoci.8.3.26\n[37] "
         "Another reference."
     )
+
+
+@pytest.mark.parametrize(
+    ("wrapped_url", "expected_url"),
+    [
+        (
+            "http://www.tandfonline.com/doi/abs/10. "
+            "1080/00461520.2011.611369",
+            "http://www.tandfonline.com/doi/abs/10.1080/00461520.2011.611369",
+        ),
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/ "
+            "S187704281501486X",
+            "https://linkinghub.elsevier.com/retrieve/pii/S187704281501486X",
+        ),
+        (
+            "https://journals.sagepub.com/doi/10.3102/ "
+            "0013189X013006004",
+            "https://journals.sagepub.com/doi/10.3102/0013189X013006004",
+        ),
+        (
+            "https://www.jstor.org/stable/jeductechsoci.8.3.\n26",
+            "https://www.jstor.org/stable/jeductechsoci.8.3.26",
+        ),
+        (
+            "https://www. microsoft.com/en-us/research/wp-content/uploads/"
+            "2008/01/NIPS2007_0931.pdf",
+            "https://www.microsoft.com/en-us/research/wp-content/uploads/"
+            "2008/01/NIPS2007_0931.pdf",
+        ),
+        (
+            "https://www.frontiersin.org/article/10.3389/fpsyg.\n"
+            "2019.00620/full",
+            "https://www.frontiersin.org/article/10.3389/fpsyg.2019.00620/full",
+        ),
+        (
+            "https://linkinghub.elsevier.com/retrieve/pii/\n"
+            "S2666920X22000595",
+            "https://linkinghub.elsevier.com/retrieve/pii/S2666920X22000595",
+        ),
+        (
+            "https://pslcdatashop.web.cmu. edu/KDDCup/",
+            "https://pslcdatashop.web.cmu.edu/KDDCup/",
+        ),
+    ],
+)
+def test_exact_glicko_pdf_url_wrap_shapes_are_reconstructed(
+    wrapped_url, expected_url
+):
+    bibliography = (
+        '[1] A. Author, "Study," Journal, pp. 26-35, 2019. '
+        f"[Online]. Available: {wrapped_url}\n"
+        '[2] B. Other, "Next Work," Journal, 2020.'
+    )
+
+    references = ArxivReferenceChecker()._parse_references_regex(bibliography)
+
+    assert len(references) == 2
+    assert references[0]["url"] == expected_url
+    assert references[1]["title"] == "Next Work"
