@@ -11,7 +11,7 @@ import ipaddress
 import re
 import socket
 from typing import List, Optional
-from urllib.parse import parse_qs, urljoin, urlparse, urlsplit
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -457,7 +457,9 @@ def clean_url(url: str) -> str:
     
     url = _strip_glued_pdf_citation_tail(url)
 
-    url = _strip_url_terminating_punctuation(url)
+    # Remove trailing punctuation that's commonly part of sentence structure
+    # but preserve legitimate URL characters
+    url = url.rstrip('.,;!?)')
     
     # Note: Preserving query parameters for all URLs now
     # Previously this function removed query parameters for non-DOI URLs,
@@ -508,156 +510,72 @@ def clean_url_punctuation(url: str) -> str:
     
     url = _strip_glued_pdf_citation_tail(url)
 
-    url = _strip_url_terminating_punctuation(url)
+    # Remove trailing punctuation that's commonly part of sentence structure
+    # but preserve legitimate URL characters
+    url = url.rstrip('.,;!?)')
     
     return url
 
 
-_URL_START_RE = re.compile(r'https?://', re.IGNORECASE)
-_URL_FRAGMENT_RE = re.compile(r"(?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]|\\_)+")
-_URL_STOP_WORDS = {
-    'accessed',
-    'available',
-    'retrieved',
-    'online',
-}
-
-
-def _strip_url_terminating_punctuation(url: str) -> str:
-    while url and url[-1] in '.,;!?':
-        url = url[:-1]
-    while url.endswith(')') and url.count(')') > url.count('('):
-        url = url[:-1]
-    return url
-
-
-def _is_url_continuation(
-    current_url: str,
-    next_fragment: str,
-    line_break: bool = False,
-) -> bool:
-    """Return whether a whitespace-delimited fragment plausibly continues a URL."""
-    if not next_fragment or not _URL_FRAGMENT_RE.fullmatch(next_fragment):
-        return False
-    if next_fragment.lower().split(':', 1)[0] in _URL_STOP_WORDS:
-        return False
-    if next_fragment.lower().startswith(('http://', 'https://')):
-        return False
-
-    previous = current_url.rstrip()
-    try:
-        parsed = urlsplit(previous)
-    except ValueError:
-        parsed = None
-    if (
-        parsed
-        and parsed.scheme.lower() in ('http', 'https')
-        and parsed.netloc.endswith('.')
-        and ('.' in next_fragment or '/' in next_fragment)
-    ):
-        return True
-
-    if previous.endswith('/'):
-        return next_fragment.isdigit() or bool(
-            re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment)
-        )
-    if previous.endswith(('=', '?', '&', '#', '.', '-', '_', '%')):
-        # A period is useful evidence for a split numeric suffix, but prose such
-        # as "accessed" or an author's name after a sentence-ending period is not.
-        if previous.endswith('.'):
-            if (
-                not parsed
-                or not parsed.path
-                or re.fullmatch(r'(?:19|20)\d{2}', next_fragment)
-            ):
-                return False
-            return next_fragment.isdigit() or bool(
-                re.match(r'^\d+[A-Za-z0-9._~:/?#@!$&\'()*+,;=%\-]*$', next_fragment)
-            )
-        if previous.endswith(('=', '?', '&', '#')):
-            return next_fragment.isdigit() or bool(
-                re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment)
-            )
-        return True
-    if (
-        line_break
-        and re.match(
-            r'^\d+[A-Za-z0-9._~:/?#@!$&\'()*+,;=%\-]*$',
-            next_fragment,
-        )
-        and re.search(r'[_-][A-Za-z0-9_-]*\d+$', previous)
-    ):
-        return True
-
-    # A PDF may split a hostname before its first dot, e.g. "https://ww" +
-    # "w.example.org/...". Only treat this as a host continuation if the next
-    # fragment supplies hostname/path structure.
-    if (
-        parsed
-        and parsed.scheme.lower() in ('http', 'https')
-        and parsed.netloc
-        and '/' not in previous[len(parsed.scheme) + 3:]
-        and '.' not in parsed.netloc
-        and ('.' in next_fragment or '/' in next_fragment)
-    ):
-        return True
-    return False
+_WRAPPED_URL_LINE_END_RE = re.compile(
+    r'https?://(?:[^\s/]*\.|\S*[=/\-_&?#%+~])$',
+    re.IGNORECASE,
+)
+_URL_CONTINUATION_LINE_RE = re.compile(
+    r"^[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+$"
+)
+_REFERENCE_MARKER_LINE_RE = re.compile(r'^(?:\[\d+\]|\(?\d{1,4}[.)])$')
+_SPACE_WRAPPED_AVAILABLE_URL_RE = re.compile(
+    r"(?i)(Available:\s*https?://[^\s,)\]]*[=/\-_&?#%+~])"
+    r"[ \t]+([A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+)"
+    r"(?=\s*(?:\[\d+\]|$))"
+)
 
 
 def join_wrapped_url_lines(text: str) -> str:
-    """Conservatively rejoin URL fragments separated by PDF line/space wraps."""
+    """Rejoin URLs that a PDF wrapped onto following physical lines.
+
+    A line is joined only when it ends in a URL fragment that cannot be a
+    complete URL (open host or a trailing path/query delimiter) and the next
+    line is a single URL-like token. Printed characters, including hyphens,
+    are preserved; only the line break is removed.
+    """
     if not text or '://' not in text:
         return text
 
-    output = []
-    cursor = 0
-    for match in _URL_START_RE.finditer(text):
-        if match.start() < cursor:
-            continue
-        output.append(text[cursor:match.start()])
-        fragment_match = _URL_FRAGMENT_RE.match(text, match.end())
-        if not fragment_match:
-            output.append(match.group(0))
-            cursor = match.end()
-            continue
-
-        current_url = match.group(0) + fragment_match.group(0)
-        # LaTeX often escapes underscores in extracted PDF text; the URL uses
-        # the underscore itself, not the escape marker.
-        current_url = current_url.replace(r'\_', '_')
-        end = fragment_match.end()
-        while end < len(text):
-            separator = re.match(r'\s+', text[end:])
-            if not separator:
-                break
-            next_start = end + separator.end()
-            next_match = _URL_FRAGMENT_RE.match(text, next_start)
-            if not next_match or not _is_url_continuation(
-                current_url,
-                next_match.group(0),
-                line_break=('\n' in separator.group(0) or '\r' in separator.group(0)),
+    lines = text.split('\n')
+    joined = []
+    index = 0
+    while index < len(lines):
+        current = lines[index]
+        index += 1
+        while index < len(lines):
+            stripped = current.rstrip()
+            candidate = lines[index].strip()
+            if not (
+                _WRAPPED_URL_LINE_END_RE.search(stripped)
+                and _URL_CONTINUATION_LINE_RE.match(candidate)
+                and not _REFERENCE_MARKER_LINE_RE.match(candidate)
             ):
                 break
-            current_url += next_match.group(0).replace(r'\_', '_')
-            end = next_match.end()
+            current = stripped + candidate
+            index += 1
+        joined.append(current)
+    joined_text = '\n'.join(joined)
 
-        try:
-            parsed = urlsplit(current_url)
-            sane_url = (
-                parsed.scheme.lower() in ('http', 'https')
-                and bool(parsed.netloc)
-            )
-        except ValueError:
-            sane_url = False
-        if sane_url:
-            output.append(current_url)
-            cursor = end
-        else:
-            output.append(text[match.start():fragment_match.end()])
-            cursor = fragment_match.end()
+    def join_available_url_suffix(match: re.Match) -> str:
+        continuation = match.group(2)
+        if (
+            _REFERENCE_MARKER_LINE_RE.match(continuation)
+            or not re.search(r'[-._~:/?#&=%]', continuation)
+        ):
+            return match.group(0)
+        return match.group(1) + continuation
 
-    output.append(text[cursor:])
-    return ''.join(output)
+    return _SPACE_WRAPPED_AVAILABLE_URL_RE.sub(
+        join_available_url_suffix,
+        joined_text,
+    )
 
 
 def _strip_glued_pdf_citation_tail(url: str) -> str:
