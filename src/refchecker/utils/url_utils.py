@@ -530,6 +530,13 @@ _SPACE_WRAPPED_AVAILABLE_URL_RE = re.compile(
     r"[ \t]+([A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+)"
     r"(?=\s*(?:\[\d+\]|$))"
 )
+_PERIOD_WRAPPED_AVAILABLE_URL_RE = re.compile(
+    r"(?is)(?P<prefix>\bpp\.\s*(?P<page>\d+)\s*[-\u2013]\s*\d+"
+    r"(?:(?!\[\d+\]).)*?\[Online\]\.\s*Available:\s*)"
+    r"(?P<url>https?://[^\s,)\]]*?\.\d+(?:\.\d+)*\.)"
+    r"(?:[ \t]*\r?\n[ \t]*|[ \t]+)(?P=page)"
+    r"(?=\s*(?:\[\d+\]|$))"
+)
 
 
 def join_wrapped_url_lines(text: str) -> str:
@@ -538,7 +545,8 @@ def join_wrapped_url_lines(text: str) -> str:
     A line is joined only when it ends in a URL fragment that cannot be a
     complete URL (open host or a trailing path/query delimiter) and the next
     line is a single URL-like token. Printed characters, including hyphens,
-    are preserved; only the line break is removed.
+    are preserved; only the line break is removed. Period-delimited numeric
+    suffixes are joined only when they match the reference's first page number.
     """
     if not text or '://' not in text:
         return text
@@ -572,6 +580,13 @@ def join_wrapped_url_lines(text: str) -> str:
             return match.group(0)
         return match.group(1) + continuation
 
+    def join_period_wrapped_page_suffix(match: re.Match) -> str:
+        return match.group('prefix') + match.group('url') + match.group('page')
+
+    joined_text = _PERIOD_WRAPPED_AVAILABLE_URL_RE.sub(
+        join_period_wrapped_page_suffix,
+        joined_text,
+    )
     return _SPACE_WRAPPED_AVAILABLE_URL_RE.sub(
         join_available_url_suffix,
         joined_text,
