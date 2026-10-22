@@ -301,6 +301,15 @@ class WebPageChecker:
             # For 403, assume the resource exists but blocks automated access
             # This is common for PDFs and some corporate sites
             return self._handle_blocked_resource(reference, web_url)
+        elif (
+            response.status_code == 202
+            and response.headers.get('x-amzn-waf-action', '').lower() == 'challenge'
+        ):
+            return self._handle_blocked_resource(
+                reference,
+                web_url,
+                status_code=response.status_code,
+            )
         elif response.status_code != 200:
             return None, [{"error_type": "unverified", "error_details": f"HTTP error {response.status_code}"}], web_url
         
@@ -844,8 +853,8 @@ class WebPageChecker:
         # that the PDF itself is invalid.
         return verified_data, [], web_url
     
-    def _handle_blocked_resource(self, reference, web_url):
-        """Handle resources that return 403 (blocked by bot detection)"""
+    def _handle_blocked_resource(self, reference, web_url, status_code=403):
+        """Handle resources that block automated access."""
         logger.debug(f"Handling blocked resource: {web_url}")
         
         # For blocked resources, we can still do basic verification based on URL patterns
@@ -868,7 +877,7 @@ class WebPageChecker:
             'url': web_url,
             '_matched_database': 'PDF Document' if web_url.lower().endswith('.pdf') else 'Web Page',
             'web_metadata': {
-                'status_code': 403,
+                'status_code': status_code,
                 'domain': domain,
                 'trusted_domain': is_trusted,
                 'access_blocked': True
@@ -879,7 +888,7 @@ class WebPageChecker:
         if not is_trusted:
             errors.append({
                 "warning_type": "access",
-                "warning_details": f"Access blocked by site (403) and domain not in trusted list: {domain}"
+                "warning_details": f"Access blocked by site ({status_code}) and domain not in trusted list: {domain}"
             })
         else:
             # For trusted domains that block access, we assume the resource exists
