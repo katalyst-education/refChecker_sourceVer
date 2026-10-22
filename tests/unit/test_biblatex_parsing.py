@@ -124,6 +124,42 @@ class TestBiblatexParsing(unittest.TestCase):
         self.assertEqual(ref['authors'], ['R. K. Merton'])
         self.assertEqual(ref['year'], 1973)
         self.assertEqual(ref['journal'], 'University of Chicago press')
+
+    def test_parse_book_with_edition_and_online_url(self):
+        """Parse a book citation with initials, edition, publisher, and online URL."""
+        content = (
+            '[49] F. M. Lord, Applications of Item Response Theory to Practical Testing '
+            'Problems, 1st ed. New York: Routledge, 1980. [Online]. Available: '
+            'https://www.taylorfrancis.com/books/9781136557248'
+        )
+
+        single_ref = parse_biblatex_entry_content('49', content[content.index(']') + 1:])
+        self.assertEqual(
+            single_ref['title'],
+            'Applications of Item Response Theory to Practical Testing Problems',
+        )
+        self.assertEqual(single_ref['authors'], ['F. M. Lord'])
+        self.assertEqual(single_ref['year'], 1980)
+        self.assertEqual(
+            single_ref['url'],
+            'https://www.taylorfrancis.com/books/9781136557248',
+        )
+
+        refs = parse_biblatex_references(content)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0]['title'], single_ref['title'])
+        self.assertEqual(refs[0]['authors'], single_ref['authors'])
+        self.assertEqual(refs[0]['year'], single_ref['year'])
+        self.assertEqual(refs[0]['url'], single_ref['url'])
+
+        checker = ArxivReferenceChecker(
+            llm_config={"disabled": True},
+            extraction_mode="cascade",
+        )
+        extracted_refs = checker._parse_references_regex(content)
+        self.assertEqual(len(extracted_refs), 1)
+        self.assertEqual(extracted_refs[0]['title'], single_ref['title'])
+        self.assertEqual(extracted_refs[0]['authors'], single_ref['authors'])
         
     def test_parse_arxiv_url_extraction(self):
         """Test extraction of ArXiv URLs"""
