@@ -2681,6 +2681,14 @@ class ArxivReferenceChecker:
         
         # Remove any leading reference numbers like [1]
         cleaned_ref = re.sub(r'^\s*\[\d+\]\s*', '', cleaned_ref)
+
+        from refchecker.utils.biblatex_parser import extract_book_citation_fields
+
+        book_fields = extract_book_citation_fields(cleaned_ref)
+        if book_fields:
+            authors = self.extract_authors_list(book_fields['authors'])
+            if authors:
+                return authors, book_fields['title']
         
         # Handle specific problematic cases from the bibliography
         # Case 1: Legal cases like "[1]1976. Tarasoff v. Regents of University of California - 17 Cal.3d 425"
@@ -2738,6 +2746,21 @@ class ArxivReferenceChecker:
         # Normalize spacing around periods
         cleaned_ref = re.sub(r'([A-Z])\s+\.\s+', r'\1. ', cleaned_ref)
         cleaned_ref = re.sub(r'([A-Z])\s+\.([A-Za-z])', r'\1. \2', cleaned_ref)
+
+        # A URL after a journal citation must not make the whole citation look
+        # like a URL-only reference. PDF text extraction can replace quote
+        # glyphs with U+FFFD, so accept that character as a quote boundary.
+        quoted_journal_match = re.search(
+            r'^(?P<authors>.+?),\s*["“‘\ufffd](?P<title>.+?)["”’\ufffd]'
+            r'\s*,?\s*[^,]+,\s*vol(?:ume)?\.?\s+\d+\b',
+            cleaned_ref,
+            re.IGNORECASE,
+        )
+        if quoted_journal_match:
+            authors = self.extract_authors_list(quoted_journal_match.group('authors'))
+            title = clean_title(quoted_journal_match.group('title'))
+            if authors and title:
+                return authors, title
 
         # Check if this is a URL-based reference (common in some papers)
         if re.search(r'https?://', cleaned_ref):
@@ -5914,6 +5937,8 @@ class ArxivReferenceChecker:
                 doi = doi.split('*')[0]
             return doi
 
+        from refchecker.utils.biblatex_parser import extract_citation_year
+
         arxiv_refs = []
         non_arxiv_refs = []
         other_refs = []
@@ -6082,31 +6107,7 @@ class ArxivReferenceChecker:
                                 url = url_start + url_continuation
                 if url or doi:
                     logger.debug(f"Found non-arXiv reference {i+1}: {url or doi}")
-                    year = None
-                    end_year_match = re.search(r',\s+((19|20)\d{2})\s*\.?\s*$', ref)
-                    if end_year_match:
-                        year = int(end_year_match.group(1))
-                    else:
-                        year_patterns = [
-                            r'(?:In|Proceedings)[^,]*,?\s+((19|20)\d{2})',
-                            r'(?:Journal|IEEE|ACM)[^,]*,?\s+((19|20)\d{2})',
-                            r'(?:CoRR|abs/)[^,]*,?\s+((19|20)\d{2})',
-                        ]
-                        for pattern in year_patterns:
-                            pattern_match = re.search(pattern, ref)
-                            if pattern_match:
-                                year = int(pattern_match.group(1))
-                                break
-                        if year is None:
-                            all_years = re.findall(r'\b((19|20)\d{2})\b', ref)
-                            if all_years:
-                                valid_years = []
-                                for potential_year, _ in all_years:
-                                    page_pattern = rf'\d+\([^)]*\):\d*{potential_year}'
-                                    if not re.search(page_pattern, ref):
-                                        valid_years.append(int(potential_year))
-                                if valid_years:
-                                    year = valid_years[-1]
+                    year = extract_citation_year(ref)
                     extracted_data = self.extract_authors_title_from_academic_format(ref)
                     if extracted_data:
                         authors, title = extracted_data
@@ -6143,31 +6144,7 @@ class ArxivReferenceChecker:
                     else:
                         authors, title = self.extract_authors_title_fallback(ref)
                     title = clean_title(title) if title else ""
-                    year = None
-                    end_year_match = re.search(r',\s+((19|20)\d{2})\s*\.?\s*$', ref)
-                    if end_year_match:
-                        year = int(end_year_match.group(1))
-                    else:
-                        year_patterns = [
-                            r'(?:In|Proceedings)[^,]*,?\s+((19|20)\d{2})',
-                            r'(?:Journal|IEEE|ACM)[^,]*,?\s+((19|20)\d{2})',
-                            r'(?:CoRR|abs/)[^,]*,?\s+((19|20)\d{2})',
-                        ]
-                        for pattern in year_patterns:
-                            pattern_match = re.search(pattern, ref)
-                            if pattern_match:
-                                year = int(pattern_match.group(1))
-                                break
-                        if year is None:
-                            all_years = re.findall(r'\b((19|20)\d{2})\b', ref)
-                            if all_years:
-                                valid_years = []
-                                for potential_year, _ in all_years:
-                                    page_pattern = rf'\d+\([^)]*\):\d*{potential_year}'
-                                    if not re.search(page_pattern, ref):
-                                        valid_years.append(int(potential_year))
-                                if valid_years:
-                                    year = valid_years[-1]
+                    year = extract_citation_year(ref)
                     is_url_reference = False
                     for author in authors:
                         if isinstance(author, dict) and author.get('is_url_reference', False):

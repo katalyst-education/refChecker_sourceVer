@@ -10,7 +10,7 @@ Handles parsing of biblatex .bbl format references like:
 
 import re
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,125 @@ def _validate_parsing_quality(references: List[Dict[str, Any]]) -> bool:
     return True
 
 
+def extract_book_citation_fields(
+    content: str,
+) -> Optional[Dict[str, str]]:
+    """Extract authors and title from an author-initialed book citation."""
+    from refchecker.utils.text_utils import clean_title
+
+    content = _handle_hyphenated_line_breaks(content)
+    content = re.sub(r'\s+', ' ', content.strip())
+    content = re.sub(r'^\s*\[\d+\]\s*', '', content)
+
+    author_name = (
+        r'(?:[A-Z]\.\s*)+[A-Z][A-Za-z\'-]+'
+        r'(?:\s+[A-Z][A-Za-z\'-]+)*'
+    )
+    author_list = (
+        rf'{author_name}(?:,\s*{author_name})*'
+        rf'(?:,\s*and\s+{author_name}|\s+and\s+{author_name})?'
+    )
+    author_match = re.match(
+        rf'^(?P<authors>{author_list}),\s*(?P<details>.+)$',
+        content,
+    )
+    if not author_match:
+        return None
+
+    details = author_match.group('details')
+    details = re.sub(
+        r'\s*\[Online\]\.\s*Available:\s*https?://\S+.*$',
+        '',
+        details,
+        flags=re.IGNORECASE,
+    )
+    publication_matches = list(re.finditer(
+        r'\.\s+(?=[A-Z][^:\n]{1,70}:\s+.+,\s*'
+        r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
+        r'(?:19|20)\d{2}\.?\s*$)',
+        details,
+    ))
+    if not publication_matches:
+        publication_matches = list(re.finditer(
+            r'\.\s+(?=[^.]{3,100},\s*'
+            r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
+            r'(?:19|20)\d{2}\.?\s*$)',
+            details,
+        ))
+    if not publication_matches:
+        return None
+
+    publication_match = publication_matches[-1]
+    title = details[:publication_match.start()].strip()
+    title = re.sub(
+        r',\s*(?:\d+(?:st|nd|rd|th)\s+ed\.?|ser\.).*$',
+        '',
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = clean_title(title)
+    publication_details = details[publication_match.end():]
+    publisher_match = re.search(
+        r':\s*(.+?),\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
+        r'(?:19|20)\d{2}\.?\s*$',
+        publication_details,
+    )
+    if publisher_match:
+        publisher = publisher_match.group(1).strip()
+    else:
+        publisher = re.sub(
+            r',\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
+            r'(?:19|20)\d{2}\.?\s*$',
+            '',
+            publication_details,
+        ).strip()
+    authors = author_match.group('authors').strip()
+    if not authors or not title:
+        return None
+    return {'authors': authors, 'title': title, 'publisher': publisher}
+
+
+def extract_citation_year(content: str) -> Optional[int]:
+    """Extract a publication year without considering years inside URLs."""
+    url_year_match = re.search(
+        r'https?://\S+[.,]\s+((?:19|20)\d{2})\.?\s*$',
+        content,
+        re.IGNORECASE,
+    )
+    if url_year_match:
+        return int(url_year_match.group(1))
+
+    citation_text = re.split(
+        r'https?://',
+        content,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    end_year_match = re.search(
+        r',\s+((19|20)\d{2})\s*\.?\s*$',
+        citation_text,
+    )
+    if end_year_match:
+        return int(end_year_match.group(1))
+
+    year_patterns = [
+        r'(?:In|Proceedings)[^,]*,?\s+((19|20)\d{2})',
+        r'(?:Journal|IEEE|ACM)[^,]*,?\s+((19|20)\d{2})',
+        r'(?:CoRR|abs/)[^,]*,?\s+((19|20)\d{2})',
+    ]
+    for pattern in year_patterns:
+        pattern_match = re.search(pattern, citation_text)
+        if pattern_match:
+            return int(pattern_match.group(1))
+
+    all_years = re.findall(r'\b((19|20)\d{2})\b', citation_text)
+    for potential_year, _ in all_years:
+        page_pattern = rf'\d+\([^)]*\):\d*{potential_year}'
+        if not re.search(page_pattern, citation_text):
+            return int(potential_year)
+    return None
+
+
 def parse_biblatex_references(text: str) -> List[Dict[str, Any]]:
     """
     Parse biblatex formatted references into structured format
@@ -319,39 +438,20 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     content = re.sub(r'\s+', ' ', content.strip())
 
     book_style_authors_text = ""
-    book_style_author_pattern = (
-        r'((?:[A-Z]\.\s*){1,5}[A-Z][A-Za-z\'-]+(?:\s+[A-Z][A-Za-z\'-]+)*)'
-    )
-    book_with_edition_match = re.search(
-        rf'^{book_style_author_pattern},\s*(.+?),\s*'
-        r'\d+(?:st|nd|rd|th)\s+ed(?:ition)?\.?\s+'
-        r'(.+?),\s*((?:19|20)\d{2})\.'
-        r'(?:\s*\[Online\]\.\s*Available:\s*https?://\S+)?$',
-        content,
-    )
-    if book_with_edition_match:
-        book_style_authors_text = book_with_edition_match.group(1).strip()
-        title = clean_title(book_with_edition_match.group(2).strip())
-        journal = book_with_edition_match.group(3).strip()
-        year = int(book_with_edition_match.group(4))
-    else:
-        book_style_match = re.search(
-            rf'^{book_style_author_pattern},'
-            r'\s*([A-Z][^.]{8,}?)\.\s+([^,]{3,}),\s+((?:19|20)\d{2})\.'
-            r'(?:\s*\[Online\]\.\s*Available:\s*https?://\S+)?$',
-            content,
-        )
-        if book_style_match:
-            book_style_authors_text = book_style_match.group(1).strip()
-            title = clean_title(book_style_match.group(2).strip())
-            journal = book_style_match.group(3).strip()
-            year = int(book_style_match.group(4))
+    book_fields = extract_book_citation_fields(content)
+    if book_fields:
+        book_style_authors_text = book_fields['authors']
+        title = book_fields['title']
+        journal = book_fields['publisher']
     
     # Pattern matching for different biblatex formats:
     
     # 1. Try to extract title - can be in quotes or as capitalized text after authors
     # Handle both regular quotes (") and smart quotes (", ")
-    title_match = re.search(r'["\u201c\u201d]([^"\u201c\u201d]+)["\u201c\u201d]', content)
+    title_match = re.search(
+        r'["\u201c\u201d\ufffd]([^"\u201c\u201d\ufffd]+)["\u201c\u201d\ufffd]',
+        content,
+    )
     if title_match:
         raw_title = title_match.group(1)
         title = clean_title(raw_title)
@@ -387,24 +487,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
                     break
     
     # 2. Extract year - prioritize year in parentheses over ArXiv IDs
-    year_patterns = [
-        r'\((\d{4})\)',  # Year in parentheses like "(2024)" - most reliable
-        r'\b(\d{4})\.$',  # Year at end of sentence like "2024."
-        r'\b(20\d{2})\b',  # Recent years (2000-2099) - avoid ArXiv IDs like "2403"
-        r'\b(\d{4})\b',  # Any 4-digit number as fallback
-    ]
-    
-    for pattern in year_patterns:
-        year_match = re.search(pattern, content)
-        if year_match:
-            try:
-                potential_year = int(year_match.group(1))
-                # Validate it's a reasonable publication year
-                if 1900 <= potential_year <= 2030:
-                    year = potential_year
-                    break
-            except ValueError:
-                continue
+    year = extract_citation_year(content)
     
     # 3. Extract DOI 
     # Handle DOIs that may be split across lines or have spaces
@@ -442,8 +525,8 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     # Order matters - more specific patterns first!
     author_patterns = [
         # Pattern 1: Authors followed by quoted title (handle both regular and smart quotes)
-        r'^([^"\u201c\u201d]+?),\s*["\u201c\u201d]',  # "Authors, \"Title\"" - more restrictive, requires comma before quote
-        r'^([^"\u201c\u201d]+)\.\s*["\u201c\u201d]',  # "Authors. \"Title\"" or smart quotes
+        r'^([^"\u201c\u201d\ufffd]+?),\s*["\u201c\u201d\ufffd]',  # "Authors, \"Title\"" - more restrictive, requires comma before quote
+        r'^([^"\u201c\u201d\ufffd]+)\.\s*["\u201c\u201d\ufffd]',  # "Authors. \"Title\"" or smart quotes
         
         # Pattern 2: Authors followed by unquoted title for books: "Author1 and Author2, Title:"
         r'^([^,]+(?:\s+and\s+[^,]+)?),\s+([A-Z][^.]*?):\s*([^.]*?)\.',  # "Author1 and Author2, Title: Subtitle." - book format
