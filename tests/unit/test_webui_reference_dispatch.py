@@ -172,3 +172,72 @@ def test_webui_pdf_cascade_parses_dedicated_bibliography_not_body_text():
         _PDF_BIBLIOGRAPHY,
         bibliography_text=_PDF_BIBLIOGRAPHY,
     )
+
+
+def test_webui_grobid_path_recovers_urls_when_other_text_entries_fail_validation():
+    bibliography = (
+        '[1] A. Author, "Earlier work," Journal of Tests, 2004.\n'
+        '[36] S. Retalis and A. Papasalouros, "Designing and Generating '
+        'Educational Adaptive Hypermedia Applications," Journal of Educational '
+        'Technology & Society, vol. 8, no. 3, pp. 26-35, 2005. [Online]. '
+        'Available: https://www.jstor.org/stable/jeductechsoci.8.3.\n26\n'
+        '[39] N. Kara and N. Sevim, "Adaptive Learning Systems: Beyond Teaching '
+        'Machines," Contemporary Educational Technology, vol. 4, no. 2, Jun. '
+        '2013. [Online]. Available: https://www.cedtech.net/article/\n'
+        'adaptive-learning-systems-beyond-teaching-machines-6095'
+    )
+    grobid_references = [
+        {"title": "Earlier work", "authors": ["A. Author"]},
+        {
+            "title": (
+                "Designing and Generating Educational Adaptive "
+                "Hypermedia Applications"
+            ),
+            "authors": ["S. Retalis", "A. Papasalouros"],
+            "url": "https://www.jstor.org/stable/jeductechsoci.8.3",
+            "cited_url": "https://www.jstor.org/stable/jeductechsoci.8.3",
+        },
+        {
+            "title": "Adaptive Learning Systems: Beyond Teaching Machines",
+            "authors": ["N. Kara", "N. Sevim"],
+            "url": "https://www.cedtech.net/article/",
+            "cited_url": "https://www.cedtech.net/article/",
+        },
+    ]
+    wrapper = ProgressRefChecker.__new__(ProgressRefChecker)
+    wrapper.extraction_mode = "cascade"
+    wrapper.llm = None
+
+    with (
+        patch(
+            "refchecker.utils.extraction_quality.strict_numbered_text_candidate",
+            return_value=([], 3),
+        ),
+        patch(
+            "backend.refchecker_wrapper.extract_pdf_references_with_grobid_fallback",
+            return_value=(grobid_references, None),
+        ),
+        patch(
+            "refchecker.utils.text_utils.validate_parsed_references",
+            return_value={"is_valid": True},
+        ),
+    ):
+        references, method = asyncio.run(
+            wrapper._extract_references_from_pdf(
+                "paper.pdf",
+                bibliography,
+                bibliography_text=bibliography,
+                full_text=bibliography,
+            )
+        )
+
+    assert method == "grobid"
+    assert references[1]["url"] == (
+        "https://www.jstor.org/stable/jeductechsoci.8.3.26"
+    )
+    assert references[1]["cited_url"] == references[1]["url"]
+    assert references[2]["url"] == (
+        "https://www.cedtech.net/article/"
+        "adaptive-learning-systems-beyond-teaching-machines-6095"
+    )
+    assert references[2]["cited_url"] == references[2]["url"]

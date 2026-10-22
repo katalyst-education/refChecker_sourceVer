@@ -3519,10 +3519,17 @@ class ProgressRefChecker:
 
         from refchecker.utils.extraction_quality import (
             merge_grounded_reference_candidates,
+            numbered_text_url_candidate,
+            preserve_grounded_reference_urls,
             strict_numbered_text_candidate,
         )
         deterministic_candidate, expected_count = await asyncio.to_thread(
             strict_numbered_text_candidate,
+            cli_checker,
+            selected_bibliography,
+        )
+        url_candidate, _ = await asyncio.to_thread(
+            numbered_text_url_candidate,
             cli_checker,
             selected_bibliography,
         )
@@ -3556,6 +3563,14 @@ class ProgressRefChecker:
                 normalized_grobid = [
                     _normalize_reference_fields(ref) for ref in grobid_candidate
                 ]
+                if url_candidate:
+                    normalized_grobid = preserve_grounded_reference_urls(
+                        normalized_grobid,
+                        [
+                            _normalize_reference_fields(ref)
+                            for ref in url_candidate
+                        ],
+                    )
                 if deterministic_candidate:
                     normalized_grobid = merge_grounded_reference_candidates(
                         normalized_grobid,

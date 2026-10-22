@@ -7665,6 +7665,8 @@ class ArxivReferenceChecker:
             if grobid_references:
                 from refchecker.utils.extraction_quality import (
                     merge_grounded_reference_candidates,
+                    numbered_text_url_candidate,
+                    preserve_grounded_reference_urls,
                     strict_numbered_text_candidate,
                 )
 
@@ -7679,6 +7681,14 @@ class ArxivReferenceChecker:
                     )
                 finally:
                     self.fatal_error, self.fatal_error_message = fatal_state
+                url_candidate, _ = numbered_text_url_candidate(
+                    self, comparison_bibliography
+                )
+                if url_candidate:
+                    grobid_references = preserve_grounded_reference_urls(
+                        grobid_references,
+                        url_candidate,
+                    )
                 if text_candidate:
                     grobid_references = merge_grounded_reference_candidates(
                         grobid_references, text_candidate

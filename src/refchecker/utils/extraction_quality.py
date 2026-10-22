@@ -91,9 +91,9 @@ def preserve_grounded_reference_urls(
         candidate_title = candidate.get('title') or ''
         grounded_title = text_ref.get('title') or ''
         if (
-            candidate_title
-            and grounded_title
-            and calculate_title_similarity(
+            not candidate_title
+            or not grounded_title
+            or calculate_title_similarity(
                 candidate_title.lower(),
                 grounded_title.lower(),
             ) < 0.72
@@ -125,6 +125,26 @@ def preserve_grounded_reference_urls(
         grounded_candidates.append(candidate)
 
     return grounded_candidates
+
+
+def numbered_text_url_candidate(
+    checker: Any,
+    bibliography_text: Optional[str],
+) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    """Return a count-aligned numbered text parse for URL grounding only."""
+    if not bibliography_text:
+        return [], None
+    numbered_entries = checker._split_numbered_reference_entries(
+        bibliography_text
+    )
+    expected_count = len(numbered_entries) or None
+    if not expected_count:
+        return [], None
+
+    references = checker._parse_references_regex('\n'.join(numbered_entries))
+    if len(references) != expected_count:
+        return [], expected_count
+    return references, expected_count
 
 
 def strict_numbered_text_candidate(
