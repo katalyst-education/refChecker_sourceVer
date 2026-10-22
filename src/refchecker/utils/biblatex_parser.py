@@ -319,16 +319,33 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     content = re.sub(r'\s+', ' ', content.strip())
 
     book_style_authors_text = ""
-    book_style_match = re.search(
-        r'^((?:[A-Z]\.\s*){1,5}[A-Z][A-Za-z\'-]+(?:\s+[A-Z][A-Za-z\'-]+)*),'
-        r'\s*([A-Z][^.]{8,}?)\.\s+([^,]{3,}),\s+((?:19|20)\d{2})\.\s*$',
+    book_style_author_pattern = (
+        r'((?:[A-Z]\.\s*){1,5}[A-Z][A-Za-z\'-]+(?:\s+[A-Z][A-Za-z\'-]+)*)'
+    )
+    book_with_edition_match = re.search(
+        rf'^{book_style_author_pattern},\s*(.+?),\s*'
+        r'\d+(?:st|nd|rd|th)\s+ed(?:ition)?\.?\s+'
+        r'(.+?),\s*((?:19|20)\d{2})\.'
+        r'(?:\s*\[Online\]\.\s*Available:\s*https?://\S+)?$',
         content,
     )
-    if book_style_match:
-        book_style_authors_text = book_style_match.group(1).strip()
-        title = clean_title(book_style_match.group(2).strip())
-        journal = book_style_match.group(3).strip()
-        year = int(book_style_match.group(4))
+    if book_with_edition_match:
+        book_style_authors_text = book_with_edition_match.group(1).strip()
+        title = clean_title(book_with_edition_match.group(2).strip())
+        journal = book_with_edition_match.group(3).strip()
+        year = int(book_with_edition_match.group(4))
+    else:
+        book_style_match = re.search(
+            rf'^{book_style_author_pattern},'
+            r'\s*([A-Z][^.]{8,}?)\.\s+([^,]{3,}),\s+((?:19|20)\d{2})\.'
+            r'(?:\s*\[Online\]\.\s*Available:\s*https?://\S+)?$',
+            content,
+        )
+        if book_style_match:
+            book_style_authors_text = book_style_match.group(1).strip()
+            title = clean_title(book_style_match.group(2).strip())
+            journal = book_style_match.group(3).strip()
+            year = int(book_style_match.group(4))
     
     # Pattern matching for different biblatex formats:
     
