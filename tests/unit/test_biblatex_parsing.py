@@ -160,6 +160,36 @@ class TestBiblatexParsing(unittest.TestCase):
         self.assertEqual(len(extracted_refs), 1)
         self.assertEqual(extracted_refs[0]['title'], single_ref['title'])
         self.assertEqual(extracted_refs[0]['authors'], single_ref['authors'])
+
+    def test_parse_multiple_initialed_authors_before_unquoted_book_title(self):
+        """Parse a multi-author book citation with an unquoted title and URL."""
+        content = (
+            '[11] L. Johnson, S. Adams Becker, M. Cummins, V. Estrada, A. Freeman, '
+            'and C. Hall, NMC Horizon Report: 2016 Higher Education Edition. Austin, '
+            'Texas: The New Media Consortium, 2016, Retrieved November 26, 2024. '
+            '[Online]. Available: https://www.learntechlib.org/p/171478/'
+        )
+        expected_authors = [
+            'L. Johnson',
+            'S. Adams Becker',
+            'M. Cummins',
+            'V. Estrada',
+            'A. Freeman',
+            'C. Hall',
+        ]
+
+        refs = parse_biblatex_references(content)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(
+            refs[0]['title'],
+            'NMC Horizon Report: 2016 Higher Education Edition',
+        )
+        self.assertEqual(refs[0]['authors'], expected_authors)
+        self.assertEqual(refs[0]['year'], 2016)
+        self.assertEqual(
+            refs[0]['url'],
+            'https://www.learntechlib.org/p/171478/',
+        )
         
     def test_parse_arxiv_url_extraction(self):
         """Test extraction of ArXiv URLs"""

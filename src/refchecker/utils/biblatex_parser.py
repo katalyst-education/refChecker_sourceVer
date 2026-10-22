@@ -486,6 +486,20 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
                     re.search(r'[A-Z][a-z]+', potential_authors)):
                     authors_text = potential_authors
                     break
+
+    if not authors_text and title:
+        title_start = content.find(title)
+        if title_start > 0:
+            author_prefix = content[:title_start].strip(' ,.;')
+            if (
+                ',' in author_prefix
+                and len(author_prefix) <= 300
+                and re.match(
+                    r"^(?:[A-Z]\.\s*){1,5}[A-Z][A-Za-z'-]+",
+                    author_prefix,
+                )
+            ):
+                authors_text = author_prefix
     
     # Remove trailing punctuation and clean up
     authors_text = re.sub(r'[.,;:]$', '', authors_text.strip())

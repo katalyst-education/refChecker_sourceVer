@@ -95,6 +95,62 @@ def test_unrecognised_cited_site_is_fetched_before_title_search(monkeypatch):
     assert url == "https://ordinary-example.invalid/source"
 
 
+def test_amazon_waf_202_challenge_is_reported_as_blocked_access(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    response = DummyResponse(
+        "",
+        url="https://www.learntechlib.org/p/171478/",
+        status_code=202,
+    )
+    response.headers["x-amzn-waf-action"] = "challenge"
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda url: response,
+    )
+
+    data, issues, url = checker.verify_reference({
+        "title": "NMC Horizon Report: 2016 Higher Education Edition",
+        "authors": ["L. Johnson", "S. Adams Becker", "M. Cummins"],
+        "year": 2016,
+        "url": "https://www.learntechlib.org/p/171478/",
+    })
+
+    assert data is not None
+    assert data["web_metadata"]["status_code"] == 202
+    assert data["web_metadata"]["access_blocked"] is True
+    assert len(issues) == 1
+    assert issues[0]["warning_type"] == "access"
+    assert "202" in issues[0]["warning_details"]
+    assert url == "https://www.learntechlib.org/p/171478/"
+
+
+def test_other_202_responses_keep_the_http_error_behavior(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    response = DummyResponse(
+        "",
+        url="https://example.com/page",
+        status_code=202,
+    )
+    monkeypatch.setattr(
+        checker,
+        "_respectful_request",
+        lambda url: response,
+    )
+
+    data, issues, url = checker.verify_reference({
+        "title": "Example page",
+        "url": "https://example.com/page",
+    })
+
+    assert data is None
+    assert issues == [{
+        "error_type": "unverified",
+        "error_details": "HTTP error 202",
+    }]
+    assert url == "https://example.com/page"
+
+
 def test_model_card_and_release_venues_are_web_content():
     checker = WebPageChecker()
 
