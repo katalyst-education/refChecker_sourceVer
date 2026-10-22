@@ -5,6 +5,7 @@ from pathlib import Path
 from refchecker.core.refchecker import ArxivReferenceChecker
 from refchecker.utils.extraction_quality import (
     merge_grounded_reference_candidates,
+    numbered_text_url_candidate,
     preserve_grounded_reference_urls,
 )
 
@@ -120,6 +121,77 @@ def test_llm_candidates_recover_screenshot_shaped_truncated_urls():
         'https://www.jstor.org/stable/jeductechsoci.8.3',
         'https://www.cedtech.net/article/',
     ]
+
+
+def test_numbered_text_url_candidate_recovers_grobid_urls_without_full_validation():
+    bibliography = (
+        '[1] A. Author, "Earlier work," Journal of Tests, 2004.\n'
+        '[36] S. Retalis and A. Papasalouros, "Designing and Generating '
+        'Educational Adaptive Hypermedia Applications," Journal of Educational '
+        'Technology & Society, vol. 8, no. 3, pp. 26-35, 2005. [Online]. '
+        'Available: https://www.jstor.org/stable/jeductechsoci.8.3.\n26\n'
+        '[39] N. Kara and N. Sevim, "Adaptive Learning Systems: Beyond Teaching '
+        'Machines," Contemporary Educational Technology, vol. 4, no. 2, Jun. '
+        '2013. [Online]. Available: https://www.cedtech.net/article/\n'
+        'adaptive-learning-systems-beyond-teaching-machines-6095'
+    )
+    checker = ArxivReferenceChecker(
+        llm_config={'disabled': True},
+        extraction_mode='cascade',
+    )
+    text_candidate, expected_count = numbered_text_url_candidate(
+        checker,
+        bibliography,
+    )
+    grobid_candidate = [
+        {
+            'title': 'Earlier work',
+            'url': '',
+        },
+        {
+            'title': (
+                'Designing and Generating Educational Adaptive '
+                'Hypermedia Applications'
+            ),
+            'url': 'https://www.jstor.org/stable/jeductechsoci.8.3',
+        },
+        {
+            'title': 'Adaptive Learning Systems: Beyond Teaching Machines',
+            'url': 'https://www.cedtech.net/article/',
+        },
+    ]
+
+    recovered = preserve_grounded_reference_urls(
+        grobid_candidate,
+        text_candidate,
+    )
+
+    assert expected_count == 3
+    assert len(text_candidate) == 3
+    assert [reference['url'] for reference in recovered] == [
+        '',
+        'https://www.jstor.org/stable/jeductechsoci.8.3.26',
+        (
+            'https://www.cedtech.net/article/'
+            'adaptive-learning-systems-beyond-teaching-machines-6095'
+        ),
+    ]
+
+
+def test_url_recovery_requires_matching_titles():
+    candidate = [{
+        'title': 'A different reference',
+        'url': 'https://example.org/short',
+    }]
+    text_candidate = [{
+        'title': 'Grounded reference title',
+        'url': 'https://example.org/short-and-complete',
+    }]
+
+    assert preserve_grounded_reference_urls(
+        candidate,
+        text_candidate,
+    ) == candidate
 
 
 def test_grounded_merge_does_not_mix_different_references():
