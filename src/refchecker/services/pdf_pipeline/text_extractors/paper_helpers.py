@@ -948,6 +948,7 @@ POST_BIBLIOGRAPHY_SECTION_RE = re.compile(
         | appendices
         | supplementary\s+materials?
         | supplemental\s+materials?
+        | declaration
         | anhang(?:\s+[A-Z0-9IVX]+)?
         | anhangsverzeichnis
         | anhänge
@@ -962,6 +963,11 @@ POST_BIBLIOGRAPHY_SECTION_RE = re.compile(
     \s*$
     """,
     flags=re.IGNORECASE | re.MULTILINE | re.VERBOSE,
+)
+
+INLINE_DECLARATION_RE = re.compile(
+    r"\bdeclaration(?=\s+i\s+hereby\s+certify\b)",
+    flags=re.IGNORECASE,
 )
 
 
@@ -1078,9 +1084,21 @@ def split_text_and_references(
     
         for match in matches:
             after = text[match.end():]
-            appendix_match = POST_BIBLIOGRAPHY_SECTION_RE.search(after)
-            if appendix_match:
-                after = after[:appendix_match.start()]
+            post_bibliography_matches = [
+                candidate
+                for candidate in (
+                    POST_BIBLIOGRAPHY_SECTION_RE.search(after),
+                    INLINE_DECLARATION_RE.search(after),
+                )
+                if candidate is not None
+            ]
+            if post_bibliography_matches:
+                after = after[
+                    :min(
+                        post_bibliography_matches,
+                        key=lambda candidate: candidate.start(),
+                    ).start()
+                ]
     
             # Inspect enough text to see several references without
             # allowing the rest of a huge thesis to dominate scoring.
@@ -1253,6 +1271,13 @@ def split_text_and_references(
             match.end():
             bibliography_end
         ].strip()
+        bibliography_text = re.sub(
+            r"(?im)^[ \t]*bibliography"
+            r"(?:[ \t]+\d{1,4}|[ \t]*\r?\n[ \t]*\d{1,4})?"
+            r"[ \t]*(?:\r?\n|$)",
+            "",
+            bibliography_text,
+        ).strip()
         body_after_references = text[bibliography_end:].strip()
         body_parts = [
             part
