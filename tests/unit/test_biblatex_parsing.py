@@ -31,7 +31,7 @@ class TestBiblatexParsing(unittest.TestCase):
         # Not biblatex format
         bibtex_text = """@article{key, title={Title}, author={Author}}"""
         self.assertFalse(detect_biblatex_format(bibtex_text))
-        
+
         # Empty text
         self.assertFalse(detect_biblatex_format(""))
         
@@ -68,6 +68,224 @@ class TestBiblatexParsing(unittest.TestCase):
         self.assertEqual(references[0]["title"], "A clearly named paper title")
         self.assertEqual(references[1]["title"], "Another clear paper title")
         self.assertFalse(checker.fatal_error)
+
+    def test_numbered_entry_without_space_after_marker_is_not_dropped(self):
+        bibliography = (
+            '[1] A. Author, "First study," Test Journal, vol. 1, 2024.\n'
+            '[2]B. Author, "Second study," Test Journal, vol. 2, 2023.\n'
+            '[3] C. Author, "Third study," Test Journal, vol. 3, 2022.'
+        )
+        checker = ArxivReferenceChecker(
+            llm_config={"disabled": True},
+            extraction_mode="cascade",
+        )
+
+        references = checker.parse_references(bibliography)
+
+        self.assertEqual(len(references), 3)
+        self.assertEqual(
+            [reference["entry_number"] for reference in references],
+            [1, 2, 3],
+        )
+
+    def test_numbered_ieee_references_keep_title_venue_and_editor_separate(self):
+        bibliography = (
+            '[1] A. Author, "Conference study," in 2023 IEEE Test '
+            'Conference (TEST), (Berlin, Germany), pp. 1-3, IEEE, Aug. 2023.\n'
+            '[2] B. Other, "Journal study," Cognitive Science, vol. 49, '
+            'p. e70035, Jan. 2025.\n'
+            '[3] J. G. Webster, ed., Design of Pulse Oximeters. Medical '
+            'Science Series, Bristol: Institute of Physics Publishing, '
+            '1st ed., 1997.'
+        )
+        checker = ArxivReferenceChecker(
+            llm_config={"disabled": True},
+            extraction_mode="cascade",
+        )
+
+        references = checker.parse_references(bibliography)
+
+        self.assertEqual(len(references), 3)
+        self.assertEqual(references[0]["title"], "Conference study")
+        self.assertEqual(references[0]["venue"], "2023 IEEE Test Conference (TEST)")
+        self.assertNotIn("Conference study", references[0]["venue"])
+        self.assertEqual(references[1]["title"], "Journal study")
+        self.assertEqual(references[1]["venue"], "Cognitive Science")
+        self.assertEqual(references[2]["title"], "Design of Pulse Oximeters")
+        self.assertNotIn("ed.", references[2]["title"])
+        self.assertIn("Institute of Physics Publishing", references[2]["venue"])
+
+    def test_multiline_pdf_ieee_bibliography_fields_are_parsed(self):
+        bibliography = (
+            '[1] V. Hunt, D. Layton, and S. Prince, "Diversity Matters," '
+            'Feb. 2015.\nPublisher: McKinsey&Company.\n'
+            '[2] United Nations, "International Day of Women and Girls in Science."\n'
+            'https://www.un.org/en/observances/women-and-girls-in-science-day.\n'
+            'accessed: Nov. 04, 2025.\n'
+            '[3] Statistisches Bundesamt, destatis, "Studierende: Deutschland, Semester,\n'
+            'Nationalität, Geschlecht, Studienfach," 2025.\n'
+            '[4] A. Pfendler, F. Keil, J. Hanson, and K. Hofmann, "How to Inspire Girls\n'
+            'for STEM Studies Through a Series of Consecutive Multi-Day Hands-On Labs,"\n'
+            'in 2023 IEEE 2nd German Education Conference (GECon),\n'
+            '(Berlin, Germany), pp. 1-5, IEEE, Aug. 2023.\n'
+            '[5] TU Darmstadt, "Bereicherung für die Medizin von morgen." '
+            'https://www.tu-darmstadt.de/universitaet/aktuelles_meldungen/'
+            'einzelansicht_525888.de.jsp, Sept. 2025. accessed: Nov. 07, 2025.\n'
+            '[6] S. Wang, S. Andrei, O. Urbina, and D. A. Sisk, "Introducing STEM to\n'
+            '7th Grade Girls using SeaPerch and Scratch," in2020 IEEE Frontiers in\n'
+            'Education Conference (FIE), (Uppsala, Sweden), pp. 1-8, IEEE, Oct. 2020.\n'
+            '[7] M. S. Shaw, G. Ji, Y. Zhang, and Y. B. Kafai, "Promoting socio-political\n'
+            'identification with computer science: How high school youth restory\n'
+            'their identities through electronic textile quilts," in 2021 Conference\n'
+            'on Research in Equitable and Sustained Participation in Engineering,\n'
+            'Computing, and Technology (RESPECT), pp. 1-8, May 2021.\n'
+            '[8] C. Wang, S. Vemula, and M. Frye, "Out-of-school Time STEM: Teach\n'
+            'Programming Using Python for High School Girls," in 2020 IEEE\n'
+            'Integrated STEM Education Conference (ISEC), (Princeton, NJ, USA),\n'
+            'pp. 1-6, IEEE, Aug. 2020.\n'
+            '[9] B. K. Maigaard Kjar Pedersen, B. Charlotte Weigelin, J. C. Larsen, and\n'
+            'J. Nielsen, "Using educational robotics to foster girls\' interest in STEM:\n'
+            'A systematic review," in 2021 30th IEEE International Conference on\n'
+            'Robot & Human Interactive Communication (RO-MAN), (Vancouver,\n'
+            'BC, Canada), pp. 865-872, IEEE, Aug. 2021.\n'
+            '[10] R. S. Baker, E. Cloude, J. M. A. L. Andres, and Z. Wei, '
+            '"The Confrustion Constellation: A New Way of Looking at Confusion and Frustration,"\n'
+            'Cognitive Science, vol. 49, p. e70035, Jan. 2025.\n'
+            '[11] J. G. Webster, ed., Design of Pulse Oximeters. Medical Science Series,\n'
+            'Bristol: Inst. of Physics Publishing, 1st ed., 1997.'
+        )
+        checker = ArxivReferenceChecker(
+            llm_config={"disabled": True},
+            extraction_mode="cascade",
+        )
+
+        references = checker.parse_references(bibliography)
+
+        assert len(references) == 11
+        by_number = {reference["entry_number"]: reference for reference in references}
+        assert by_number[2]["year"] is None
+        assert by_number[3]["title"].endswith("Nationalität, Geschlecht, Studienfach")
+        assert by_number[5]["title"] == "Bereicherung für die Medizin von morgen"
+        assert by_number[5]["year"] == 2025
+        assert by_number[5]["url"] == (
+            "https://www.tu-darmstadt.de/universitaet/aktuelles_meldungen/"
+            "einzelansicht_525888.de.jsp"
+        )
+        assert by_number[4]["venue"] == "2023 IEEE 2nd German Education Conference (GECon)"
+        assert by_number[6]["venue"] == "2020 IEEE Frontiers in Education Conference (FIE)"
+        assert by_number[7]["venue"] == (
+            "2021 Conference on Research in Equitable and Sustained Participation "
+            "in Engineering, Computing, and Technology (RESPECT)"
+        )
+        assert by_number[8]["venue"] == (
+            "2020 IEEE Integrated STEM Education Conference (ISEC)"
+        )
+        assert by_number[9]["venue"] == (
+            "2021 30th IEEE International Conference on Robot & Human "
+            "Interactive Communication (RO-MAN)"
+        )
+        assert by_number[10]["venue"] == "Cognitive Science"
+        assert by_number[11]["title"] == "Design of Pulse Oximeters"
+        assert by_number[11]["venue"] == (
+            "Medical Science Series, Bristol: Inst. of Physics Publishing"
+        )
+        assert by_number[9]["authors"] == [
+            "B. K. Maigaard Kjar Pedersen",
+            "B. Charlotte Weigelin",
+            "J. C. Larsen",
+            "J. Nielsen",
+        ]
+
+    def test_mixed_numbered_reference_formats_and_wrapped_dois(self):
+        bibliography = (
+            "[1] UNESCO, Education for Sustainable Development Goals: learning "
+            "objectives. UNESCO, 2017. doi: 10.54675/CGBA9153.\n"
+            '[7] E. Author, "Sustainable interaction concept," The International '
+            "Journal of Design in Society, vol. 12, no. 1, 2018.\n"
+            "[8] Y. Rogers, H. Sharp, and J. Preece, Interaction Design: Beyond "
+            "Human-Computer Interaction. Hoboken: Wiley, 2023.\n"
+            '[12] B. R. Keeble, "The Brundtland report: \'Our common future,\'" '
+            "Medicine and War, vol. 4, no. 1, Jan. 1988.\n"
+            '[37] J. M. Carroll, "Introduction to this Special Issue on '
+            '\'Scenario-Based System Development,\'" Interacting with Computers, '
+            "vol. 13, no. 1, 2000.\n"
+            "[15] A. N. Kumar et al., Computer Science Curricula 2023. New York, "
+            "NY, USA: ACM, 2024. doi: 10.1145/3664191.\n"
+            '[16] "CDIO Optional Standards 3.0 | Worldwide CDIO Inititative." '
+            "Accessed: Oct. 28, 2025. [Online]. Available: "
+            "https://www.cdio.org/content/cdio-optional-standards-30\n"
+            '[21] J. Biggs and T. Catherine, Teaching for quality learning at '
+            "university 5e, 5th ed. UK: McGraw-hill education, 2022.\n"
+            '[28] "Sustainability Awareness Framework (SusAF)," SUSO. Accessed: '
+            "Oct. 28, 2025. [Online]. Available: "
+            "https://www.suso.academy/en/sustainability-awareness-frameworksusaf/\n"
+            '[32] S. Oyedeji, H. Shamshiri, M. O. Adisa, J. Porras, B. Naqvi, '
+            'and D. Lammert, "Exploratory Study on Sustainability in Agile '
+            'Software Development," inHuman-Centered Software Engineering, '
+            "vol. 14793, Eds., 2024, pp. 264-272. doi: 10.1007/978-3-\n"
+            "031-64576-1_17.\n"
+            '[38] L. A. Pace, C. Bruno, and J. O. Schwarz, "Personas in '
+            'scenario building: Integrating human-centred design methods in '
+            "foresight,\"\nFutures,\nvol.\n166,\np.\n103539,\nFeb.\n2025,"
+            "\ndoi:\n10.1016/j.futures.2025.103539.\n"
+            '[41] "ISO 9241-210:2010 - Ergonomics of human-system interaction - '
+            'Part 210: Humancentred design for interactive systems," ISO, '
+            "ISO 9241-210:2010, 2010.\n"
+            "[42] T. Plomp and N. Nieveen, Educational design research. Part A: "
+            "an introduction. Enschede, the Netherlands: SLO, 2013.\n"
+            "[44] R. K. Yin, Case study research and applications: design and "
+            "methods, Sixth edition. Los Angeles London New Delhi: SAGE, 2018."
+        )
+        checker = ArxivReferenceChecker(
+            llm_config={"disabled": True},
+            extraction_mode="cascade",
+        )
+
+        references = checker.parse_references(bibliography)
+        by_number = {reference["entry_number"]: reference for reference in references}
+
+        self.assertEqual(len(references), 14)
+        self.assertEqual(
+            by_number[1]["title"],
+            "Education for Sustainable Development Goals: learning objectives",
+        )
+        self.assertEqual(by_number[1]["venue"], "UNESCO")
+        self.assertEqual(
+            by_number[7]["venue"],
+            "The International Journal of Design in Society",
+        )
+        self.assertEqual(
+            by_number[12]["title"],
+            "The Brundtland report: 'Our common future'",
+        )
+        self.assertEqual(
+            by_number[37]["title"],
+            "Introduction to this Special Issue on 'Scenario-Based System Development'",
+        )
+        self.assertEqual(by_number[8]["title"], "Interaction Design: Beyond Human-Computer Interaction")
+        self.assertEqual(by_number[8]["venue"], "Wiley")
+        self.assertEqual(by_number[15]["authors"], ["A. N. Kumar"])
+        self.assertEqual(by_number[15]["title"], "Computer Science Curricula 2023")
+        self.assertEqual(by_number[16]["year"], None)
+        self.assertEqual(by_number[16]["url"], "https://www.cdio.org/content/cdio-optional-standards-30")
+        self.assertEqual(by_number[21]["title"], "Teaching for quality learning at university")
+        self.assertEqual(by_number[21]["venue"], "McGraw-hill education")
+        self.assertEqual(by_number[28]["venue"], "SUSO")
+        self.assertEqual(by_number[32]["doi"], "10.1007/978-3-031-64576-1_17")
+        self.assertEqual(
+            by_number[32]["venue"],
+            "Human-Centered Software Engineering",
+        )
+        self.assertEqual(by_number[38]["doi"], "10.1016/j.futures.2025.103539")
+        self.assertEqual(by_number[41]["title"], "ISO 9241-210:2010 - Ergonomics of human-system interaction - Part 210: Humancentred design for interactive systems")
+        self.assertEqual(
+            by_number[42]["title"],
+            "Educational design research. Part A: an introduction",
+        )
+        self.assertEqual(
+            by_number[44]["title"],
+            "Case study research and applications: design and methods",
+        )
         
     def test_parse_regular_quotes(self):
         """Test parsing entries with regular ASCII quotes"""

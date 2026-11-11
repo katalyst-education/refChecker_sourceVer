@@ -134,6 +134,39 @@ def test_wrapped_tu_darmstadt_hostname_and_escaped_underscores_are_repaired():
     )
 
 
+def test_tu_darmstadt_url_with_pdf_extracted_spaces_is_reconstructed():
+    text = (
+        "https://www.tu-darmstadt.de/universitaet/aktuelles "
+        "meldungen/einzelansicht 525\n888.de.jsp, Sept. 2024"
+    )
+    assert join_wrapped_url_lines(text) == (
+        "https://www.tu-darmstadt.de/universitaet/aktuelles_meldungen/"
+        "einzelansicht_525888.de.jsp, Sept. 2024"
+    )
+
+
+def test_tu_darmstadt_pdf_url_survives_numbered_reference_parsing():
+    bibliography = (
+        '[1] A. Author, "First work," Journal, 2022.\n'
+        '[2] B. Other, "University news," Sept. 2024. '
+        "https://www.tu-darmstadt.de/universitaet/aktuelles "
+        "meldungen/einzelansicht 525\n888.de.jsp\n"
+        '[3] C. Researcher, "Third work," Journal, 2025.'
+    )
+    checker = ArxivReferenceChecker()
+
+    references = checker.parse_references(bibliography)
+
+    darmstadt = next(
+        reference for reference in references
+        if reference.get("title") == "University news"
+    )
+    assert darmstadt["url"] == (
+        "https://www.tu-darmstadt.de/universitaet/aktuelles_meldungen/"
+        "einzelansicht_525888.de.jsp"
+    )
+
+
 def test_wrapped_jstor_numeric_suffix_is_repaired():
     text = "https://www.jstor.org/stable/jeductechsoci.8.3.\n26"
     assert join_wrapped_url_lines(text) == (

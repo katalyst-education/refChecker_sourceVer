@@ -5045,7 +5045,10 @@ class ArxivReferenceChecker:
         if not bibliography_text:
             return []
 
-        matches = list(re.finditer(r'(?m)^\s*\[(\d{1,4})\]\s+', bibliography_text))
+        matches = list(re.finditer(
+            r'(?m)^[ \t]*\[(\d{1,4})\]',
+            bibliography_text,
+        ))
         if len(matches) < 3:
             return []
 
@@ -5061,6 +5064,242 @@ class ArxivReferenceChecker:
                 entries.append(entry)
 
         return entries if len(entries) >= 3 else []
+
+    def _parse_quoted_numbered_references(self, numbered_entries):
+        """Parse numbered quoted-title citations without conflating title and venue."""
+        if not numbered_entries:
+            return []
+
+        from refchecker.utils.doi_utils import construct_doi_url
+        from refchecker.utils.biblatex_parser import extract_book_citation_fields
+        from refchecker.utils.text_utils import (
+            clean_title,
+            parse_authors_with_initials,
+        )
+        from refchecker.utils.url_utils import clean_url, join_wrapped_url_lines
+
+        parsed_references = []
+        for raw_entry in numbered_entries:
+            entry = join_wrapped_url_lines(raw_entry)
+            number_match = re.match(r'^\s*\[(\d+)\]\s*', entry)
+            if not number_match:
+                return []
+
+            entry_number = int(number_match.group(1))
+            content = entry[number_match.end():].strip()
+            content = re.sub(
+                r"([A-Za-z])et\s+al\.?",
+                r"\1 et al.",
+                content,
+                flags=re.IGNORECASE,
+            )
+            quoted = re.match(
+                r'(?P<authors>.*?)(?:,\s*|\s*)["\u201c](?P<title>.+?)["\u201d"]'
+                r'(?P<tail>.*)$',
+                content,
+                re.DOTALL,
+            )
+            book_fields = None
+            if not quoted:
+                book_fields = extract_book_citation_fields(content)
+                if (
+                    not book_fields
+                    or book_fields["title"].lower().startswith(("ed.,", "eds.,"))
+                ):
+                    editor_book = re.match(
+                        r'(?P<authors>.+?),\s*eds?\.,\s*'
+                        r'(?P<title>.+?)\.\s+'
+                        r'(?P<tail>.+\b(?:19|20)\d{2}\b.*)$',
+                        content,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    if editor_book:
+                        publisher = re.sub(
+                            r',?\s*(?:19|20)\d{2}\b.*$',
+                            "",
+                            editor_book.group("tail"),
+                        ).strip(" ,.")
+                        publisher = re.sub(
+                            r',?\s*(?:\d+(?:st|nd|rd|th)\s+ed\.?|'
+                            r'(?:first|second|third|fourth|fifth|sixth)\s+edition)\.?$',
+                            "",
+                            publisher,
+                            flags=re.IGNORECASE,
+                        ).strip(" ,.")
+                        book_fields = {
+                            "authors": editor_book.group("authors"),
+                            "title": editor_book.group("title"),
+                            "publisher": publisher,
+                        }
+                if book_fields:
+                    authors_text = book_fields["authors"]
+                    title_text = book_fields["title"]
+                    tail = book_fields["publisher"]
+                else:
+                    organization = re.match(
+                        r'(?P<authors>[^,]+),\s*(?P<details>.+)$',
+                        content,
+                        re.DOTALL,
+                    )
+                    year_match = (
+                        re.search(
+                            r'\b(?:19|20)\d{2}\b',
+                            organization.group("details"),
+                        )
+                        if organization
+                        else None
+                    )
+                    if not organization or not year_match:
+                        return []
+
+                    details = organization.group("details")
+                    before_year = details[:year_match.start()].rstrip(" ,.")
+                    title_boundary = list(re.finditer(r'\.\s+', before_year))
+                    if not title_boundary:
+                        return []
+                    boundary = title_boundary[-1]
+                    authors_text = organization.group("authors")
+                    title_text = before_year[:boundary.start()].strip()
+                    tail = before_year[boundary.end():].strip()
+            else:
+                authors_text = quoted.group("authors")
+                title_text = quoted.group("title")
+                tail = quoted.group("tail")
+
+            authors_text = re.sub(
+                r"\s+et\s+al\.?$",
+                "",
+                authors_text.strip(),
+                flags=re.IGNORECASE,
+            )
+            title_text = re.sub(
+                r"^(?:eds?|editors?)\.,?\s*",
+                "",
+                title_text.strip(),
+                flags=re.IGNORECASE,
+            )
+            title_year = (
+                re.search(r"\b(?:19|20)\d{2}$", title_text)
+                if book_fields
+                else None
+            )
+            has_terminal_inner_quote = (
+                title_text.strip().rstrip(" ,").endswith("'")
+                and title_text.count("'") >= 2
+            )
+            authors = self.extract_authors_list(authors_text)
+            if len(authors) < 2:
+                parsed_authors = parse_authors_with_initials(
+                    authors_text
+                )
+                if len(parsed_authors) > len(authors):
+                    authors = [
+                        clean_author_name(
+                            re.sub(r"^and\s+", "", author, flags=re.IGNORECASE)
+                        )
+                        for author in parsed_authors
+                    ]
+            if not authors:
+                authors = ["Unknown Author"]
+
+            title = clean_title(title_text.strip().rstrip(" ,"))
+            if not title:
+                return []
+            title = title.rstrip(" ,.;:")
+            if has_terminal_inner_quote and not title.endswith("'"):
+                title = f"{title}'"
+            if title_year and not title.endswith(title_year.group(0)):
+                title = f"{title} {title_year.group(0)}"
+            title = re.sub(
+                r',?\s*(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|'
+                r'ninth|tenth|\d+(?:st|nd|rd|th))\s+)?edition\.?$',
+                '',
+                title,
+                flags=re.IGNORECASE,
+            ).strip()
+            title = re.sub(r'\s+\d+e$', '', title, flags=re.IGNORECASE)
+
+            citation_text = re.split(
+                r"\baccessed\s*:",
+                content,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            year_matches = re.findall(r"\b((?:19|20)\d{2})\b", citation_text)
+            year = int(year_matches[-1]) if year_matches else None
+
+            url_match = re.search(r"https?://\S+", entry, re.IGNORECASE)
+            url = clean_url(url_match.group(0)) if url_match else ""
+            doi_marker = re.search(r"\bdoi\s*:\s*", content, re.IGNORECASE)
+            doi = None
+            if doi_marker:
+                doi_tail = re.sub(r"\s+", "", content[doi_marker.end():])
+                doi_match = re.match(
+                    r"10\.\d{4,9}/[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]+",
+                    doi_tail,
+                    re.IGNORECASE,
+                )
+                if doi_match:
+                    candidate_doi = doi_match.group(0).rstrip(".,;)")
+                    from refchecker.utils.doi_utils import is_valid_doi_format
+                    if is_valid_doi_format(candidate_doi):
+                        doi = candidate_doi
+            if doi and not url:
+                url = construct_doi_url(doi)
+
+            venue = ""
+            if book_fields:
+                venue = book_fields["publisher"]
+            else:
+                publisher_match = re.search(
+                    r"\bPublisher:\s*(.+?)(?:\s+https?://|$)",
+                    tail,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                journal_marker = re.search(
+                    r",\s*vol(?:ume)?\.?\s+\d+",
+                    tail,
+                    re.IGNORECASE,
+                )
+                conference_match = re.search(
+                    r"^\s*[,.;]?\s*(?i:\bin)(?:\s+|(?=[A-Z0-9]))"
+                    r"(.+?)(?=,\s*(?:vol(?:ume)?\.|"
+                    r"(?:\([^)]*\)\s*,\s*)?pp\.)|\s+pp\.)",
+                    tail,
+                    re.DOTALL,
+                )
+                if publisher_match:
+                    venue = publisher_match.group(1).strip(" ,.")
+                elif conference_match:
+                    venue = conference_match.group(1).strip(" ,.")
+                elif journal_marker:
+                    venue = tail[:journal_marker.start()].strip(" ,.")
+                elif not quoted and tail:
+                    venue = tail
+                elif not authors_text and tail and not re.match(
+                    r"\s*accessed\s*:",
+                    tail,
+                    re.IGNORECASE,
+                ):
+                    venue_match = re.match(r"\s*[,.;]?\s*([^,.]+)", tail)
+                    if venue_match:
+                        venue = venue_match.group(1)
+            venue = re.sub(r"\s+", " ", venue).strip(" ,.")
+
+            parsed_references.append({
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "venue": venue,
+                "journal": venue,
+                "url": url,
+                "doi": doi,
+                "raw_text": raw_entry,
+                "type": "non-arxiv" if url or doi else "other",
+                "entry_number": entry_number,
+            })
+
+        return parsed_references
 
     def _extract_numbered_references_with_llm_chunks(self, numbered_entries):
         """Retry LLM extraction in small numbered-reference groups."""
@@ -5323,6 +5562,16 @@ class ArxivReferenceChecker:
         raw_numbered_entries = self._split_numbered_reference_entries(
             raw_bibliography_text
         )
+        quoted_numbered_references = self._parse_quoted_numbered_references(
+            raw_numbered_entries
+        )
+        if quoted_numbered_references:
+            from refchecker.utils.text_utils import normalize_reference_fields
+            self.last_reference_parser_method = 'regex'
+            return [
+                normalize_reference_fields(reference)
+                for reference in quoted_numbered_references
+            ]
         bibliography_text = join_wrapped_url_lines(bibliography_text)
 
         numbered_entries = self._split_numbered_reference_entries(bibliography_text)
@@ -5768,6 +6017,19 @@ class ArxivReferenceChecker:
                 ):
                     reference['raw_text'] = raw_entry
             return references
+
+        quoted_numbered_references = self._parse_quoted_numbered_references(
+            original_numbered_entries
+        )
+        if quoted_numbered_references:
+            from refchecker.utils.text_utils import normalize_reference_fields
+            self.last_reference_parser_method = 'regex'
+            return preserve_source_entries(
+                [
+                    normalize_reference_fields(reference)
+                    for reference in quoted_numbered_references
+                ]
+            )
         
         # Check if this is BibTeX format first
         from refchecker.utils.bibtex_parser import detect_bibtex_format

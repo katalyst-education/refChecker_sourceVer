@@ -20,6 +20,9 @@ from refchecker.services.pdf_pipeline.text_extractors import (
     two_column_text_extractor as two_column_module,
 )
 from refchecker.services.pdf_pipeline.text_extractors import paper_helpers
+from refchecker.services.pdf_pipeline.text_extractors.common_helpers import (
+    join_spans_with_position_spacing,
+)
 from refchecker.services.pdf_pipeline.text_extractors.fallback_text_extractor import (
     FallbackTextExtractor,
 )
@@ -89,6 +92,60 @@ def test_reference_split_exposes_bibliography_separately():
     assert bibliography == BIBLIOGRAPHY
     assert diagnostics["document_status"] == "complete"
     assert diagnostics["bibliography_status"] == "extracted"
+
+
+def test_pdf_text_cleanup_repairs_missing_glyph_in_publisher_label():
+    assert paper_helpers.paper_clean_text("Pubisher: McKinsey & Company") == (
+        "Publisher: McKinsey & Company"
+    )
+    assert paper_helpers.paper_clean_text_preserve_lines(
+        "Pubisher: McKinsey & Company\nNext line"
+    ) == "Publisher: McKinsey & Company\nNext line"
+    assert paper_helpers.paper_clean_text(
+        "Studierende: Nationalit\ufffdat, Geschlecht, Studienfach,\ufffd"
+    ) == 'Studierende: Nationalität, Geschlecht, Studienfach,"'
+    assert paper_helpers.paper_clean_text(
+        "\ufffdBereicherung f\ufffdur die Medizin von morgen.\ufffd"
+    ) == '"Bereicherung für die Medizin von morgen."'
+
+
+def test_pdf_text_cleanup_repairs_joined_conjunctions_without_changing_normal_words():
+    assert paper_helpers.paper_clean_text(
+        "Project-Based Learning: Definitionsand Qualities"
+    ) == "Project-Based Learning: Definitions and Qualities"
+    assert paper_helpers.paper_clean_text_preserve_lines(
+        "Definitionsand Qualities\nStandard practice"
+    ) == "Definitions and Qualities\nStandard practice"
+    assert paper_helpers.paper_clean_text("Finland and standard") == (
+        "Finland and standard"
+    )
+
+
+def test_span_joining_preserves_spaces_and_avoids_breaking_urls_or_punctuation():
+    clean = lambda text: text.strip()
+
+    spans = [
+        {"text": "UNESCO, ", "bbox": (0, 0, 30, 8), "size": 8},
+        {"text": "Education", "bbox": (31.2, 0, 70, 8), "size": 8},
+    ]
+    assert join_spans_with_position_spacing(spans, clean) == "UNESCO, Education"
+
+    tightly_spaced_words = [
+        {"text": "Project", "bbox": (0, 0, 25, 8), "size": 8},
+        {"text": "Based", "bbox": (26, 0, 48, 8), "size": 8},
+    ]
+    assert join_spans_with_position_spacing(tightly_spaced_words, clean) == (
+        "Project Based"
+    )
+
+    url_spans = [
+        {"text": "https://example.com/", "bbox": (0, 0, 65, 8), "size": 8},
+        {"text": "path", "bbox": (67, 0, 82, 8), "size": 8},
+        {"text": ",", "bbox": (85, 0, 87, 8), "size": 8},
+    ]
+    assert join_spans_with_position_spacing(url_spans, clean) == (
+        "https://example.com/path,"
+    )
 
 
 def test_reference_split_finds_early_long_numbered_bibliography():
