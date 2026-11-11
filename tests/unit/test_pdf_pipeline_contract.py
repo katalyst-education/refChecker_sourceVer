@@ -149,6 +149,61 @@ def test_reference_split_keeps_appendices_out_of_bibliography():
 
 
 @pytest.mark.parametrize(
+    "page_header",
+    ["Bibliography 85", "Bibliography\n86"],
+)
+def test_reference_split_removes_bibliography_page_headers(page_header):
+    text = (
+        "Paper body.\nReferences\n"
+        "[1] Alice Smith. First reference. 2024.\n"
+        f"{page_header}\n"
+        "[2] Bob Jones. Second reference. 2023."
+    )
+
+    _, bibliography, debug = split_text_and_references(text)
+
+    assert debug["references_found"] is True
+    assert bibliography == (
+        "[1] Alice Smith. First reference. 2024.\n"
+        "[2] Bob Jones. Second reference. 2023."
+    )
+
+
+def test_reference_split_stops_at_english_declaration_section():
+    declaration = "Declaration\nI certify that I wrote this thesis independently."
+    text = (
+        "Paper body.\nReferences\n"
+        "[1] Alice Smith. First reference. 2024.\n"
+        "[2] Bob Jones. Second reference. 2023.\n"
+        f"{declaration}"
+    )
+
+    body, bibliography, debug = split_text_and_references(text)
+
+    assert debug["references_found"] is True
+    assert bibliography.endswith("[2] Bob Jones. Second reference. 2023.")
+    assert "Declaration" not in bibliography
+    assert declaration in body
+
+
+def test_reference_split_stops_at_inline_extracted_declaration():
+    declaration = "Declaration I hereby certify that this thesis is my own work."
+    text = (
+        "Paper body.\nReferences\n"
+        '[1] Alice Smith. First reference. 2024. [Online]. Available: https://example.org/1\n'
+        '[2] Bob Jones. Second reference. 2023. [Online]. Available: https://example.org/2 '
+        f"{declaration}"
+    )
+
+    body, bibliography, debug = split_text_and_references(text)
+
+    assert debug["references_found"] is True
+    assert "[2] Bob Jones" in bibliography
+    assert "Declaration" not in bibliography
+    assert declaration in body
+
+
+@pytest.mark.parametrize(
     "post_bibliography",
     [
         "Anhang A: Zusätzliche Tabellen\nAnhangstext bleibt erhalten.",
