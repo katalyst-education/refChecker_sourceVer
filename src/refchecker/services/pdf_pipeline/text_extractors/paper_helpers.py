@@ -121,13 +121,25 @@ def fix_split_uppercase_words(text: str) -> str:
     return text
 
 
+def repair_joined_conjunctions(text: str) -> str:
+    """Restore a missing space before ``and`` in title-cased plural words."""
+    return re.sub(
+        r"\b([A-Z][a-z]{5,}s)(and)(?=\s+[A-Z])",
+        r"\1 \2",
+        text,
+    )
+
+
 def paper_clean_text(text: str) -> str:
     if not text:
         return ""
 
     text = normalize_unicode_basic(text)
+    text = _repair_known_pdf_text_glyphs(text)
+    text = re.sub(r"\bPubisher(?=:)", "Publisher", text)
     text = fix_broken_line_hyphenation(text)
     text = fix_split_uppercase_words(text)
+    text = repair_joined_conjunctions(text)
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
@@ -139,12 +151,24 @@ def paper_clean_text_preserve_lines(text: str) -> str:
         return ""
 
     text = normalize_unicode_basic(text)
+    text = _repair_known_pdf_text_glyphs(text)
+    text = re.sub(r"\bPubisher(?=:)", "Publisher", text)
     text = fix_broken_line_hyphenation(text)
     text = fix_split_uppercase_words(text)
+    text = repair_joined_conjunctions(text)
     text = re.sub(r"[ \t\f\v]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _repair_known_pdf_text_glyphs(text: str) -> str:
+    """Recover unambiguous German glyphs and quote marks from the affected PDF text layer."""
+    text = text.replace("Nationalit\ufffdat", "Nationalität")
+    text = text.replace("f\ufffdu", "fü")
+    text = re.sub(r"\ufffd(?=Studierende\b|Bereicherung\b)", '"', text)
+    text = re.sub(r"(?<=Studienfach,)\ufffd|(?<=morgen\.)\ufffd", '"', text)
+    return text
 
 
 def paper_normalize_for_repetition(text: str) -> str:

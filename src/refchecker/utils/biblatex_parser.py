@@ -134,7 +134,7 @@ def detect_biblatex_format(text: str) -> bool:
     # Must have the biblatex auxiliary file marker or numbered reference pattern
     has_biblatex_marker = 'biblatex auxiliary file' in text
     has_numbered_refs = bool(re.search(r'^\[\d+\]\s+[A-Z]', text, re.MULTILINE))
-    
+
     return has_biblatex_marker or has_numbered_refs
 
 
@@ -206,6 +206,7 @@ def extract_book_citation_fields(
     author_list = (
         rf'{author_name}(?:,\s*{author_name})*'
         rf'(?:,\s*and\s+{author_name}|\s+and\s+{author_name})?'
+        rf'(?:\s+et\s+al\.?)?'
     )
     author_match = re.match(
         rf'^(?P<authors>{author_list}),\s*(?P<details>.+)$',
@@ -221,6 +222,7 @@ def extract_book_citation_fields(
         details,
         flags=re.IGNORECASE,
     )
+    details = re.sub(r'\s+doi\s*:.*$', '', details, flags=re.IGNORECASE)
     publication_matches = list(re.finditer(
         r'\.\s+(?=[A-Z][^:\n]{1,70}:\s+.+,\s*'
         r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
@@ -239,6 +241,7 @@ def extract_book_citation_fields(
 
     publication_match = publication_matches[-1]
     title = details[:publication_match.start()].strip()
+    title_year = re.search(r'\b((?:19|20)\d{2})$', title)
     title = re.sub(
         r',\s*(?:\d+(?:st|nd|rd|th)\s+ed\.?|ser\.).*$',
         '',
@@ -246,6 +249,8 @@ def extract_book_citation_fields(
         flags=re.IGNORECASE,
     )
     title = clean_title(title)
+    if title_year and not title.endswith(title_year.group(1)):
+        title = f'{title} {title_year.group(1)}'
     publication_details = details[publication_match.end():]
     publisher_match = re.search(
         r':\s*(.+?),\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'

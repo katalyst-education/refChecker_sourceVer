@@ -88,6 +88,7 @@ def join_spans_with_position_spacing(spans: list[dict], cleaner) -> str:
     parts = []
     previous_x1 = None
     previous_font_size = None
+    previous_raw_text = ""
 
     for span in spans:
         raw_text = span.get("text", "")
@@ -101,14 +102,25 @@ def join_spans_with_position_spacing(spans: list[dict], cleaner) -> str:
 
         if parts and previous_x1 is not None:
             gap = float(x0) - float(previous_x1)
-            space_threshold = font_size * 0.20
+            space_threshold = font_size * 0.08
+            boundary_has_space = (
+                previous_raw_text[-1:].isspace() or raw_text[:1].isspace()
+            )
+            left_text = "".join(parts)
+            inside_url = re.search(r"(?:https?://|10\.\d{4,9}/)\S*$", left_text, re.I)
+            word_boundary = (
+                parts[-1][-1:].isalnum() and text[:1].isalnum()
+            )
 
-            if gap > space_threshold:
+            if boundary_has_space or (
+                gap > space_threshold and word_boundary and not inside_url
+            ):
                 parts.append(" ")
 
         parts.append(text)
 
         previous_x1 = float(x1)
         previous_font_size = font_size
+        previous_raw_text = raw_text
 
     return cleaner("".join(parts))

@@ -547,7 +547,7 @@ def _is_url_continuation(
     """Return whether a whitespace-delimited fragment plausibly continues a URL."""
     if not next_fragment or not _URL_FRAGMENT_RE.fullmatch(next_fragment):
         return False
-    if next_fragment.lower().split(':', 1)[0] in _URL_STOP_WORDS:
+    if next_fragment.lower().split(':', 1)[0].rstrip('.,;') in _URL_STOP_WORDS:
         return False
     if next_fragment.lower().startswith(('http://', 'https://')):
         return False
@@ -672,14 +672,52 @@ def join_wrapped_url_lines(text: str) -> str:
                 break
             next_start = end + separator.end()
             next_match = _URL_FRAGMENT_RE.match(text, next_start)
-            if not next_match or not _is_url_continuation(
+            if not next_match:
+                break
+
+            next_fragment = next_match.group(0)
+            line_break = '\n' in separator.group(0) or '\r' in separator.group(0)
+            following_separator = re.match(r'\s+', text[next_match.end():])
+            following_match = (
+                _URL_FRAGMENT_RE.match(
+                    text,
+                    next_match.end() + following_separator.end(),
+                )
+                if following_separator
+                else None
+            )
+            following_fragment = (
+                following_match.group(0) if following_match else ""
+            )
+            underscore_join = False
+            try:
+                parsed_current = urlsplit(current_url)
+                has_path = bool(parsed_current.path)
+            except ValueError:
+                has_path = False
+            if (
+                has_path
+                and not line_break
+                and not current_url.endswith(('/', '.', '-', '_', '%', '=', '?', '&', '#'))
+            ):
+                underscore_join = (
+                    "/" in next_fragment
+                    or (
+                        next_fragment.isdigit()
+                        and bool(re.match(r'\d+\.[A-Za-z]{2,}', following_fragment))
+                    )
+                )
+
+            if not underscore_join and not _is_url_continuation(
                 current_url,
-                next_match.group(0),
-                line_break=('\n' in separator.group(0) or '\r' in separator.group(0)),
+                next_fragment,
+                line_break=line_break,
                 expected_page=expected_page,
             ):
                 break
-            current_url += next_match.group(0).replace(r'\_', '_')
+            if underscore_join:
+                current_url += "_"
+            current_url += next_fragment.replace(r'\_', '_')
             end = next_match.end()
 
         try:
