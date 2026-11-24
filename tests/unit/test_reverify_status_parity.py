@@ -134,7 +134,7 @@ def test_reverify_endpoint_uses_the_shared_classifier():
 
     from backend import main
 
-    source = inspect.getsource(main.verify_single_reference)
+    source = inspect.getsource(main._verify_single_reference_impl)
     assert 'classify_verification_result' in source
     assert 'warnings come back through error_type' not in source
 
@@ -145,7 +145,7 @@ def test_reverify_endpoint_uses_shared_authoritative_url_projection():
 
     from backend import main
 
-    source = inspect.getsource(main.verify_single_reference)
+    source = inspect.getsource(main._verify_single_reference_impl)
     assert 'build_authoritative_urls(' in source
 
 
@@ -180,7 +180,7 @@ def test_reverify_endpoint_never_replaces_by_fresh_array_position():
 
     from backend import main
 
-    source = inspect.getsource(main.verify_single_reference)
+    source = inspect.getsource(main._verify_single_reference_impl)
     assert 'find_reextracted_reference_index' in source
     assert 'fresh_reference = extracted_references[idx]' not in source
 
@@ -193,7 +193,7 @@ def test_reverify_endpoint_does_not_shadow_asyncio():
 
     from backend import main
 
-    source = textwrap.dedent(inspect.getsource(main.verify_single_reference))
+    source = textwrap.dedent(inspect.getsource(main._verify_single_reference_impl))
     tree = ast.parse(source)
     local_asyncio_bindings = [
         alias

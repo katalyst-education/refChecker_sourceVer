@@ -1239,12 +1239,17 @@ class vLLMProvider(LLMProviderMixin, LLMProvider):
             _record_provider_usage("openai", self.model_name, response, "extraction")
             _track_openai_usage(response, self.model_name)
 
-            content = response.choices[0].message.content
-
-            logger.debug(f"Received response from vLLM server:")
-            logger.debug(f"  Length: {len(content)}")
-            logger.debug(f"  First 200 chars: {content[:200]}...")
-            logger.debug(f"  Finish reason: {response.choices[0].finish_reason}")
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            if not content:
+                logger.warning(
+                    "vLLM returned no final answer text (finish_reason=%s, max_tokens=%s)",
+                    choice.finish_reason, self.max_tokens,
+                )
+            logger.debug(
+                "vLLM response: content_chars=%d, finish_reason=%s",
+                len(content), choice.finish_reason,
+            )
             
             return content or ""
             

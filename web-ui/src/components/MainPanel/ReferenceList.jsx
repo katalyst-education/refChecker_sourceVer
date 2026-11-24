@@ -223,8 +223,6 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             />
         )}
 
-        <SuggestAltPanel suggestFor={suggestFor} onClose={() => setSuggestFor(null)} />
-
         <RemovedRefsStrip
             removedRefs={removedRefs}
             busyKey={busyKey}
@@ -268,6 +266,12 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                       />
                   )
                 })()}
+                {suggestFor?.ref_id === referenceRowIdentity(ref, displayIndex) && (
+                    <SuggestAltPanel
+                        suggestFor={suggestFor}
+                        onClose={() => setSuggestFor(null)}
+                    />
+                )}
               </div>
           ))}
         </div>

@@ -14,6 +14,9 @@ from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# Bibliography styles use a dash rule for the complete preceding author list.
+_REPEATED_AUTHOR_PREFIX = re.compile(r'^\s*(?:[\u2013\u2014\u2015]+|-{2,}|_{3,})\s*[,.]\s*')
+
 
 def _handle_hyphenated_line_breaks(content: str) -> str:
     """
@@ -278,6 +281,16 @@ def parse_biblatex_references(text: str) -> List[Dict[str, Any]]:
             logger.debug(f"Entry [74] parsing result: title={repr(parsed_ref.get('title'))}, authors={len(parsed_ref.get('authors', []))}")
         
         if parsed_ref:
+            # Resolve ditto authors from adjacent source entries before the
+            # quality gate. Keep raw_text and entry identity exactly as cited.
+            if (
+                _REPEATED_AUTHOR_PREFIX.match(content)
+                and references
+                and references[-1]['entry_number'] == entry_num - 1
+            ):
+                previous_authors = references[-1].get('authors') or []
+                if previous_authors and previous_authors != ['Unknown Author']:
+                    parsed_ref['authors'] = list(previous_authors)
             references.append(parsed_ref)
     
     logger.debug(f"Extracted {len(references)} biblatex references")
@@ -465,8 +478,11 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
                 if (potential_authors and
                     not potential_authors.startswith(('http', 'DOI', 'arXiv', 'In:')) and
                     len(potential_authors) < 300 and
-                    # Should contain at least one name-like pattern
-                    re.search(r'[A-Z][a-z]+', potential_authors)):
+                    # Accept Unicode names, including scripts without case.
+                    any(
+                        len(word) >= 2 and (word[0].isupper() or word.lower() == word.upper())
+                        for word in re.findall(r'[^\W\d_]+', potential_authors)
+                    )):
                     authors_text = potential_authors
                     break
     

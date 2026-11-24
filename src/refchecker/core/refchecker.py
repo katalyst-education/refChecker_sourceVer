@@ -4711,7 +4711,7 @@ class ArxivReferenceChecker:
         # Default to False for safety
         return False
 
-    def _split_numbered_reference_entries(self, bibliography_text):
+    def _split_numbered_reference_entries(self, bibliography_text, *, include_invalid=False):
         """Split a bracket-numbered bibliography into raw reference entries."""
         if not bibliography_text:
             return []
@@ -4728,7 +4728,7 @@ class ArxivReferenceChecker:
         for index, match in enumerate(matches):
             end = matches[index + 1].start() if index + 1 < len(matches) else len(bibliography_text)
             entry = bibliography_text[match.start():end].strip()
-            if self._is_likely_reference(entry):
+            if include_invalid or self._is_likely_reference(entry):
                 entries.append(entry)
 
         return entries if len(entries) >= 3 else []
@@ -4764,6 +4764,46 @@ class ArxivReferenceChecker:
 
         flush_chunk()
         return extracted
+
+    def parse_reference_entry(self, bibliography_text, reference_number, *, parsed_references=None):
+        """Parse one numbered source entry with the shared extraction policy.
+
+        Return None when the source entry cannot be isolated safely. Once an
+        entry is located, an unsuccessful repair raises ValueError so callers
+        can retain its stored metadata and continue with other selected rows.
+        An optional fresh deterministic parse lets batch callers reuse work.
+        """
+        try:
+            number = int(reference_number)
+        except (TypeError, ValueError):
+            return None
+        entries = self._split_numbered_reference_entries(bibliography_text, include_invalid=True)
+        matching = [entry for entry in entries if re.match(rf'^\[{number}\]\s', entry)]
+        if len(matching) != 1:
+            return None
+        raw_entry = matching[0]
+        from refchecker.utils.text_utils import validate_parsed_references
+
+        if self.extraction_mode == 'cascade':
+            parsed = parsed_references
+            if parsed is None:
+                parsed = self._parse_references_regex('\n'.join(entries))
+            candidates = [ref for ref in parsed if ref.get('entry_number') == number]
+            if len(candidates) == 1 and validate_parsed_references(candidates, require_all=True)['is_valid']:
+                self.last_reference_parser_method = 'regex'
+                self.fatal_error = False
+                self.fatal_error_message = None
+                return dict(candidates[0])
+        if self.llm_extractor:
+            extracted = self.llm_extractor.extract_references(raw_entry)
+            candidates = self._process_llm_extracted_references(extracted or [])
+            if len(candidates) == 1 and validate_parsed_references(candidates, require_all=True)['is_valid']:
+                result = dict(candidates[0], raw_text=raw_entry, entry_number=number)
+                self.last_reference_parser_method = 'llm'
+                self.fatal_error = False
+                self.fatal_error_message = None
+                return result
+        raise ValueError(f'Could not extract reference {number} reliably from its source entry.')
 
     def parse_references(self, bibliography_text, progress_callback=None):
         """

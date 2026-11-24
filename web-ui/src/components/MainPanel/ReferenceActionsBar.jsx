@@ -709,7 +709,6 @@ export function ReferenceRowActions({
     ]
   })()
   const disableFor = (busy) => busy || activeOperation || !selectedCheckId || globalBusy || editing
-  const reextracting = (reverifyBusy && reverifyAction === 'reextract') || activeVerification
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
   const savingEdit = reverifyBusy && reverifyAction === 'manual-edit'
   const restoringExtracted = reverifyBusy && reverifyAction === 'restore-extracted'
@@ -749,16 +748,6 @@ export function ReferenceRowActions({
   return (
       <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || activeOperation) || undefined}>
         <div className="flex flex-wrap gap-1.5">
-          <button
-              type="button"
-              onClick={() => onReverify(reference, displayIndex)}
-              disabled={disableFor(reverifyBusy)}
-              className="px-2.5 py-1 rounded-md font-medium"
-              style={styleFor(reverifyBusy)}
-              title="Extract this reference again from the document, then verify it"
-          >
-            {reextracting ? 'Re-extracting…' : 'Re-extract & verify'}
-          </button>
           {authIssue && authenticationUrl && (
               <button
                   type="button"
@@ -1095,7 +1084,7 @@ export function ReferenceRowActions({
                   ? 'Saving the edited metadata, then verifying it…'
                   : restoringExtracted
                     ? 'Restoring the originally extracted metadata, then verifying it…'
-                    : 'Re-extracting this reference from the document, then verifying it…'}
+                    : 'Verifying this reference…'}
           </span>
             </div>
         )}

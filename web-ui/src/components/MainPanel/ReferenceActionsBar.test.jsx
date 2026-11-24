@@ -27,6 +27,13 @@ const baseProps = {
 }
 
 describe('ReferenceRowActions progress feedback', () => {
+  it('offers Search all DBs as the verification action', () => {
+    const onSearch = vi.fn()
+    render(<ReferenceRowActions {...baseProps} onReverifyAllDatabases={onSearch} />)
+    expect(screen.queryByRole('button', { name: /^Reverify$/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Search all DBs' }))
+    expect(onSearch).toHaveBeenCalledWith(baseProps.reference, 0)
+  })
   it('offers an alternative search for an unverified reference', () => {
     const onSuggest = vi.fn()
     const reference = { title: 'Questionable citation', status: 'unverified' }
@@ -136,19 +143,19 @@ describe('ReferenceRowActions progress feedback', () => {
     expect(screen.getByRole('button', { name: 'Sign in and retry' })).toBeInTheDocument()
   })
 
-  it('shows document re-extraction progress inside the card', () => {
+  it('shows verification progress inside the card', () => {
     render(
       <ReferenceRowActions
         {...baseProps}
         reverifyBusy
-        reverifyAction="reextract"
+        reverifyAction="verify"
       />,
     )
 
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Re-extracting this reference from the document, then verifying it…',
+      'Verifying this reference…',
     )
-    expect(screen.getByRole('button', { name: 'Re-extracting…' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Reverify' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Search all DBs' })).toBeDisabled()
   })
 

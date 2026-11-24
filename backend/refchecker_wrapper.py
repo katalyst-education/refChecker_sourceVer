@@ -2918,6 +2918,57 @@ class ProgressRefChecker:
                 'raw_text': ref_string
             }
 
+    async def _extract_reference(self, paper_text: str, reference_number):
+        """Re-extract a selected entry through the shared core parser."""
+        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
+        from refchecker.llm import usage_tracker as _usage_tracker
+
+        def extract():
+            if self.check_id is not None:
+                _usage_tracker.set_current_check(str(self.check_id))
+            with _usage_tracker.FlowScope('reverify'):
+                bibliography = cli_checker.find_bibliography_section(paper_text)
+                return cli_checker.parse_reference_entry(bibliography, reference_number)
+
+        reference = await asyncio.to_thread(extract)
+        return _normalize_reference_fields(reference) if reference else None
+
+    async def _extract_references_for_reverification(self, paper_text, reference_numbers):
+        """Reuse one fresh source parse and repair only selected source entries."""
+        cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
+        bibliography = await asyncio.to_thread(cli_checker.find_bibliography_section, paper_text)
+        entries = cli_checker._split_numbered_reference_entries(bibliography, include_invalid=True)
+        if not entries:
+            return await self._extract_references(paper_text), []
+        parsed = []
+        if self.extraction_mode == 'cascade':
+            parsed = await asyncio.to_thread(cli_checker._parse_references_regex, '\n'.join(entries))
+        references, failures = [], []
+        from refchecker.llm import usage_tracker as _usage_tracker
+
+        def extract(number):
+            if self.check_id is not None:
+                _usage_tracker.set_current_check(str(self.check_id))
+            with _usage_tracker.FlowScope('reverify'):
+                return cli_checker.parse_reference_entry(bibliography, number, parsed_references=parsed)
+
+        for position, number in enumerate(reference_numbers):
+            if self.cancel_event and self.cancel_event.is_set():
+                from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
+                raise VerificationCancelled('Reference re-extraction cancelled')
+            try:
+                reference = await asyncio.to_thread(extract, number)
+                if reference:
+                    references.append(_normalize_reference_fields(reference))
+                else:
+                    failures.append({'index': number, 'message': 'Source entry could not be located safely.'})
+            except Exception as exc:
+                failures.append({'index': number, 'message': str(exc)})
+            await self.emit_progress('extracting', {
+                'message': f'Re-extracting flagged references ({position + 1}/{len(reference_numbers)})…',
+            })
+        return references, failures
+
     async def _extract_references(self, paper_text: str) -> List[Dict[str, Any]]:
         """Extract references using the same pipeline/order as the CLI."""
         try:

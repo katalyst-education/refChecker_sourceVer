@@ -345,11 +345,15 @@ export const verifyReferenceInCheck = (checkId, refId, opts = {}) =>
 // only waits for the job record; ReferenceSearchManager receives completion.
 export const startReferenceVerification = (checkId, refId, opts = {}) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/verify-async`, opts)
+export const startReferenceReextraction = (checkId) =>
+  api.post(`/history/${checkId}/reextract-errors`)
+export const getReferenceReextractions = (checkId) =>
+  api.get(`/history/${checkId}/reextract-errors`, { timeout: 10000 })
 export const startReferenceSearch = (checkId, refId, payload = {}) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/search-all`, payload)
 export const getReferenceSearch = (operationId) =>
   api.get(`/reference-searches/${encodeURIComponent(operationId)}`)
-export const getActiveReferenceSearches = () => api.get('/reference-searches/active')
+export const getActiveReferenceSearches = () => api.get('/reference-searches/active', { timeout: 10000 })
 export const cancelReferenceSearch = (operationId) =>
   api.post(`/reference-searches/${encodeURIComponent(operationId)}/cancel`)
 export const decideReferenceWarning = (checkId, refId, payload) =>

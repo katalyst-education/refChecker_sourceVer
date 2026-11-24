@@ -61,3 +61,14 @@ def test_bibliography_cache_ignores_previous_extraction_version(tmp_path):
     cache_bibliography(str(tmp_path), input_spec, stale_bibliography, "_Provider:gpt-4.1:https://api.example.test/v1")
 
     assert cached_bibliography(str(tmp_path), input_spec, llm_cache_identity_from_extractor(_Extractor())) is None
+
+
+def test_bibliography_cache_reextracts_after_unicode_and_ditto_author_fix(tmp_path):
+    input_spec = 'dissertation.pdf'
+    stale_identity = '_Provider:gpt-4.1:https://api.example.test/v1:refparse-v5:mode=cascade'
+    cache_bibliography(str(tmp_path), input_spec, [
+        {'title': 'A solar cell article', 'authors': ['Unknown Author']},
+    ], stale_identity)
+
+    identity = llm_cache_identity_from_extractor(_Extractor(), 'cascade')
+    assert cached_bibliography(str(tmp_path), input_spec, identity) is None

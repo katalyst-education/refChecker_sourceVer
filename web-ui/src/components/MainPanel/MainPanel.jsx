@@ -3,6 +3,7 @@ import InputSection from './InputSection'
 import StatusSection from './StatusSection'
 import StatsSection from './StatsSection'
 import ReferenceList from './ReferenceList'
+import ReferenceReextractionButton from './ReferenceReextractionButton'
 import CorrectionsView from './CorrectionsView'
 import OnboardingBanner from './OnboardingBanner'
 import FieldGuide from './FieldGuide'
@@ -404,6 +405,9 @@ export default function MainPanel() {
               </>
             }
           />
+          <div className="mt-3">
+            <ReferenceReextractionButton checkId={selectedCheckId} references={displayRefs} disabled={!isComplete} />
+          </div>
           </div>
         )}
 

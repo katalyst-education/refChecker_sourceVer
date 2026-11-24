@@ -37,6 +37,7 @@ if _SOURCE_ROOT.is_dir():
     sys.path.insert(0, _source_root_text)
 
 from refchecker.__version__ import __version__
+from refchecker.utils.reference_metadata import CITED_REFERENCE_FIELDS, cited_metadata_changed
 from refchecker.utils.database_config import DATABASE_BUILD_DEPENDENCIES, DATABASE_FILE_ALIASES, DATABASE_LABELS, DATABASE_UPDATE_ORDER, resolve_database_paths, resolve_database_update_paths
 
 # Fix Windows encoding issues with Unicode characters (e.g., Greek letters in paper titles).
@@ -952,7 +953,7 @@ def _env_llm_config_from_id(config_id: LLMConfigId) -> Optional[Dict[str, Any]]:
 
 async def _resolve_llm_config_for_request(
     *,
-    user_id: int,
+    user_id: Optional[int],
     use_llm: bool,
     llm_config_id: Optional[LLMConfigId],
     llm_provider: Optional[str],
@@ -980,6 +981,23 @@ async def _resolve_llm_config_for_request(
     timeout_seconds = None
     provider = llm_provider
     model = llm_model
+
+    # Saved checks carry provider/model. Recover their matching saved settings
+    # so re-extraction uses the configured endpoint and generation limits.
+    if not llm_config_id and provider and model:
+        configs = await db.get_llm_configs(user_id=user_id)
+        matching_configs = [
+            config for config in configs
+            if _normalize_llm_provider_name(config.get('provider')) == _normalize_llm_provider_name(provider)
+            and config.get('model') == model
+        ]
+        if matching_configs:
+            # Use the user's matching default, then their latest saved entry.
+            selected_config = max(
+                matching_configs,
+                key=lambda config: (bool(config.get('is_default')), config['id']),
+            )
+            llm_config_id = selected_config['id']
 
     if llm_config_id:
         config = _env_llm_config_from_id(llm_config_id)
@@ -8052,6 +8070,8 @@ async def remove_reference_from_check(
 
 
 class _VerifySingleRequest(BaseModel):
+    # Document re-extraction is normally performed by the central batch action.
+    reextract_from_document: bool = False
     # When true, merge ``corrected_reference`` fields into the stored ref
     # before re-verifying. The Corrections-tab "Apply fix" button hits
     # this path so the verifier runs against the FIXED metadata (and the
@@ -8111,6 +8131,202 @@ async def _run_queued_reference_search_job(**kwargs: Any) -> None:
             await _run_reference_search_job(**kwargs)
 
 
+async def _create_document_reextractor(check_id, check, user_id, **kwargs):
+    from backend.refchecker_wrapper import ProgressRefChecker
+
+    settings = await _resolve_llm_config_for_request(
+        user_id=user_id, use_llm=bool(check.get('llm_provider')),
+        llm_config_id=None, llm_provider=check.get('llm_provider'),
+        llm_model=check.get('llm_model'), api_key=None,
+    )
+    provider, model, key, endpoint, reasoning, tokens, context, timeout = settings
+    mode = await db.get_setting('extraction_mode') or os.environ.get('REFCHECKER_EXTRACTION_MODE') or 'cascade'
+    return await asyncio.to_thread(
+        ProgressRefChecker, llm_provider=provider, llm_model=model,
+        api_key=key, endpoint=endpoint, use_llm=bool(provider),
+        reasoning_effort=reasoning, max_tokens=tokens, context_length=context,
+        timeout_seconds=timeout, extraction_mode=mode, check_id=check_id, **kwargs,
+    )
+
+
+async def _run_reference_reextraction_job(
+    *, operation_id, session_id, check_id, current_user, cancel_event,
+):
+    """Read one source document and re-extract its error/unverified rows."""
+    owner_id = get_user_id_filter(current_user)
+    progress = {
+        'operation_type': 'reextract-errors', 'status': 'queued', 'sequence': 0,
+        'completed': 0, 'updated': 0, 'unchanged': 0, 'total': 0, 'failures': [],
+        'message': 'Waiting to re-extract error and unverified references…',
+    }
+    reference_key = 'check:reextract-errors'
+
+    async def emit(message_type='reference_reextract_progress', **payload):
+        progress['sequence'] += 1
+        await db.update_reference_search_operation(operation_id, progress=progress)
+        await manager.send_message(session_id, message_type, {
+            'operation_id': operation_id, 'session_id': session_id, 'check_id': check_id,
+            'reference_key': reference_key, **progress, **payload,
+        })
+
+    def check_cancelled():
+        if cancel_event.is_set():
+            from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
+            raise VerificationCancelled('Reference re-extraction cancelled')
+
+    async def extraction_progress(_stage, data):
+        progress['message'] = data.get('message', progress['message'])
+        await emit()
+
+    try:
+        async with _reference_search_global_lane:
+            async with _reference_search_lane(owner_id):
+                check_cancelled()
+                check = await db.get_check_by_id(check_id, user_id=owner_id)
+                refs = await db.get_check_references(check_id, user_id=owner_id)
+                if check is None or refs is None:
+                    raise ValueError('Check not found')
+                targets = [(i, dict(ref)) for i, ref in enumerate(refs)
+                           if ref.get('status') in {'error', 'unverified'}]
+                progress.update(status='running', total=len(targets), message='Reading the original document…')
+                await db.update_reference_search_operation(operation_id, status='running', progress=progress)
+                await emit()
+                if targets:
+                    extractor = await _create_document_reextractor(
+                        check_id, check, owner_id, cancel_event=cancel_event,
+                        progress_callback=extraction_progress,
+                    )
+                    pdf_path = await _source_pdf_path_for_check(check)
+                    if pdf_path:
+                        paper_text = await asyncio.to_thread(extractor._extract_pdf_text_scoped, pdf_path)
+                    else:
+                        paper_text = await _extract_paper_text_for_check(check_id, check, fresh_from_document=True)
+                    if not paper_text.strip():
+                        raise ValueError('The original document is unavailable for re-extraction.')
+                    check_cancelled()
+                    fresh_refs, extraction_failures = await extractor._extract_references_for_reverification(
+                        paper_text, [ref.get('index') for _, ref in targets],
+                    )
+                    failure_by_index = {failure['index']: failure['message'] for failure in extraction_failures}
+                    for position, target in targets:
+                        check_cancelled()
+                        number = target.get('index')
+                        progress['message'] = f'Comparing re-extracted reference {progress["completed"] + 1}/{len(targets)}…'
+                        await emit()
+                        try:
+                            if number in failure_by_index:
+                                raise ValueError(failure_by_index[number])
+                            # Source numbering disambiguates duplicate titles.
+                            numbered = [ref for ref in fresh_refs if ref.get('entry_number') == number]
+                            candidates = numbered if len(numbered) == 1 else fresh_refs
+                            # A unique source citation number also anchors a row
+                            # whose title or identifiers were extracted differently.
+                            unique_source_number = len(numbered) == 1 and sum(
+                                ref.get('index') == number for ref in refs
+                            ) == 1
+                            match = 0 if unique_source_number else find_reextracted_reference_index(
+                                candidates, target, preferred_index=position,
+                            )
+                            if match is None:
+                                raise ValueError('The source entry could not be matched safely.')
+                            current_refs = await db.get_check_references(check_id, user_id=owner_id)
+                            uid = target['ref_uid']
+                            current = next((ref for ref in current_refs or [] if ref.get('ref_uid') == uid), None)
+                            if current is None or _reference_search_fingerprint(current) != _reference_search_fingerprint(target):
+                                raise ValueError('The reference changed while re-extraction was running.')
+                            fresh_reference = candidates[match]
+                            if cited_metadata_changed(target, fresh_reference):
+                                progress['message'] = f'Searching all databases for changed reference [{number}]…'
+                                await emit()
+                                result = await _verify_single_reference_impl(
+                                    check_id, f'uid:{uid}', _VerifySingleRequest(force_all_databases=True),
+                                    current_user, source_reference=fresh_reference, cancel_event=cancel_event,
+                                )
+                                progress['updated'] += 1
+                                await emit(reference=result['reference'], updated_reference_key=f'uid:{uid}')
+                            else:
+                                progress['unchanged'] += 1
+                        except Exception as exc:
+                            if exc.__class__.__name__ == 'VerificationCancelled':
+                                raise
+                            progress['failures'].append({'index': number, 'message': getattr(exc, 'detail', str(exc))})
+                        check_cancelled()
+                        progress['completed'] += 1
+                        await emit()
+                progress['status'] = 'completed'
+                progress['message'] = (
+                    f'Re-extracted {progress["total"]} references. '
+                    f'Searched all databases for {progress["updated"]} changed references; '
+                    f'{progress["unchanged"]} unchanged.'
+                )
+                if progress['failures']:
+                    progress['message'] += f' {len(progress["failures"])} references need review.'
+                await emit('reference_reextract_completed')
+                await db.update_reference_search_operation(operation_id, status='completed', progress=progress, terminal=True)
+    except Exception as exc:
+        cancelled = exc.__class__.__name__ == 'VerificationCancelled'
+        if not cancelled:
+            logger.exception('Reference re-extraction failed: check_id=%s', check_id)
+        progress.update(status='cancelled' if cancelled else 'error', message=getattr(exc, 'detail', str(exc)))
+        await emit('reference_reextract_completed')
+        await db.update_reference_search_operation(
+            operation_id, status=progress['status'], progress=progress,
+            error_code='cancelled' if cancelled else 'reextract_failed',
+            error_message=progress['message'], terminal=True,
+        )
+    finally:
+        active_reference_searches.pop(session_id, None)
+
+
+@app.get('/api/history/{check_id}/reextract-errors')
+async def get_reference_reextractions(check_id: int, current_user: UserInfo = Depends(require_user)):
+    owner_id = get_user_id_filter(current_user)
+    if await db.get_check_by_id(check_id, user_id=owner_id) is None:
+        raise HTTPException(status_code=404, detail='Check not found')
+    operations = await db.list_reference_search_operations_for_check(
+        check_id, 'check:reextract-errors', user_id=owner_id,
+    )
+    return {'operations': operations}
+
+
+@app.post('/api/history/{check_id}/reextract-errors', status_code=202)
+async def start_reference_reextraction(check_id: int, current_user: UserInfo = Depends(require_user)):
+    owner_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=owner_id)
+    if refs is None:
+        raise HTTPException(status_code=404, detail='Check not found')
+    reference_key = 'check:reextract-errors'
+    for op in await db.list_active_reference_search_operations(owner_id):
+        if op['check_id'] == check_id and op['reference_key'] == reference_key:
+            if op['session_id'] in active_reference_searches:
+                return {**op, 'operation_type': 'reextract-errors'}
+            await db.update_reference_search_operation(
+                op['operation_id'], status='error', error_code='server_restarted',
+                error_message='The server restarted before re-extraction completed.', terminal=True,
+            )
+    operation_id, session_id = str(uuid.uuid4()), f'reference-reextract-{uuid.uuid4()}'
+    try:
+        operation, created = await db.create_reference_search_operation(
+            operation_id, session_id, check_id, reference_key, user_id=owner_id,
+            max_active_per_user=MAX_REFERENCE_JOBS_PER_USER,
+        )
+    except ReferenceSearchLimitReached:
+        raise HTTPException(status_code=429, detail='Too many queued reference operations')
+    if not created:
+        return {**operation, 'operation_type': 'reextract-errors'}
+    cancel_event = threading.Event()
+    await db.update_reference_search_operation(operation_id, progress={'operation_type': 'reextract-errors'})
+    task = asyncio.create_task(_run_reference_reextraction_job(
+        operation_id=operation_id, session_id=session_id, check_id=check_id,
+        current_user=current_user, cancel_event=cancel_event,
+    ))
+    active_reference_searches[session_id] = {
+        'task': task, 'cancel_event': cancel_event, 'check_id': check_id,
+        'user_id': owner_id, 'operation_id': operation_id,
+    }
+    return {**operation, 'operation_type': 'reextract-errors'}
+
+
 async def _run_single_reference_verify_job(
     *, operation_id: str, session_id: str, check_id: int, ref_id: str,
     reference_key: str, owner_id: Optional[int], body: _VerifySingleRequest,
@@ -8145,7 +8361,7 @@ async def _run_single_reference_verify_job(
                 # This deliberately calls the established endpoint implementation:
                 # re-extraction, cache handling, verifier choice, and result
                 # projection remain identical to CLI/bulk/WebUI's prior path.
-                result = await verify_single_reference(check_id, ref_id, body, current_user)
+                result = await _verify_single_reference_impl(check_id, ref_id, body, current_user, cancel_event=cancel_event)
                 if cancel_event.is_set():
                     from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
                     raise VerificationCancelled("Reference verification cancelled")
@@ -8186,10 +8402,7 @@ async def _run_single_reference_verify_job(
 def _reference_search_fingerprint(reference: Dict[str, Any]) -> str:
     fields = {
         key: reference.get(key)
-        for key in (
-            "id", "index", "title", "authors", "year", "venue", "journal",
-            "doi", "arxiv_id", "cited_url", "url", "raw", "raw_text", "type",
-        )
+        for key in (*CITED_REFERENCE_FIELDS, "id", "index", "raw", "raw_text", "type")
     }
     return json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -8722,20 +8935,14 @@ async def verify_single_reference(
     body: Optional[_VerifySingleRequest] = None,
     current_user: UserInfo = Depends(require_user),
 ):
-    """Re-extract and verify one reference, then persist the result.
+    """Verify a stored reference, with optional explicit document re-extraction."""
+    return await _verify_single_reference_impl(check_id, ref_id, body, current_user)
 
-    A normal Re-verify starts by extracting the reference again from the
-    original document, so its cited metadata is not limited to an earlier,
-    potentially imperfect extraction. It then uses the same shared verifier as
-    the CLI and bulk paths. Explicit correction / restore requests intentionally
-    skip document re-extraction: those actions must verify the fields the user
-    has just chosen.
 
-    When called with ``apply_correction: true``, the stored ref's metadata
-    is first overwritten with its ``corrected_reference`` (the verifier's
-    own suggestion) — that way re-verifying produces the metadata the user
-    just accepted, and the citation-health score moves accordingly.
-    """
+async def _verify_single_reference_impl(
+    check_id, ref_id, body, current_user, *, source_reference=None, cancel_event=None,
+):
+    """Shared single-row verification used by card and batch orchestration."""
     user_id = get_user_id_filter(current_user)
     refs = await db.get_check_references(check_id, user_id=user_id)
     if refs is None:
@@ -8750,6 +8957,7 @@ async def verify_single_reference(
     if idx is None:
         raise HTTPException(status_code=404, detail="Reference not found in check")
     target = refs[idx]
+    original_reference = json.loads(json.dumps(target, default=str))
     logger.info(
         "Per-ref verify target resolved: route_ref_id=%r idx=%s stored_index=%r title=%r",
         ref_id,
@@ -8834,56 +9042,21 @@ async def verify_single_reference(
     # Re-extract the selected entry from the source document for the ordinary
     # Re-verify button. Do this before looking in the identity cache: otherwise
     # a stale cached verification could mask newly extracted cited metadata.
-    reextract_from_document = not force_all_databases and not (
+    reextract_from_document = bool(body and body.reextract_from_document) and not force_all_databases and not (
         body and (
             body.apply_correction
             or bool(body.overrides)
             or body.use_authenticated_browser
         )
     )
+    fresh_reference = source_reference
     if reextract_from_document:
         check = await db.get_check_by_id(check_id, user_id=user_id)
         if not check:
             raise HTTPException(status_code=404, detail="Check not found")
 
         try:
-            from backend.refchecker_wrapper import ProgressRefChecker
-
-            extraction_mode = (
-                await db.get_setting("extraction_mode")
-                or os.environ.get("REFCHECKER_EXTRACTION_MODE")
-                or "cascade"
-            )
-            (
-                llm_provider,
-                llm_model,
-                api_key,
-                endpoint,
-                reasoning_effort,
-                max_tokens,
-                context_length,
-                timeout_seconds,
-            ) = await _resolve_llm_config_for_request(
-                user_id=user_id,
-                use_llm=bool(check.get("llm_provider")),
-                llm_config_id=None,
-                llm_provider=check.get("llm_provider"),
-                llm_model=check.get("llm_model"),
-                api_key=None,
-            )
-            extractor = ProgressRefChecker(
-                llm_provider=llm_provider,
-                llm_model=llm_model,
-                api_key=api_key,
-                endpoint=endpoint,
-                reasoning_effort=reasoning_effort,
-                max_tokens=max_tokens,
-                context_length=context_length,
-                timeout_seconds=timeout_seconds,
-                use_llm=bool(llm_provider),
-                check_id=check_id,
-                extraction_mode=extraction_mode,
-            )
+            extractor = await _create_document_reextractor(check_id, check, user_id)
         except Exception as exc:
             logger.exception("Single-reference extractor initialization failed")
             raise HTTPException(
@@ -8909,7 +9082,10 @@ async def verify_single_reference(
             )
 
         try:
-            if pdf_path:
+            selected_reference = await extractor._extract_reference(paper_text, target.get('index'))
+            if selected_reference:
+                extracted_references = [selected_reference]
+            elif pdf_path:
                 extracted_references, _ = await extractor._extract_references_from_pdf(
                     pdf_path,
                     paper_text,
@@ -8948,10 +9124,8 @@ async def verify_single_reference(
                 target.get("title"),
             )
         fresh_reference = extracted_references[fresh_idx]
-        for field in (
-            "title", "authors", "year", "venue", "journal", "doi",
-            "arxiv_id", "url", "cited_url", "raw", "raw_text", "type",
-        ):
+    if fresh_reference is not None:
+        for field in (*CITED_REFERENCE_FIELDS, "raw", "raw_text", "type"):
             if field in fresh_reference:
                 target[field] = fresh_reference[field]
             else:
@@ -8972,6 +9146,7 @@ async def verify_single_reference(
     if (
         not force_all_databases
         and not reextract_from_document
+        and body and (body.apply_correction or bool(body.overrides))
         and not (body and body.use_authenticated_browser)
     ):
         try:
@@ -9015,11 +9190,11 @@ async def verify_single_reference(
         updated = dict(cached["result"])
         updated["id"] = target.get("id")
         updated["index"] = target.get("index")
+        updated["ref_uid"] = target.get("ref_uid")
         updated["from_cache"] = True
-        refs[idx] = updated
-        ok = await db.replace_check_references(check_id, refs, user_id=user_id)
-        if not ok:
-            raise HTTPException(status_code=500, detail="Failed to persist verified reference")
+        decision = await db.replace_check_reference_if_unchanged(check_id, original_reference, updated, user_id=user_id)
+        if decision != 'saved':
+            raise HTTPException(status_code=409, detail='The reference changed during verification; its newer data was preserved.')
         return {"reference": updated, "from_cache": True}
 
     # Run a fresh verification against the hybrid checker.
@@ -9031,9 +9206,11 @@ async def verify_single_reference(
         from refchecker.core.refchecker import ArxivReferenceChecker
 
         ss_api_key = await _resolve_semantic_scholar_api_key(None)
-        checker = EnhancedHybridReferenceChecker(
+        checker = await _create_reference_search_checker(
             semantic_scholar_api_key=ss_api_key,
-            debug_mode=False,
+            google_books_api_key=await _resolve_google_books_api_key(None),
+            paperclip_api_key=await _resolve_paperclip_api_key(None),
+            progress_callback=None, cancel_event=cancel_event,
         )
         # Tag any LLM calls made during this single-ref re-verify so the
         # $ badge's by-flow breakdown attributes correctly.
@@ -9079,10 +9256,12 @@ async def verify_single_reference(
         enrich_enabled=True,
     )
     updated = merge_fresh_verification(target, projection)
-    refs[idx] = updated
-    ok = await db.replace_check_references(check_id, refs, user_id=user_id)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Failed to persist verified reference")
+    if cancel_event and cancel_event.is_set():
+        from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
+        raise VerificationCancelled('Reference verification cancelled')
+    decision = await db.replace_check_reference_if_unchanged(check_id, original_reference, updated, user_id=user_id)
+    if decision != 'saved':
+        raise HTTPException(status_code=409, detail='The reference changed during verification; its newer data was preserved.')
 
     # Manual-edit provenance belongs to the current check; do not copy it to
     # the global identity cache.

@@ -2622,6 +2622,21 @@ class Database:
             )
             return self._decode_reference_operation(await cursor.fetchone())
 
+    async def list_reference_search_operations_for_check(
+        self, check_id: int, reference_key: str, user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent persisted runs, including their terminal summaries."""
+        owner_id = self._reference_operation_user_id(user_id)
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                """SELECT * FROM reference_search_operations
+                   WHERE user_id = ? AND check_id = ? AND reference_key = ?
+                   ORDER BY created_at DESC, rowid DESC LIMIT 5""",
+                (owner_id, check_id, reference_key),
+            )
+            return [self._decode_reference_operation(row) for row in await cursor.fetchall()]
+
     async def list_active_reference_search_operations(
         self, user_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
@@ -2735,6 +2750,35 @@ class Database:
                 )
             await db.commit()
             return cursor.rowcount > 0
+
+    async def replace_check_reference_if_unchanged(self, check_id, expected, updated, user_id=None):
+        """Replace one unchanged row while preserving concurrent edits to others."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute('PRAGMA busy_timeout=5000')
+            await conn.execute('BEGIN IMMEDIATE')
+            query, params = 'SELECT results_json FROM check_history WHERE id = ?', [check_id]
+            if user_id is not None:
+                query += ' AND user_id = ?'
+                params.append(user_id)
+            row = await (await conn.execute(query, params)).fetchone()
+            if row is None:
+                return 'not_found'
+            results = _sanitize_loaded_reference_results(json.loads(row[0] or '[]'))
+            matches = [i for i, ref in enumerate(results) if ref.get('ref_uid') == expected.get('ref_uid')]
+            if len(matches) != 1 or results[matches[0]] != expected:
+                return 'reference_changed'
+            results[matches[0]] = updated
+            results = ensure_reference_uids(results)
+            buckets = _compute_reference_buckets_from_results(results, is_complete=True, stored_total_refs=len(results))
+            columns = ('total_refs', 'errors_count', 'warnings_count', 'suggestions_count',
+                       'unverified_count', 'refs_with_errors', 'refs_with_warnings_only',
+                       'refs_with_suggestions_only', 'refs_verified')
+            await conn.execute(
+                'UPDATE check_history SET results_json = ?, ' + ', '.join(f'{name} = ?' for name in columns) + ' WHERE id = ?',
+                [json.dumps(results, default=str), *(buckets[name] for name in columns), check_id],
+            )
+            await conn.commit()
+            return 'saved'
 
     async def commit_reference_investigation(
         self, check_id: int, expected: Dict[str, Any], updated: Optional[Dict[str, Any]],

@@ -798,11 +798,6 @@ export default function CorrectionsView({ references, isCheckComplete = false })
         </div>
       )}
 
-      <SuggestAltPanel
-        suggestFor={suggestFor}
-        onClose={() => setSuggestFor(null)}
-      />
-
       {/* Undo strip — appears after the user removes a ref from this
           tab. Mirrors the strip in the References tab so the same
           stash is visible regardless of which view did the remove. */}
@@ -1079,6 +1074,12 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                       it belongs as provenance, not as a fix to apply. */}
                 </div>
               </div>
+              {suggestFor?.ref_id === referenceRowIdentity(ref, i) && (
+                <SuggestAltPanel
+                  suggestFor={suggestFor}
+                  onClose={() => setSuggestFor(null)}
+                />
+              )}
             </div>
           )
         })}

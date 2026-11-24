@@ -4,6 +4,13 @@ import { useHistoryStore } from './useHistoryStore'
 
 export const referenceSearchKey = (checkId, referenceKey) => `${checkId}:${referenceKey}`
 
+const TERMINAL = new Set(['completed', 'cancelled', 'error'])
+const sequenceOf = (operation) => Number(operation?.sequence ?? operation?.progress?.sequence ?? 0)
+const staleUpdate = (previous, incoming) => previous?.operation_id === incoming?.operation_id && (
+  sequenceOf(incoming) < sequenceOf(previous)
+  || (TERMINAL.has(previous.status) && !TERMINAL.has(incoming.status))
+)
+
 const findReferencePosition = (references, updated, referenceKey) => {
   const rows = Array.isArray(references) ? references : []
   if (referenceKey?.startsWith('uid:')) {
@@ -85,11 +92,16 @@ export const useReferenceSearchStore = create((set, get) => ({
     set(state => {
       const previous = state.operations[key]
       const sameOperation = previous?.operation_id === payload.operation_id
+      if (staleUpdate(previous, payload)) return state
+      if (!sameOperation && previous?.created_at && payload.created_at && payload.created_at < previous.created_at) return state
       return { operations: {
         ...state.operations,
         [key]: {
           ...(sameOperation ? previous : {}),
           ...payload,
+          status: sameOperation && previous.status === 'cancelling' && ['queued', 'running'].includes(payload.status)
+            ? 'cancelling' : payload.status,
+          sequence: sequenceOf(payload),
           operation_type: payload.operation_type || payload.progress?.operation_type
             || (sameOperation ? previous?.operation_type : undefined),
           sources: payload.sources || payload.progress?.sources || (sameOperation ? previous?.sources : {}) || {},
@@ -107,13 +119,25 @@ export const useReferenceSearchStore = create((set, get) => ({
     if (!checkId || !referenceKey) return
     const key = referenceSearchKey(checkId, referenceKey)
     const operation = get().operations[key] || current || {}
+    if (operation.operation_id && operation.operation_id !== operationId) return
     if (message.sequence && operation.sequence && message.sequence <= operation.sequence) return
+    if (TERMINAL.has(operation.status) && !TERMINAL.has(message.status)
+      && message.type !== 'reference_search_completed' && message.type !== 'reference_search_error'
+      && message.type !== 'reference_search_cancelled') return
 
     const base = { ...operation, check_id: checkId, reference_key: referenceKey,
       operation_type: message.operation_type || operation.operation_type,
       operation_id: operationId, sequence: message.sequence || operation.sequence || 0 }
     let next = base
-    if (message.type === 'reference_search_started') {
+    if (message.type === 'reference_reextract_progress' || message.type === 'reference_reextract_completed') {
+      next = { ...base, ...message, progress: { ...(base.progress || {}), ...message } }
+      if (message.reference) {
+        patchCompletedReference({ ...next, reference_key: message.updated_reference_key }, message.reference)
+      }
+      if (message.type === 'reference_reextract_completed' && useHistoryStore.getState().selectedCheckId === checkId) {
+        useHistoryStore.getState().selectCheck?.(checkId, { force: true })?.catch(() => undefined)
+      }
+    } else if (message.type === 'reference_search_started') {
       next = { ...base, status: 'running', configured_sources: message.configured_sources || [] }
     } else if (message.type === 'reference_search_source') {
       next = { ...base, status: 'running', sources: {
@@ -138,6 +162,7 @@ export const useReferenceSearchStore = create((set, get) => ({
         error_message: message.message,
         sources: { ...(base.sources || {}), ...sourcesByDatabase(message.sources) } }
     }
+    if (operation.status === 'cancelling' && ['queued', 'running'].includes(next.status)) next.status = 'cancelling'
     set(state => ({ operations: { ...state.operations, [key]: next } }))
   },
 
@@ -145,8 +170,12 @@ export const useReferenceSearchStore = create((set, get) => ({
     if (!snapshot?.operation_id) return
     const key = referenceSearchKey(snapshot.check_id, snapshot.reference_key)
     const current = get().operations[key] || {}
+    if (current.operation_id && current.operation_id !== snapshot.operation_id) return
+    if (staleUpdate(current, snapshot)) return
     const next = {
       ...current, ...snapshot,
+      status: current.status === 'cancelling' && ['queued', 'running'].includes(snapshot.status)
+        ? 'cancelling' : snapshot.status,
       operation_type: snapshot.operation_type || snapshot.progress?.operation_type || current.operation_type,
       sources: snapshot.progress?.sources || current.sources || {},
       configured_sources: snapshot.progress?.configured_sources || current.configured_sources || [],
@@ -154,6 +183,10 @@ export const useReferenceSearchStore = create((set, get) => ({
     }
     if (snapshot.status === 'completed' && snapshot.reference) {
       patchCompletedReference(next, snapshot.reference)
+    }
+    if (snapshot.progress?.operation_type === 'reextract-errors' && ['completed', 'cancelled', 'error'].includes(snapshot.status)
+      && useHistoryStore.getState().selectedCheckId === snapshot.check_id) {
+      useHistoryStore.getState().selectCheck?.(snapshot.check_id, { force: true })?.catch(() => undefined)
     }
     set(state => ({ operations: { ...state.operations, [key]: next } }))
   },

@@ -4,6 +4,54 @@ import { useHistoryStore } from './useHistoryStore'
 import { useReferenceSearchStore } from './useReferenceSearchStore'
 
 describe('reference search operation state', () => {
+  it('restores the persisted sequence and rejects older replayed progress', () => {
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'reload-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'running',
+      progress: { sequence: 20, completed: 8, total: 10 } })
+    store.handleMessage({ type: 'reference_reextract_progress', operation_id: 'reload-job', check_id: 17,
+      reference_key: 'check:reextract-errors', status: 'running', sequence: 10, completed: 2 })
+    store.applySnapshot({ operation_id: 'reload-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'running',
+      progress: { sequence: 15, completed: 5, total: 10 } })
+    expect(store.getForReference(17, 'check:reextract-errors').progress.completed).toBe(8)
+    expect(store.getForReference(17, 'check:reextract-errors').sequence).toBe(20)
+  })
+
+  it('keeps a completed run terminal when a delayed running snapshot arrives', () => {
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'done-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'completed', progress: { sequence: 30 } })
+    store.applySnapshot({ operation_id: 'done-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'running', progress: { sequence: 31 } })
+    expect(store.getForReference(17, 'check:reextract-errors').status).toBe('completed')
+  })
+
+  it('ignores late updates from a previous run of the same action', () => {
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'new-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'running', progress: { sequence: 1 } })
+    store.handleMessage({ type: 'reference_reextract_completed', operation_id: 'old-job', check_id: 17,
+      reference_key: 'check:reextract-errors', status: 'completed', sequence: 99 })
+    store.applySnapshot({ operation_id: 'old-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'completed', progress: { sequence: 100 } })
+    expect(store.getForReference(17, 'check:reextract-errors').operation_id).toBe('new-job')
+  })
+
+  it('retains cancellation while the server finishes the current extraction step', () => {
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'cancel-job', check_id: 17, reference_key: 'check:reextract-errors', status: 'cancelling', progress: { sequence: 1 } })
+    store.handleMessage({ type: 'reference_reextract_progress', operation_id: 'cancel-job', check_id: 17,
+      reference_key: 'check:reextract-errors', status: 'running', sequence: 2, completed: 3 })
+    expect(store.getForReference(17, 'check:reextract-errors').status).toBe('cancelling')
+    expect(store.getForReference(17, 'check:reextract-errors').progress.completed).toBe(3)
+  })
+  it('patches each completed row from a central re-extraction operation', () => {
+    useReferenceSearchStore.setState({ operations: {} })
+    useCheckStore.setState({ currentCheckId: 17, references: [{ ref_uid: 'row-1', status: 'error' }, { ref_uid: 'row-2', status: 'verified' }] })
+    useHistoryStore.setState({ selectedCheckId: 17, selectedCheck: { id: 17, results: [{ ref_uid: 'row-1', status: 'error' }, { ref_uid: 'row-2', status: 'verified' }] } })
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'batch-1', check_id: 17, reference_key: 'check:reextract-errors', status: 'running' })
+    store.handleMessage({ type: 'reference_reextract_progress', operation_id: 'batch-1', check_id: 17,
+      reference_key: 'check:reextract-errors', updated_reference_key: 'uid:row-1', sequence: 1,
+      status: 'running', total: 1, completed: 1, reference: { ref_uid: 'row-1', status: 'verified' } })
+    expect(useCheckStore.getState().references.map(ref => ref.status)).toEqual(['verified', 'verified'])
+    expect(store.getForReference(17, 'check:reextract-errors').completed).toBe(1)
+  })
   beforeEach(() => {
     useReferenceSearchStore.setState({ operations: {} })
     useCheckStore.setState({ currentCheckId: 17, references: [{ id: 'ref-1', status: 'warning' }] })

@@ -302,7 +302,7 @@ export default function useReferenceActions() {
         ? 'manual-edit'
         : opts.force_all_databases
           ? 'all-databases'
-          : 'reextract'
+          : 'verify'
     setReverifyBusy(prev => {
       const next = new Map(prev)
       next.set(ident, action)
