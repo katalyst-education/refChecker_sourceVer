@@ -1,9 +1,13 @@
 """Regression tests for the shared, validated PDF extraction cascade."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
 
 from refchecker.core.refchecker import ArxivReferenceChecker
-from refchecker.utils.extraction_quality import merge_grounded_reference_candidates
+from refchecker.utils.extraction_quality import ground_pdf_references, merge_grounded_reference_candidates
+from refchecker.utils.reference_metadata import attach_bibliography_sources
 
 
 def test_grounded_merge_recovers_truncated_grobid_author_list():
@@ -77,3 +81,32 @@ def test_initial_and_reextract_routes_use_shared_pdf_cascade():
     assert 'extracted_references, _ = await extractor._extract_references_from_pdf(' in main_source
     assert 'merge_grounded_reference_candidates' in core_source
     assert 'merge_grounded_reference_candidates' in bulk_source
+
+
+@pytest.mark.parametrize('printed_author', ['R. A. Marques Lameirinhas', 'T. A. Marques Lameirinhas'])
+def test_alternate_pdf_layout_repairs_spacing_or_preserves_conflicting_evidence(monkeypatch, printed_author):
+    raw = '[49] R.A.MarquesLameirinhas, “A photovoltaic technology review,” Energies, 2022.'
+    layout = raw.replace('R.A.MarquesLameirinhas', printed_author)
+    parsed = {'entry_number': 49, 'title': 'A photovoltaic technology review',
+              'authors': ['R.A.MarquesLameirinhas']}
+    references = attach_bibliography_sources([parsed], raw, 'regex')
+    document = MagicMock()
+    document.pages = [MagicMock(), MagicMock()]
+    document.pages[1].extract_text.return_value = layout
+    document.__enter__.return_value = document
+    monkeypatch.setattr('pdfplumber.open', lambda _path: document)
+
+    [reference] = ground_pdf_references(references, 'Introduction\n\f\n' + raw, pdf_path='paper.pdf')
+
+    evidence = reference['extraction_provenance']
+    assert evidence['pdf_page'] == 2
+    assert evidence['source_text'] == raw
+    assert evidence['layout_text'] == layout
+    document.pages[0].extract_text.assert_not_called()
+    if printed_author.startswith('R.'):
+        assert reference['authors'] == [printed_author]
+        assert evidence['repairs'][0]['reason'] == 'pdf_layout'
+        assert not evidence.get('review')
+    else:
+        assert reference['authors'] == ['R.A.MarquesLameirinhas']
+        assert evidence['review']['authors']['source'] == printed_author

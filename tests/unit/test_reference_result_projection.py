@@ -1,6 +1,7 @@
 """Contracts for the result shape shared by scan and single-ref rechecks."""
 
 from backend.reference_result import (
+    citation_verification_input,
     derive_corrected_reference,
     merge_fresh_verification,
     project_verification_result,
@@ -50,6 +51,24 @@ def test_projection_preserves_cited_metadata_and_separates_verified_metadata():
     assert result["verified_year"] == 2021
     assert result["matched_database"] == "CrossRef"
     assert result["evidence_reconciliation"]["decision"] == "accept_cited_authors"
+
+
+def test_projection_keeps_source_and_cited_metadata_when_display_uses_verified_doi():
+    reference = _reference()
+    reference.pop("doi")
+    reference["extraction_provenance"] = {
+        "parser": "regex", "source_text": "[17] C. Author, Cited title, 2020.", "pdf_page": 5,
+    }
+
+    result = project_verification_result(reference, _verified(), [], None, enrich_enabled=False)
+    restored = citation_verification_input(result)
+
+    assert result["doi"] == "10.1000/canonical"
+    assert "doi" not in restored
+    assert restored["authors"] == ["C. Author"]
+    assert restored["extraction_provenance"] == reference["extraction_provenance"]
+    restored["extraction_provenance"]["pdf_page"] = 6
+    assert result["extraction_provenance"]["pdf_page"] == 5
 
 
 def test_resolved_catalogue_metadata_conflict_is_informational():

@@ -89,8 +89,8 @@ def test_batch_keeps_failed_reference_and_continues(setup_batch, monkeypatch):
     main, database, check_id, extractor, user = setup_batch
     original = extractor._extract_references_for_reverification
 
-    async def partial(text, numbers):
-        refs, _ = await original(text, numbers)
+    async def partial(text, numbers, **kwargs):
+        refs, _ = await original(text, numbers, **kwargs)
         return refs[1:], [{'index': 1, 'message': 'Model returned no final answer text.'}]
 
     monkeypatch.setattr(extractor, '_extract_references_for_reverification', partial)
@@ -128,13 +128,19 @@ def test_batch_searches_only_changed_records_and_preserves_unchanged_results(set
         rows = await database.get_check_references(check_id)
         for i in range(2):
             rows[i].update(title=fresh[i]['title'], authors=fresh[i]['authors'], year=fresh[i]['year'])
+        rows[0]['cited_metadata'] = {
+            'title': fresh[0]['title'], 'authors': fresh[0]['authors'], 'year': fresh[0]['year'],
+        }
+        rows[0]['authors'] = ['Display Author']
+        rows[0]['doi'] = '10.1000/verified'
+        rows[1].update(index=99, entry_number=2)
         rows[0]['errors'] = [{'error_type': 'author', 'error_details': 'Existing finding'}]
         rows[1]['errors'] = [{'error_type': 'unverified', 'error_details': 'Existing lookup result'}]
         await database.replace_check_references(check_id, rows)
         before = await database.get_check_references(check_id)
 
-        async def reextract(text, numbers):
-            parsed, failures = await original_extract(text, numbers)
+        async def reextract(text, numbers, **kwargs):
+            parsed, failures = await original_extract(text, numbers, **kwargs)
             if changed_title:
                 parsed[1]['title'] = changed_title
             return parsed, failures
@@ -151,14 +157,17 @@ def test_batch_searches_only_changed_records_and_preserves_unchanged_results(set
         assert operation['progress']['updated'] == (1 if changed_title else 0)
         assert operation['progress']['failures'] == []
         after = await database.get_check_references(check_id)
-        assert after[0] == before[0]
+        assert after[0]['errors'] == before[0]['errors']
+        assert after[0]['authors'] == ['Display Author']
+        assert after[0]['extraction_provenance']['source_text'].startswith('[1]')
         if changed_title:
             assert verify.await_count == 1
             assert verify.call_args.args[2].force_all_databases is True
             assert verify.call_args.kwargs['source_reference']['title'] == changed_title
         else:
             verify.assert_not_awaited()
-            assert after == before
+            assert after[1]['errors'] == before[1]['errors']
+            assert after[1]['extraction_provenance']['source_text'].startswith('[2]')
 
     asyncio.run(scenario())
     extractor._extract_pdf_text_scoped.assert_called_once()

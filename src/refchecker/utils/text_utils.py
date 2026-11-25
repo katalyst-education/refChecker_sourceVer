@@ -5092,6 +5092,8 @@ def extract_latex_references(text, file_path=None):  # pylint: disable=unused-ar
         return parse_bibtex_references(text)
     
     elif format_info['format_type'] == 'thebibliography':
+        from refchecker.utils.reference_metadata import record_extraction_source
+
         # Parse \bibitem entries (improved for .bbl files with ACM-Reference-Format)
         # Handle both simple \bibitem{key} and complex \bibitem[label]{key} formats
         # Also handle line continuation with % and various spacing patterns
@@ -5597,6 +5599,7 @@ def extract_latex_references(text, file_path=None):  # pylint: disable=unused-ar
                     if author_matches:
                         ref['authors'] = author_matches[:10]
             
+            record_extraction_source(ref, 'bbl', source_text=match[0].strip())
             references.append(ref)
     
     elif format_info['format_type'] == 'bibliography_command':

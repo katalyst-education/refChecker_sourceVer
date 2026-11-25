@@ -27,6 +27,7 @@ import {
 import ReferenceEnrichmentStrip from './ReferenceEnrichmentStrip'
 import AdditionalInfoBar from './AdditionalInfoBar'
 import ReferenceLinksList from './ReferenceLinksList'
+import ReferenceSourceDetails from './ReferenceSourceDetails'
 import ArticleAssistant from '../MainPanel/ArticleAssistant'
 import { collectReferenceLinks } from '../../utils/referenceLinks'
 
@@ -813,6 +814,8 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
               )}
             </div>
           )}
+
+          <ReferenceSourceDetails reference={reference} checkId={activeCheckId} />
 
           {/* Per-reference Chat & Summarize — placed in the reference area,
               above the Verification section. Grounded on THIS reference (its

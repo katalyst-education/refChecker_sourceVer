@@ -3058,7 +3058,11 @@ class Database:
         # Seen Refs library doubles as a curation log. The status column
         # records the verdict; the UI can filter by status to hide
         # unverified ones when desired.
-        result_json = json.dumps(ref, default=str)
+        from refchecker.utils.reference_metadata import REFERENCE_SOURCE_FIELDS
+
+        result_json = json.dumps({
+            field: value for field, value in ref.items() if field not in REFERENCE_SOURCE_FIELDS
+        }, default=str)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout=5000")
             await db.execute(

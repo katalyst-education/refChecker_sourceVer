@@ -35,8 +35,10 @@ from backend.reference_status import classify_verification_result
 from refchecker.utils.text_utils import extract_latex_references
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
 from backend.reference_urls import build_authoritative_urls
-from backend.reference_result import project_verification_result
+from backend.reference_result import project_cited_evidence, project_verification_result
 from refchecker.utils.reference_fixups import fixup_reference_fields
+from refchecker.utils.extraction_quality import ground_pdf_references
+from refchecker.utils.reference_metadata import attach_bibliography_sources, cited_metadata_changed
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.llm.base import create_llm_provider, ReferenceExtractor
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
@@ -1536,6 +1538,7 @@ class ProgressRefChecker:
     ) -> Dict[str, Any]:
         """Format an error result when verification fails."""
         return {
+            **project_cited_evidence(reference),
             "index": index,
             "title": reference.get('title') or reference.get('cited_url') or reference.get('url') or 'Unknown',
             "authors": reference.get('authors', []),
@@ -2918,7 +2921,7 @@ class ProgressRefChecker:
                 'raw_text': ref_string
             }
 
-    async def _extract_reference(self, paper_text: str, reference_number):
+    async def _extract_reference(self, paper_text: str, reference_number, *, pdf_path=None):
         """Re-extract a selected entry through the shared core parser."""
         cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
         from refchecker.llm import usage_tracker as _usage_tracker
@@ -2928,18 +2931,24 @@ class ProgressRefChecker:
                 _usage_tracker.set_current_check(str(self.check_id))
             with _usage_tracker.FlowScope('reverify'):
                 bibliography = cli_checker.find_bibliography_section(paper_text)
-                return cli_checker.parse_reference_entry(bibliography, reference_number)
+                reference = cli_checker.parse_reference_entry(bibliography, reference_number)
+                if reference and pdf_path:
+                    ground_pdf_references([reference], paper_text, pdf_path=pdf_path)
+                return reference
 
         reference = await asyncio.to_thread(extract)
         return _normalize_reference_fields(reference) if reference else None
 
-    async def _extract_references_for_reverification(self, paper_text, reference_numbers):
+    async def _extract_references_for_reverification(self, paper_text, reference_numbers, *, pdf_path=None):
         """Reuse one fresh source parse and repair only selected source entries."""
         cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
         bibliography = await asyncio.to_thread(cli_checker.find_bibliography_section, paper_text)
         entries = cli_checker._split_numbered_reference_entries(bibliography, include_invalid=True)
         if not entries:
-            return await self._extract_references(paper_text), []
+            references = await self._extract_references(paper_text)
+            if pdf_path:
+                await asyncio.to_thread(ground_pdf_references, references, paper_text, pdf_path=pdf_path)
+            return references, []
         parsed = []
         if self.extraction_mode == 'cascade':
             parsed = await asyncio.to_thread(cli_checker._parse_references_regex, '\n'.join(entries))
@@ -2967,6 +2976,8 @@ class ProgressRefChecker:
             await self.emit_progress('extracting', {
                 'message': f'Re-extracting flagged references ({position + 1}/{len(reference_numbers)})…',
             })
+        if pdf_path:
+            await asyncio.to_thread(ground_pdf_references, references, paper_text, pdf_path=pdf_path)
         return references, failures
 
     async def _extract_references(self, paper_text: str) -> List[Dict[str, Any]]:
@@ -3096,6 +3107,7 @@ class ProgressRefChecker:
         """
         if self.extraction_mode == 'llm-only':
             references = await self._extract_references(paper_text)
+            await asyncio.to_thread(ground_pdf_references, references, paper_text, pdf_path=pdf_path)
             return references, self._last_reference_parser_method or 'llm'
 
         cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
@@ -3138,21 +3150,13 @@ class ProgressRefChecker:
                 expected_count=expected_count,
             )
             if validation['is_valid']:
-                normalized_grobid = [
-                    _normalize_reference_fields(ref) for ref in grobid_candidate
-                ]
                 if deterministic_candidate:
-                    normalized_grobid = merge_grounded_reference_candidates(
-                        normalized_grobid,
-                        [
-                            _normalize_reference_fields(ref)
-                            for ref in deterministic_candidate
-                        ],
+                    grobid_candidate = merge_grounded_reference_candidates(
+                        grobid_candidate, deterministic_candidate,
                     )
-                return (
-                    normalized_grobid,
-                    'grobid',
-                )
+                attach_bibliography_sources(grobid_candidate, bibliography_text, 'grobid')
+                await asyncio.to_thread(ground_pdf_references, grobid_candidate, paper_text, pdf_path=pdf_path)
+                return [_normalize_reference_fields(ref) for ref in grobid_candidate], 'grobid'
             logger.info(
                 "GROBID candidate rejected by PDF cascade (quality %.2f, "
                 "parsed=%d, expected=%s, bad=%d)",
@@ -3164,14 +3168,14 @@ class ProgressRefChecker:
 
         parsed_references = await self._extract_references(paper_text)
         if parsed_references:
+            await asyncio.to_thread(ground_pdf_references, parsed_references, paper_text, pdf_path=pdf_path)
             return parsed_references, self._last_reference_parser_method or 'pdf'
 
         if grobid_candidate:
             logger.warning("Using weak GROBID candidate because no parser produced a replacement")
-            return (
-                [_normalize_reference_fields(ref) for ref in grobid_candidate],
-                'grobid',
-            )
+            attach_bibliography_sources(grobid_candidate, bibliography_text, 'grobid')
+            await asyncio.to_thread(ground_pdf_references, grobid_candidate, paper_text, pdf_path=pdf_path)
+            return [_normalize_reference_fields(ref) for ref in grobid_candidate], 'grobid'
         if grobid_error is not None:
             raise grobid_error
         return [], self._last_reference_parser_method
@@ -3320,7 +3324,10 @@ class ProgressRefChecker:
                 cached = await _db.lookup_verified_reference(reference)
                 if cached and isinstance(cached.get("result"), dict) and cached["result"]:
                     cached_result = dict(cached["result"])
-                    if self._can_reuse_cached_result(cached_result):
+                    if self._can_reuse_cached_result(cached_result) and not cited_metadata_changed(
+                        cached_result.get("cited_metadata", reference), reference,
+                    ):
+                        cached_result.update(project_cited_evidence(reference))
                         cached_result["index"] = index
                         cached_result["from_cache"] = True
                         return cached_result
@@ -3521,12 +3528,17 @@ class ProgressRefChecker:
                         )
                 if cached and isinstance(cached.get("result"), dict) and cached["result"]:
                     cached_result = dict(cached["result"])
-                    if not self._can_reuse_cached_result(cached_result):
+                    if not self._can_reuse_cached_result(cached_result) or (
+                        "_fuzzy_match_score" not in cached and cited_metadata_changed(
+                            cached_result.get("cited_metadata", reference), reference,
+                        )
+                    ):
                         cached = None
                     else:
                         cached_result["index"] = idx + 1
                         cached_result["from_cache"] = True
                 if cached and isinstance(cached.get("result"), dict) and cached["result"]:
+                    cached_result.update(project_cited_evidence(reference))
                     # ── Fuzzy cache hit: validate cited fields against
                     # the cached ground truth (v0.7.49) ─────────────────
                     # User's note: "if any issues should mark, not just

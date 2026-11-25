@@ -63,6 +63,13 @@ from refchecker.utils.reference_fixups import (
     fixup_reference_fields,
     strip_citation_tail_from_venue,
 )
+from refchecker.utils.reference_metadata import (
+    attach_bibliography_sources,
+    reconcile_reference_source,
+    record_extraction_change,
+    record_extraction_source,
+)
+from refchecker.utils.extraction_quality import ground_pdf_references
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
 from refchecker.core.parallel_processor import ParallelReferenceProcessor  
@@ -1333,13 +1340,9 @@ class ArxivReferenceChecker:
             
         try:
             # Try with pypdf first
-            text = ""
             pdf_content.seek(0)  # Reset file pointer
             pdf_reader = pypdf.PdfReader(pdf_content)
-            
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                text += page.extract_text() + "\n"
+            text = "\n\f\n".join(page.extract_text() or '' for page in pdf_reader.pages)
             
             # Quality check: if text has garbled font encoding, try pdftotext directly
             if text and _is_garbled(text):
@@ -1360,9 +1363,7 @@ class ArxivReferenceChecker:
                 # Try with pdfplumber as a fallback
                 pdf_content.seek(0)  # Reset file pointer
                 with pdfplumber.open(pdf_content) as pdf:
-                    text = ""
-                    for page in pdf.pages:
-                        text += page.extract_text() + "\n"
+                    text = "\n\f\n".join(page.extract_text() or '' for page in pdf.pages)
                     if text and not _is_garbled(text):
                         return text
                     # pdfplumber also garbled, try pdftotext
@@ -3496,6 +3497,13 @@ class ArxivReferenceChecker:
         # other verification and seen-reference paths call this method
         # directly; running fixups once here keeps every path identical.
         self._fixup_reference_fields(reference)
+        review = reference.get('extraction_provenance', {}).get('review') or {}
+        for field, values in review.items():
+            logger.warning(
+                'Bibliography entry %s needs review for %s. Source %r. Parsed %r.',
+                reference.get('entry_number') or reference.get('title'),
+                field, values['source'], values['parsed'],
+            )
 
         # Direct sources short-circuit normal scans. Explicit Search-all keeps
         # their result as a fallback but still queries the database stack.
@@ -4793,12 +4801,14 @@ class ArxivReferenceChecker:
                 self.last_reference_parser_method = 'regex'
                 self.fatal_error = False
                 self.fatal_error_message = None
-                return dict(candidates[0])
+                return attach_bibliography_sources([dict(candidates[0])], raw_entry, 'regex')[0]
         if self.llm_extractor:
             extracted = self.llm_extractor.extract_references(raw_entry)
             candidates = self._process_llm_extracted_references(extracted or [])
             if len(candidates) == 1 and validate_parsed_references(candidates, require_all=True)['is_valid']:
                 result = dict(candidates[0], raw_text=raw_entry, entry_number=number)
+                record_extraction_source(result, 'llm', source_text=raw_entry, entry_number=number)
+                reconcile_reference_source(result)
                 self.last_reference_parser_method = 'llm'
                 self.fatal_error = False
                 self.fatal_error_message = None
@@ -4863,9 +4873,9 @@ class ArxivReferenceChecker:
                 invalid_indices = validation.get('invalid_indices') or []
                 if self.llm_extractor and complete and invalid_indices:
                     invalid_entries = [
-                        numbered_entries[index]
+                        deterministic_references[index].get('extraction_provenance', {}).get('source_text')
+                        or numbered_entries[index]
                         for index in invalid_indices
-                        if index < len(numbered_entries)
                     ]
                     repaired_raw = self._extract_numbered_references_with_llm_chunks(
                         invalid_entries
@@ -4878,6 +4888,15 @@ class ArxivReferenceChecker:
                         ):
                             repaired_ref = dict(repaired_ref)
                             repaired_ref.setdefault('raw_text', raw_entry)
+                            original = deterministic_references[index]
+                            provenance = record_extraction_source(
+                                repaired_ref, 'llm', source_text=raw_entry,
+                                entry_number=original.get('entry_number'),
+                            )
+                            for field, value in provenance['parsed_fields'].items():
+                                record_extraction_change(repaired_ref, field, original.get(field),
+                                                         value, 'targeted_llm_reparse')
+                            reconcile_reference_source(repaired_ref)
                             repaired_candidate[index] = repaired_ref
                         repaired_validation = validate_parsed_references(
                             repaired_candidate,
@@ -4918,7 +4937,7 @@ class ArxivReferenceChecker:
                             chunked_processed = self._process_llm_extracted_references(chunked_references)
                             if len(chunked_processed) >= expected_numbered_count:
                                 self.last_reference_parser_method = 'llm'
-                                return chunked_processed
+                                return attach_bibliography_sources(chunked_processed, bibliography_text, 'llm')
                             if len(chunked_processed) > len(processed_references):
                                 processed_references = chunked_processed
 
@@ -4934,7 +4953,7 @@ class ArxivReferenceChecker:
                                 return deterministic_references
                             self.fatal_error = fatal_error_before_fallback
                     self.last_reference_parser_method = 'llm'
-                    return processed_references
+                    return attach_bibliography_sources(processed_references, bibliography_text, 'llm')
                 else:
                     logger.warning("LLM reference extraction returned no results")
             except Exception as e:
@@ -5168,7 +5187,7 @@ class ArxivReferenceChecker:
                 self.fatal_error = True
                 return []
             else:
-                return biblatex_refs
+                return attach_bibliography_sources(biblatex_refs, bibliography_text, 'regex')
         
         # --- IMPROVED SPLITTING: handle concatenated references like [3]... [4]... ---
         # First, normalize the bibliography text to handle multi-line references
@@ -5586,7 +5605,7 @@ class ArxivReferenceChecker:
         logger.debug(f"Extracted {len(non_arxiv_refs)} structured references without arxiv links")
         logger.debug(f"Extracted {len(other_refs)} structured references without URLs or DOIs")
         all_refs = arxiv_refs + non_arxiv_refs + other_refs
-        return all_refs
+        return attach_bibliography_sources(all_refs, bibliography_text, 'regex')
     
     def _parse_bibtex_references(self, bibliography_text):
         """
@@ -5654,6 +5673,7 @@ class ArxivReferenceChecker:
             # Use LLM-specific structured reference creation
             structured_ref = self._create_structured_llm_references(ref_text)
             if structured_ref:
+                record_extraction_source(structured_ref, 'llm')
                 # Validate and repair venue metadata at the extraction boundary,
                 # before a corrupt field can reach any database checker. The
                 # shared verification-entry fixup runs again later by design;
@@ -6915,7 +6935,7 @@ class ArxivReferenceChecker:
                     strict_numbered_text_candidate,
                 )
 
-                comparison_bibliography = self.find_bibliography_section(text)
+                comparison_bibliography = self.find_bibliography_section(text) if text else None
                 fatal_state = (self.fatal_error, self.fatal_error_message)
                 try:
                     text_candidate, _ = strict_numbered_text_candidate(
@@ -6927,7 +6947,8 @@ class ArxivReferenceChecker:
                     grobid_references = merge_grounded_reference_candidates(
                         grobid_references, text_candidate
                     )
-                return grobid_references
+                attach_bibliography_sources(grobid_references, comparison_bibliography, 'grobid')
+                return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
         
         if not text:
             grobid_references = _maybe_use_grobid_fallback(
@@ -6935,7 +6956,7 @@ class ArxivReferenceChecker:
                 "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
             )
             if grobid_references:
-                return grobid_references
+                return attach_bibliography_sources(grobid_references, None, 'grobid')
             logger.warning(f"Could not extract text from {'LaTeX' if hasattr(paper, 'is_latex') and paper.is_latex else 'PDF'} for {paper_id}")
             self._set_fatal_source_error(
                 paper,
@@ -6994,7 +7015,8 @@ class ArxivReferenceChecker:
                 "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
             )
             if grobid_references:
-                return grobid_references
+                attach_bibliography_sources(grobid_references, None, 'grobid')
+                return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
             logger.warning(f"Could not find bibliography section for {paper_id}")
             return []
 
@@ -7021,7 +7043,10 @@ class ArxivReferenceChecker:
                 "Please configure an API key or ensure Docker is installed so GROBID can auto-start."
             )
             if grobid_references:
-                references = grobid_references
+                references = attach_bibliography_sources(grobid_references, bibliography_text, 'grobid')
+
+        if pdf_content is not None:
+            ground_pdf_references(references, text, pdf_content=pdf_content)
         
         # Save the extracted references for debugging
         if debug_mode:

@@ -168,7 +168,8 @@ def test_parse_references_bulk_uses_llm_before_structured_parsers():
 
     references = parse_references_bulk(checker, bibliography_text, batcher)
 
-    assert references == [{'title': 'LLM Extracted'}]
+    assert references[0]['title'] == 'LLM Extracted'
+    assert references[0]['extraction_provenance']['parser'] == 'llm'
     assert batcher.calls == [bibliography_text]
     assert checker.used_regex_extraction is False
 

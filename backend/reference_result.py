@@ -10,12 +10,14 @@ other presentation data from a previous verification.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.reference_status import classify_verification_result
 from backend.reference_urls import build_authoritative_urls
+from refchecker.utils.reference_metadata import CITED_REFERENCE_FIELDS, REFERENCE_SOURCE_FIELDS
 from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
 
 
@@ -155,6 +157,31 @@ def _build_enrichment(
         return {}
 
 
+def project_cited_evidence(reference: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep citation values independent of display enrichment and lookup results."""
+    return {
+        "cited_metadata": {
+            field: reference[field] for field in CITED_REFERENCE_FIELDS if field in reference
+        },
+        **{field: reference[field] for field in REFERENCE_SOURCE_FIELDS if field in reference},
+    }
+
+
+def citation_verification_input(reference: Dict[str, Any]) -> Dict[str, Any]:
+    """Restore the actual cited fields from a saved row for verification."""
+    result = deepcopy(reference)
+    cited = result.pop("cited_metadata", None)
+    if isinstance(cited, dict):
+        for field in CITED_REFERENCE_FIELDS:
+            result.pop(field, None)
+        result.update(cited)
+        # Some verifiers use the canonical venue slot while source parsers
+        # can also supply the journal alias.
+        if not result.get("venue") and result.get("journal"):
+            result["venue"] = result["journal"]
+    return result
+
+
 def project_verification_result(
     reference: Dict[str, Any],
     verified_data: Optional[Dict[str, Any]],
@@ -212,6 +239,7 @@ def project_verification_result(
     pmid = str(cited_pmid).strip() or str(external_ids.get("PubMed") or verified.get("pmid") or "").strip()
 
     result: Dict[str, Any] = {
+        **project_cited_evidence(cited),
         "index": cited.get("index") if index is None else index,
         "title": cited.get("title") or cited.get("cited_url") or cited.get("url") or "Unknown Title",
         "authors": display_authors or cited.get("authors", []),

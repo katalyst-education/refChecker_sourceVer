@@ -1,7 +1,65 @@
 """Shared quality gates and grounded candidate merging for reference extraction."""
 
+import io
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
+
+from refchecker.utils.reference_metadata import (
+    attach_bibliography_sources,
+    needs_pdf_layout_review,
+    numbered_source_entries,
+    reconcile_reference_source,
+    record_extraction_change,
+    record_extraction_source,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+def ground_pdf_references(references, paper_text, *, pdf_path=None, pdf_content=None):
+    """Locate exact source entries and read page layout for fused author text."""
+    pages = (paper_text or '').split('\f')
+    if not paper_text or not references:
+        return references
+    normalized_pages = [' '.join(page.split()) for page in pages]
+    selected = {}
+    for reference in references:
+        provenance = reference.get('extraction_provenance') or {}
+        raw = provenance.get('source_text', '')
+        lines = raw.splitlines()
+        first_line = ' '.join(lines[0].split()) if lines else ''
+        prefix = (first_line if len(first_line) >= 25 else ' '.join(raw.split()))[:100]
+        if len(prefix) < 25:
+            continue
+        matches = [i for i, page in enumerate(normalized_pages) if prefix in page]
+        if len(matches) != 1:
+            continue
+        page_index = matches[0]
+        provenance['pdf_page'] = page_index + 1
+        if provenance.get('entry_number') is not None and needs_pdf_layout_review(reference):
+            selected.setdefault(page_index, []).append(reference)
+
+    if not selected or (not pdf_path and pdf_content is None):
+        return references
+    try:
+        import pdfplumber
+
+        source = pdf_path or io.BytesIO(pdf_content.getvalue())
+        with pdfplumber.open(source) as document:
+            for page_index, page_references in selected.items():
+                if page_index >= len(document.pages):
+                    continue
+                page = document.pages[page_index]
+                entries = dict(numbered_source_entries(page.extract_text()))
+                for reference in page_references:
+                    layout_text = entries.get(reference['entry_number'])
+                    if layout_text:
+                        reconcile_reference_source(reference, layout_text=layout_text)
+    except Exception as exc:
+        logger.debug('Could not read alternate PDF layout for bibliography: %s', exc)
+    return references
 
 
 def _author_family_key(author: Any) -> str:
@@ -39,9 +97,13 @@ def merge_grounded_reference_candidates(
                 return structured
 
         combined = dict(structured_ref)
+        record_extraction_source(combined, 'grobid')
         for field in ('title', 'year', 'venue', 'journal', 'doi', 'arxiv_id', 'url', 'raw_text'):
             if not combined.get(field) and text_ref.get(field):
                 combined[field] = text_ref[field]
+                if field != 'raw_text':
+                    record_extraction_change(combined, field, structured_ref.get(field),
+                                             combined[field], 'bibliography_parser')
 
         structured_authors = [
             author for author in (structured_ref.get('authors') or [])
@@ -56,6 +118,8 @@ def merge_grounded_reference_candidates(
         elif len(text_authors) > len(structured_authors) and structured_authors:
             if _author_family_key(structured_authors[0]) == _author_family_key(text_authors[0]):
                 combined['authors'] = text_authors
+        record_extraction_change(combined, 'authors', structured_ref.get('authors'),
+                                 combined.get('authors'), 'bibliography_parser')
         merged.append(combined)
     return merged
 
@@ -75,6 +139,7 @@ def strict_numbered_text_candidate(
     references = checker._parse_references_regex('\n'.join(numbered_entries))
     if not references:
         return [], expected_count
+    attach_bibliography_sources(references, bibliography_text, 'regex')
 
     from refchecker.utils.text_utils import validate_parsed_references
 

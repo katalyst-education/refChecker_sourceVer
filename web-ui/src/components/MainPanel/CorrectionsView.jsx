@@ -26,6 +26,7 @@ import {
   hasActionableCorrection,
 } from '../../utils/correctionUtils'
 import { referenceRowIdentity, toApiReferenceId } from '../../utils/referenceIdentity'
+import ReferenceSourceDetails from '../ReferenceCard/ReferenceSourceDetails'
 
 /**
  * Mirrors the chip ids exposed by the Summary panel above the tab.
@@ -1019,6 +1020,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
                       ))}
                     </ul>
                   )}
+                  <ReferenceSourceDetails reference={ref} checkId={selectedCheckId} />
                 </div>
                 <div className="p-3" style={{ borderLeft: '1px solid var(--color-border)', minWidth: 0 }}>
                   <div className="text-[10px] uppercase tracking-wider mb-1 flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>

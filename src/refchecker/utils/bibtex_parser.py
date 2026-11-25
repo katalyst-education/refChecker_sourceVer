@@ -86,6 +86,7 @@ def parse_bibtex_entries(bib_content: str) -> List[Dict[str, Any]]:
         # Parse the entry content
         parsed_entry = parse_bibtex_entry_content(entry_type, entry_key, entry_content)
         if parsed_entry:
+            parsed_entry['raw_text'] = bib_content[start_pos:end_pos]
             entries.append(parsed_entry)
     
     return entries
@@ -390,7 +391,7 @@ def parse_bibtex_references(bibliography_text: str) -> List[Dict[str, Any]]:
             'type': ref_type,
             'bibtex_key': entry['key'],
             'bibtex_type': entry_type,
-            'raw_text': f"@{entry_type}{{{entry['key']}, ...}}"  # Simplified raw text
+            'raw_text': entry['raw_text'],
         }
         
         # Add additional fields based on entry type
@@ -405,6 +406,9 @@ def parse_bibtex_references(bibliography_text: str) -> List[Dict[str, Any]]:
             reference['publisher'] = fields.get('publisher', '')
             reference['isbn'] = fields.get('isbn', '')
         
+        from refchecker.utils.reference_metadata import record_extraction_source
+
+        record_extraction_source(reference, 'bib', source_text=entry['raw_text'])
         references.append(reference)
     
     logger.debug(f"Extracted {len(references)} BibTeX references")

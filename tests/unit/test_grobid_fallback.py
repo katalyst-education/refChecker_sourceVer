@@ -126,16 +126,20 @@ def test_extract_bibliography_uses_grobid_when_text_extraction_fails(tmp_path):
     pdf_path = tmp_path / 'paper.pdf'
     pdf_path.write_bytes(b'%PDF-1.4 fake')
     paper = checker._create_local_file_paper(str(pdf_path))
+    raw = 'A. Author. GROBID Ref.\nJournal, 2024.'
 
     with patch.object(checker, 'download_pdf', return_value=io.BytesIO(b'%PDF-1.4 fake')):
         with patch.object(checker, 'extract_text_from_pdf', return_value=''):
             with patch(
                 'refchecker.utils.grobid.extract_pdf_references_with_grobid_fallback',
-                return_value=([{'title': 'GROBID Ref', 'authors': ['A. Author']}], 'grobid'),
+                return_value=([{'title': 'GROBID Ref', 'authors': ['A. Author'], 'raw_text': raw}], 'grobid'),
             ) as helper_mock:
                 references = checker.extract_bibliography(paper, debug_mode=True, input_spec=str(pdf_path))
 
-    assert references == [{'title': 'GROBID Ref', 'authors': ['A. Author']}]
+    [reference] = references
+    assert reference['title'] == 'GROBID Ref'
+    assert reference['authors'] == ['A. Author']
+    assert reference['extraction_provenance']['source_text'] == raw
     helper_mock.assert_called_once()
 
 
@@ -155,7 +159,9 @@ def test_extract_bibliography_cascade_tries_grobid_before_text_parser(tmp_path):
                     ) as helper_mock:
                         references = checker.extract_bibliography(paper, debug_mode=True, input_spec=str(pdf_path))
 
-    assert references == [{'title': 'GROBID Ref'}]
+    [reference] = references
+    assert reference['title'] == 'GROBID Ref'
+    assert reference['extraction_provenance']['parser'] == 'grobid'
     helper_mock.assert_called_once()
     find_mock.assert_called_once()
     parse_mock.assert_not_called()

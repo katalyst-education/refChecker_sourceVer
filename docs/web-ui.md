@@ -31,6 +31,11 @@ The interface accepts arXiv identifiers and URLs, PDFs, LaTeX, BibTeX, BBL, plai
 
 If an extraction LLM is configured, it can parse complex bibliographies. Otherwise RefChecker uses deterministic parsers and available fallbacks such as GROBID. Extraction configuration is shared with the CLI and bulk paths.
 
+Open **Source bibliography** on a reference to view the source entry, extraction
+repairs, and any fields that need review. PDF references link to the original
+page when the source entry can be located. **Re-extract** saves source evidence
+for flagged references and searches all databases only when cited metadata changes.
+
 ## Verification
 
 Each extracted reference is checked through the shared source pipeline. The UI displays:

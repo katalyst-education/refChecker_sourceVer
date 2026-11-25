@@ -37,7 +37,7 @@ if _SOURCE_ROOT.is_dir():
     sys.path.insert(0, _source_root_text)
 
 from refchecker.__version__ import __version__
-from refchecker.utils.reference_metadata import CITED_REFERENCE_FIELDS, cited_metadata_changed
+from refchecker.utils.reference_metadata import CITED_REFERENCE_FIELDS, REFERENCE_SOURCE_FIELDS, cited_metadata_changed
 from refchecker.utils.database_config import DATABASE_BUILD_DEPENDENCIES, DATABASE_FILE_ALIASES, DATABASE_LABELS, DATABASE_UPDATE_ORDER, resolve_database_paths, resolve_database_update_paths
 
 # Fix Windows encoding issues with Unicode characters (e.g., Greek letters in paper titles).
@@ -69,7 +69,12 @@ from .websocket_manager import manager, presence
 from .refchecker_wrapper import ProgressRefChecker
 from .reference_status import classify_verification_result, split_errors_and_warnings
 from .reference_urls import build_authoritative_urls
-from .reference_result import merge_fresh_verification, project_verification_result
+from .reference_result import (
+    citation_verification_input,
+    merge_fresh_verification,
+    project_cited_evidence,
+    project_verification_result,
+)
 from .reference_matching import find_reextracted_reference_index
 from .reference_editing import (
     EDITABLE_REFERENCE_FIELDS,
@@ -8188,6 +8193,7 @@ async def _run_reference_reextraction_job(
                     raise ValueError('Check not found')
                 targets = [(i, dict(ref)) for i, ref in enumerate(refs)
                            if ref.get('status') in {'error', 'unverified'}]
+                source_numbers = [ref.get('entry_number') or ref.get('index') for ref in refs]
                 progress.update(status='running', total=len(targets), message='Reading the original document…')
                 await db.update_reference_search_operation(operation_id, status='running', progress=progress)
                 await emit()
@@ -8205,12 +8211,13 @@ async def _run_reference_reextraction_job(
                         raise ValueError('The original document is unavailable for re-extraction.')
                     check_cancelled()
                     fresh_refs, extraction_failures = await extractor._extract_references_for_reverification(
-                        paper_text, [ref.get('index') for _, ref in targets],
+                        paper_text, [source_numbers[position] for position, _ in targets],
+                        **({'pdf_path': pdf_path} if pdf_path else {}),
                     )
                     failure_by_index = {failure['index']: failure['message'] for failure in extraction_failures}
                     for position, target in targets:
                         check_cancelled()
-                        number = target.get('index')
+                        number = source_numbers[position]
                         progress['message'] = f'Comparing re-extracted reference {progress["completed"] + 1}/{len(targets)}…'
                         await emit()
                         try:
@@ -8218,13 +8225,14 @@ async def _run_reference_reextraction_job(
                                 raise ValueError(failure_by_index[number])
                             # Source numbering disambiguates duplicate titles.
                             numbered = [ref for ref in fresh_refs if ref.get('entry_number') == number]
-                            candidates = numbered if len(numbered) == 1 else fresh_refs
                             # A unique source citation number also anchors a row
                             # whose title or identifiers were extracted differently.
-                            unique_source_number = len(numbered) == 1 and sum(
-                                ref.get('index') == number for ref in refs
-                            ) == 1
-                            match = 0 if unique_source_number else find_reextracted_reference_index(
+                            anchored = (
+                                number is not None and target.get('entry_number') == number
+                                and len(numbered) == 1 and source_numbers.count(number) == 1
+                            )
+                            candidates = numbered if anchored else fresh_refs
+                            match = 0 if anchored else find_reextracted_reference_index(
                                 candidates, target, preferred_index=position,
                             )
                             if match is None:
@@ -8235,7 +8243,7 @@ async def _run_reference_reextraction_job(
                             if current is None or _reference_search_fingerprint(current) != _reference_search_fingerprint(target):
                                 raise ValueError('The reference changed while re-extraction was running.')
                             fresh_reference = candidates[match]
-                            if cited_metadata_changed(target, fresh_reference):
+                            if cited_metadata_changed(citation_verification_input(target), fresh_reference):
                                 progress['message'] = f'Searching all databases for changed reference [{number}]…'
                                 await emit()
                                 result = await _verify_single_reference_impl(
@@ -8245,6 +8253,18 @@ async def _run_reference_reextraction_job(
                                 progress['updated'] += 1
                                 await emit(reference=result['reference'], updated_reference_key=f'uid:{uid}')
                             else:
+                                evidence = {
+                                    field: fresh_reference[field]
+                                    for field in REFERENCE_SOURCE_FIELDS if field in fresh_reference
+                                }
+                                if any(current.get(field) != value for field, value in evidence.items()):
+                                    updated = {**current, **evidence}
+                                    decision = await db.replace_check_reference_if_unchanged(
+                                        check_id, current, updated, user_id=owner_id,
+                                    )
+                                    if decision != 'saved':
+                                        raise ValueError('The reference changed while re-extraction was running.')
+                                    await emit(reference=updated, updated_reference_key=f'uid:{uid}')
                                 progress['unchanged'] += 1
                         except Exception as exc:
                             if exc.__class__.__name__ == 'VerificationCancelled':
@@ -8402,7 +8422,7 @@ async def _run_single_reference_verify_job(
 def _reference_search_fingerprint(reference: Dict[str, Any]) -> str:
     fields = {
         key: reference.get(key)
-        for key in (*CITED_REFERENCE_FIELDS, "id", "index", "raw", "raw_text", "type")
+        for key in (*CITED_REFERENCE_FIELDS, *REFERENCE_SOURCE_FIELDS, "cited_metadata", "id", "index", "raw", "type")
     }
     return json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -8487,6 +8507,7 @@ async def _run_reference_search_job(
         if idx is None:
             raise LookupError("Reference not found")
         target = dict(refs[idx])
+        cited = citation_verification_input(target)
 
         from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
         from refchecker.core.refchecker import ArxivReferenceChecker
@@ -8515,7 +8536,7 @@ async def _run_reference_search_job(
                 shared_checker = ArxivReferenceChecker.__new__(ArxivReferenceChecker)
                 shared_checker.non_arxiv_checker = checker
                 errors, url, verified_data = shared_checker.verify_reference_standard(
-                    None, dict(target), force_all_databases=True,
+                    None, cited, force_all_databases=True,
                 )
                 return verified_data, errors, url
 
@@ -8535,7 +8556,7 @@ async def _run_reference_search_job(
             raise VerificationCancelled("Reference search cancelled")
 
         projection = project_verification_result(
-            target, verified_data, findings, url,
+            cited, verified_data, findings, url,
             index=target.get("index"), enrich_enabled=True,
         )
         updated = merge_fresh_verification(target, projection)
@@ -8950,8 +8971,8 @@ async def _verify_single_reference_impl(
     )
     if idx is None:
         raise HTTPException(status_code=404, detail="Reference not found in check")
-    target = refs[idx]
-    original_reference = json.loads(json.dumps(target, default=str))
+    original_reference = refs[idx]
+    target = citation_verification_input(original_reference)
     logger.info(
         "Per-ref verify target resolved: route_ref_id=%r idx=%s stored_index=%r title=%r",
         ref_id,
@@ -9076,7 +9097,10 @@ async def _verify_single_reference_impl(
             )
 
         try:
-            selected_reference = await extractor._extract_reference(paper_text, target.get('index'))
+            selected_reference = await extractor._extract_reference(
+                paper_text, target.get('entry_number') or target.get('index'),
+                **({'pdf_path': pdf_path} if pdf_path else {}),
+            )
             if selected_reference:
                 extracted_references = [selected_reference]
             elif pdf_path:
@@ -9119,7 +9143,7 @@ async def _verify_single_reference_impl(
             )
         fresh_reference = extracted_references[fresh_idx]
     if fresh_reference is not None:
-        for field in (*CITED_REFERENCE_FIELDS, "raw", "raw_text", "type"):
+        for field in (*CITED_REFERENCE_FIELDS, *REFERENCE_SOURCE_FIELDS, "raw", "type"):
             if field in fresh_reference:
                 target[field] = fresh_reference[field]
             else:
@@ -9180,8 +9204,9 @@ async def _verify_single_reference_impl(
         and isinstance(cached.get("result"), dict)
         and cached["result"]
         and not _cache_is_pre_split(cached["result"])
+        and not cited_metadata_changed(cached["result"].get("cited_metadata", target), target)
     ):
-        updated = dict(cached["result"])
+        updated = {**cached["result"], **project_cited_evidence(target)}
         updated["id"] = target.get("id")
         updated["index"] = target.get("index")
         updated["ref_uid"] = target.get("ref_uid")
@@ -9227,7 +9252,7 @@ async def _verify_single_reference_impl(
                     shared_checker.non_arxiv_checker = checker
                     errors, url, verified_data = shared_checker.verify_reference_standard(
                         None,
-                        dict(target),
+                        target,
                         force_all_databases=force_all_databases,
                     )
                     return verified_data, errors, url

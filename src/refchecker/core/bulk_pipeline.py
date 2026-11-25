@@ -878,6 +878,10 @@ def _reset_worker_state(checker: Any) -> None:
 
 
 def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extraction_batcher: BulkLLMExtractionBatcher) -> List[Dict[str, Any]]:
+    from refchecker.utils.extraction_quality import ground_pdf_references
+    from refchecker.utils.reference_metadata import attach_bibliography_sources
+
+    pdf_content = None
     paper_id = paper.get_short_id()
     logger.debug('Bulk extracting bibliography for paper %s: %s', paper_id, getattr(paper, 'title', ''))
 
@@ -940,7 +944,7 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                         strict_numbered_text_candidate,
                     )
 
-                    comparison_bibliography = checker.find_bibliography_section(text)
+                    comparison_bibliography = checker.find_bibliography_section(text) if text else None
                     fatal_state = (checker.fatal_error, checker.fatal_error_message)
                     try:
                         text_candidate, _ = strict_numbered_text_candidate(
@@ -955,7 +959,8 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                     checker.last_bibliography_extraction_method = 'grobid'
                     checker.fatal_error = False
                     checker.fatal_error_message = None
-                    return grobid_references
+                    attach_bibliography_sources(grobid_references, comparison_bibliography, 'grobid')
+                    return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
             except ValueError as exc:
                 logger.debug('GROBID cascade failed for %s: %s', paper_id, exc)
 
@@ -987,6 +992,8 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                 if result.returncode == 0 and result.stdout.strip():
                     logger.info("Retrying bibliography extraction with pdftotext fallback")
                     bibliography_text = checker.find_bibliography_section(result.stdout)
+                    if bibliography_text:
+                        text = result.stdout
             except Exception as e:
                 logger.debug(f"pdftotext fallback failed: {e}")
         # Also try for URL-based papers where pdf_content is available
@@ -1002,6 +1009,8 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                 if result.returncode == 0 and result.stdout.strip():
                     logger.info("Retrying bibliography extraction with pdftotext fallback (from pdf_content)")
                     bibliography_text = checker.find_bibliography_section(result.stdout)
+                    if bibliography_text:
+                        text = result.stdout
             except Exception as e:
                 logger.debug(f"pdftotext fallback from pdf_content failed: {e}")
     if not bibliography_text:
@@ -1015,6 +1024,8 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
         return []
     references = parse_references_bulk(checker, bibliography_text, extraction_batcher)
     if references or checker.llm_extractor:
+        if pdf_content is not None:
+            ground_pdf_references(references, text, pdf_content=pdf_content)
         return references
     if getattr(checker, 'extraction_mode', 'cascade') != 'cascade':
         return references
@@ -1037,7 +1048,8 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
         if grobid_references:
             checker.fatal_error = False
             checker.fatal_error_message = None
-            return grobid_references
+            attach_bibliography_sources(grobid_references, bibliography_text, 'grobid')
+            return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
     except Exception as exc:
         logger.debug('GROBID fallback failed for %s: %s', paper_id, exc)
 
@@ -1081,7 +1093,9 @@ def parse_references_bulk(checker: Any, bibliography_text: str, extraction_batch
             checker.last_reference_parser_method = 'llm'
             checker.fatal_error = False
             checker.fatal_error_message = None
-            return references
+            from refchecker.utils.reference_metadata import attach_bibliography_sources
+
+            return attach_bibliography_sources(references, bibliography_text, 'llm')
         if deterministic_references:
             checker.last_reference_parser_method = 'regex'
             checker.fatal_error = False

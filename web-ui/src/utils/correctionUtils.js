@@ -14,8 +14,17 @@ export function classifyCorrectionReference(ref, isCheckComplete = false) {
 
 /** Reference shell containing cited values only, with no correction overlays. */
 export function citedReferenceShell(ref) {
+  const cited = ref.cited_metadata
   return {
     ...ref,
+    ...(cited && {
+      ...cited,
+      authors: cited.authors ?? [],
+      venue: cited.venue || cited.journal,
+      cited_url: cited.cited_url || cited.url,
+      doi: cited.doi,
+      arxiv_id: cited.arxiv_id,
+    }),
     errors: [],
     warnings: [],
     suggestions: [],

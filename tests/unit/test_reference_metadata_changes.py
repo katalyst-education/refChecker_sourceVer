@@ -1,6 +1,6 @@
 import pytest
 
-from refchecker.utils.reference_metadata import cited_metadata_changed
+from refchecker.utils.reference_metadata import attach_bibliography_sources, cited_metadata_changed
 
 
 @pytest.mark.parametrize('field,value', [
@@ -50,3 +50,48 @@ def test_author_order_change_requires_verification():
 ])
 def test_changes_to_distinct_alias_values_require_verification(before, after):
     assert cited_metadata_changed(before, after)
+
+
+def test_initial_spacing_is_equivalent_but_a_fused_surname_changes_the_citation():
+    source = {'authors': ['R. A. Marques Lameirinhas']}
+    assert not cited_metadata_changed(source, {'authors': ['R.A.Marques Lameirinhas']})
+    assert cited_metadata_changed(source, {'authors': ['R.A.MarquesLameirinhas']})
+
+
+def test_numbered_entry_restores_missing_author_and_records_original_values():
+    raw = '[21] S. Rühle, “A photovoltaic study,”Solar Energy, vol. 130, 2016.'
+    parsed = {'entry_number': 21, 'title': 'A photovoltaic study', 'authors': ['Unknown Author']}
+
+    [reference] = attach_bibliography_sources([parsed], raw, 'regex')
+
+    assert reference['authors'] == ['S. Rühle']
+    assert reference['venue'] == 'Solar Energy'
+    evidence = reference['extraction_provenance']
+    assert evidence['source_text'] == raw
+    assert evidence['parsed_fields']['authors'] == ['Unknown Author']
+    assert evidence['repairs'][0] == {
+        'field': 'authors', 'before': ['Unknown Author'], 'after': ['S. Rühle'],
+        'reason': 'bibliography_authors',
+    }
+
+
+def test_competing_authors_are_flagged_and_retained_for_review():
+    raw = '[12] S. Rühle, “A photovoltaic study,” Solar Energy, 2016.'
+    parsed = {'title': 'A photovoltaic study', 'authors': ['T. Schmidt']}
+
+    [reference] = attach_bibliography_sources([parsed], raw, 'llm')
+
+    assert reference['authors'] == ['T. Schmidt']
+    assert reference['extraction_provenance']['review']['authors'] == {
+        'parsed': ['T. Schmidt'], 'source': ['S. Rühle'],
+    }
+
+
+def test_unmatched_model_output_is_not_used_as_source_evidence():
+    raw = '[12] S. Rühle, “A photovoltaic study,” Solar Energy, 2016.'
+    parsed = {'title': 'Different study', 'raw_text': '[12] S. Rühle. Different study.'}
+
+    [reference] = attach_bibliography_sources([parsed], raw, 'llm')
+
+    assert 'source_text' not in reference['extraction_provenance']
+    assert 'entry_number' not in reference

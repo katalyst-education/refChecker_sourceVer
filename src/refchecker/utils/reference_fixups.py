@@ -193,6 +193,7 @@ def fixup_reference_fields(reference):
     title = reference.get('title', '') or ''
     authors = reference.get('authors', []) or []
     venue = reference.get('venue', '') or ''
+    original = {field: reference.get(field) for field in ('title', 'authors', 'venue')}
 
     # --- Venue-as-title ---
     if title and any(re.search(p, title, re.IGNORECASE) for p in _VENUE_AS_TITLE_PATTERNS):
@@ -234,6 +235,16 @@ def fixup_reference_fields(reference):
 
     # --- Citation-tail-as-venue ---
     strip_citation_tail_from_venue(reference)
+
+    if any(reference.get(field) != value for field, value in original.items()):
+        from refchecker.utils.reference_metadata import record_extraction_change, record_extraction_source
+
+        if 'extraction_provenance' not in reference:
+            reference['extraction_provenance'] = record_extraction_source(
+                {**reference, **original}, 'unknown',
+            )
+        for field, value in original.items():
+            record_extraction_change(reference, field, value, reference.get(field), 'field_cleanup')
 
 
 __all__ = [

@@ -142,7 +142,7 @@ def extract_refs_via_grobid(pdf_path: str) -> List[Dict[str, Any]]:
         # grounded in what the PDF actually says.
         for note in bib.iter(f'{ns}note'):
             if (note.get('type') or '').lower() in {'raw_reference', 'raw citation', 'raw_citation'}:
-                ref["raw_text"] = " ".join("".join(note.itertext()).split())
+                ref["raw_text"] = "".join(note.itertext()).strip()
                 break
         for pers in bib.iter(f'{ns}persName'):
             forenames = [fn.text for fn in pers.iter(f'{ns}forename') if fn.text]
