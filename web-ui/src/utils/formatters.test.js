@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { applyStatusFilter, buildReferenceSummary } from './referenceStatus'
-import { classifyCorrectionReference } from './correctionUtils'
+import { classifyCorrectionReference, hasActionableCorrection } from './correctionUtils'
 import { exportResultsAsJsonl, filterIssuesForStyle } from './formatters'
 import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue, exportReferenceAsBibtex, exportReferenceAsStyle, exportResultsAsMarkdown, normalizeAuthors, isEtAlSentinel, hasEtAlSentinel, plural, countLabel } from './formatters'
 
@@ -315,6 +315,34 @@ describe('formatters', () => {
         'A. Sinha, P. K. S, R. Balaji, N. Bhatt,',
       )
     })
+
+    it.each([false, true])(
+      'preserves handbook contributors when an author is missing from a catalogue list',
+      (hasSavedCorrection) => {
+        const authors = ['J. W. Fleming', 'M. J. Weber', 'G. W. Day', 'A. Feldman', 'B. H. Chai', 'M. G. Kuzyk', 'et al.']
+        const correctedReference = hasSavedCorrection ? { authors: ['Marvin J. Weber', ...authors.slice(1)] } : null
+        const ref = {
+          title: 'Handbook of optical materials',
+          authors,
+          year: 2018,
+          venue: 'CRC Press',
+          warnings: [{
+            error_type: 'author',
+            error_details: 'Author 1 mismatch\n       cited: J. W. Fleming (not found in author list - et al case)\n       actual: Marvin J. Weber',
+            actual_value: 'Marvin J. Weber',
+          }],
+          authoritative_urls: [{ type: 'book', url: 'https://openlibrary.org/works/OL25118960W' }],
+          corrected_reference: correctedReference,
+        }
+        const ieee = exportReferenceAsStyle(ref, 'ieee')
+        expect(ieee).toContain(authors.slice(0, -1).join(', '))
+        expect(ieee.match(/Weber/g)).toHaveLength(1)
+        expect(hasActionableCorrection(ref, 'ieee')).toBe(false)
+        expect(hasActionableCorrection({
+          ...ref, corrected_reference: { ...correctedReference, year: 2003 },
+        }, 'ieee')).toBe(true)
+      },
+    )
 
     it('preserves every compact dotted initial in an as-cited IEEE reference', () => {
       const ref = {

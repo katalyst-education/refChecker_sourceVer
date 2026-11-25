@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from backend.reference_status import classify_verification_result
 from backend.reference_urls import build_authoritative_urls
+from refchecker.utils.error_utils import is_author_list_membership_mismatch
 from refchecker.utils.reference_metadata import CITED_REFERENCE_FIELDS, REFERENCE_SOURCE_FIELDS
 from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
 
@@ -43,6 +44,23 @@ def _cited_author_list(value: Any) -> List[str]:
     if isinstance(value, str):
         return [part.strip() for part in value.split(",") if part.strip()]
     return []
+
+
+def safe_correction_candidate(candidate: Any, findings: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Drop author replacements inferred from list-only comparison evidence."""
+    if not isinstance(candidate, dict):
+        return None
+    if "authors" not in candidate:
+        return candidate
+    issues = [issue for issue in findings if isinstance(issue, dict)]
+    if any(issue.get("requires_user_confirmation") for issue in issues):
+        return candidate
+    if any(
+        is_author_list_membership_mismatch(str(issue.get("error_details") or issue.get("warning_details") or ""))
+        for issue in issues
+    ):
+        return {key: value for key, value in candidate.items() if key != "authors"} or None
+    return candidate
 
 
 def derive_corrected_reference(
@@ -75,6 +93,8 @@ def derive_corrected_reference(
         if issue_type not in {"author", "authors"}:
             continue
         details = str(issue.get("error_details") or issue.get("warning_details") or "")
+        if is_author_list_membership_mismatch(details):
+            continue
         match = _AUTHOR_POSITION_MISMATCH.search(details)
         if not match:
             continue

@@ -32,10 +32,15 @@ from backend.auth import is_multiuser_mode
 from backend.database import get_data_dir
 from backend.reference_status import classify_verification_result
 
-from refchecker.utils.text_utils import extract_latex_references
+from refchecker.utils.text_utils import compare_authors, extract_latex_references
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
 from backend.reference_urls import build_authoritative_urls
-from backend.reference_result import project_cited_evidence, project_verification_result
+from backend.reference_result import (
+    project_cited_evidence,
+    project_verification_result,
+    safe_correction_candidate,
+)
+from refchecker.utils.error_utils import is_author_list_membership_mismatch
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.utils.extraction_quality import ground_pdf_references
 from refchecker.utils.publication_fields import STRUCTURED_CITATION_BASIS, journal_citation_locator
@@ -369,10 +374,16 @@ def _diff_cited_vs_truth(reference, truth):
             return [_first_surname(p) for p in parts[:n]]
         cited_surnames = _first_n_surnames(cited_authors_str)
         truth_surnames = _first_n_surnames(truth_authors_str)
-        if cited_surnames != truth_surnames:
+        cited_names = cited_authors if isinstance(cited_authors, list) else cited_authors_str.split(",")
+        _, comparison = compare_authors(cited_names, truth_authors_str.split(","))
+        membership_mismatch = is_author_list_membership_mismatch(comparison)
+        if membership_mismatch or cited_surnames != truth_surnames:
             warnings.append({
                 "warning_type": "authors",
-                "warning_details": "Author list disagrees with the cached verification of this paper",
+                "warning_details": (
+                    comparison if membership_mismatch
+                    else "Author list disagrees with the cached verification of this paper"
+                ),
                 "cited_value": cited_authors_str[:200],
                 "actual_value": truth_authors_str[:200],
             })
@@ -3594,6 +3605,11 @@ class ProgressRefChecker:
                     cached_result = suppress_redundant_arxiv_suggestions(
                         cached_result, reference,
                     )
+                    if cached_result.get("corrected_reference"):
+                        cached_result["corrected_reference"] = safe_correction_candidate(
+                            cached_result["corrected_reference"],
+                            [*(cached_result.get("errors") or []), *(cached_result.get("warnings") or [])],
+                        )
                     return cached_result
             except Exception as _e:
                 logger.debug("Global cache lookup skipped: %s", _e)

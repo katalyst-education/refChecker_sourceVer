@@ -83,10 +83,11 @@ class ReferenceSearchLimitReached(Exception):
 
 
 def _sanitize_loaded_reference_results(results: Any) -> Any:
-    """Remove obsolete citation-specific suggestions from stored check rows."""
+    """Refresh citation-specific suggestions and corrections in stored rows."""
     if not isinstance(results, list):
         return results
     from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
+    from backend.reference_result import safe_correction_candidate
 
     cleaned = []
     for ref in results:
@@ -104,6 +105,11 @@ def _sanitize_loaded_reference_results(results: Any) -> Any:
             "verified_doi": ref.get("verified_doi"),
         }
         normalized = suppress_redundant_arxiv_suggestions(ref, cited)
+        if normalized.get("corrected_reference"):
+            normalized["corrected_reference"] = safe_correction_candidate(
+                normalized["corrected_reference"],
+                [*(normalized.get("errors") or []), *(normalized.get("warnings") or [])],
+            )
         # Backfill the explicit state for decisions stored before
         # `match_decision` existed. Those rows already recorded the rejected
         # confirmation warning, but still carried an active correction and

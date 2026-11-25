@@ -5513,13 +5513,14 @@ def extract_latex_references(text, file_path=None):  # pylint: disable=unused-ar
     return references
 
 
-def _extract_corrected_reference_data(error_entry: dict, corrected_data: dict) -> dict:
+def _extract_corrected_reference_data(error_entry: dict, corrected_data: dict, original_reference: dict) -> dict:
     """
     Extract corrected reference data from error entry and corrected data.
     
     Args:
         error_entry: Error entry containing corrected reference information
         corrected_data: Verified data from API response
+        original_reference: Citation before verification
         
     Returns:
         Dictionary containing corrected reference information
@@ -5529,6 +5530,9 @@ def _extract_corrected_reference_data(error_entry: dict, corrected_data: dict) -
     
     # Handle authors - can be string or list of dicts from API
     authors_raw = error_entry.get('ref_authors_correct') or corrected_data.get('authors', '')
+    from refchecker.utils.error_utils import is_author_list_membership_mismatch
+    if is_author_list_membership_mismatch(str(error_entry.get('error_details') or error_entry.get('warning_details') or '')):
+        authors_raw = original_reference.get('authors') or ''
     if isinstance(authors_raw, list):
         # Convert list of author dicts to comma-separated string
         if authors_raw and isinstance(authors_raw[0], dict):
@@ -5589,7 +5593,7 @@ def format_corrected_bibtex(original_reference, corrected_data, error_entry):
     """Format a corrected BibTeX entry in the same style as the original"""
     
     # Get the corrected information using shared utility
-    corrected_ref = _extract_corrected_reference_data(error_entry, corrected_data)
+    corrected_ref = _extract_corrected_reference_data(error_entry, corrected_data, original_reference)
     correct_title = corrected_ref['title']
     correct_authors = corrected_ref['authors'] 
     correct_year = corrected_ref['year']
@@ -5661,7 +5665,7 @@ def format_corrected_bibitem(original_reference, corrected_data, error_entry):
     """Format a corrected \\bibitem entry"""
     
     # Get the corrected information using shared utility
-    corrected_ref = _extract_corrected_reference_data(error_entry, corrected_data)
+    corrected_ref = _extract_corrected_reference_data(error_entry, corrected_data, original_reference)
     correct_title = corrected_ref['title']
     correct_authors = corrected_ref['authors'] 
     correct_year = corrected_ref['year']
@@ -5712,7 +5716,7 @@ def format_corrected_plaintext(original_reference, corrected_data, error_entry):
     """Format a corrected plaintext citation"""
     
     # Get the corrected information using shared utility
-    corrected_ref = _extract_corrected_reference_data(error_entry, corrected_data)
+    corrected_ref = _extract_corrected_reference_data(error_entry, corrected_data, original_reference)
     correct_title = corrected_ref['title']
     correct_authors = corrected_ref['authors'] 
     correct_year = corrected_ref['year']

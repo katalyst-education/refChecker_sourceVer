@@ -686,6 +686,28 @@ export function filterIssuesForStyle(issues, ref, style) {
 }
 
 
+function isAuthorListMembershipMismatch(issue) {
+  const details = issue.error_details || issue.warning_details || ''
+  return /\((not found in author list - et al case|expected author not found in cited list)\)/i.test(details)
+}
+
+export function hasAuthorListMembershipMismatch(ref) {
+  return [...(ref.errors || []), ...(ref.warnings || [])].some(isAuthorListMembershipMismatch)
+}
+
+function getCorrectionCandidate(ref) {
+  const candidate = ref.corrected_reference && typeof ref.corrected_reference === 'object'
+    ? ref.corrected_reference
+    : {}
+  if (!candidate.authors || !hasAuthorListMembershipMismatch(ref)
+    || [...(ref.errors || []), ...(ref.warnings || [])].some(issue => issue.requires_user_confirmation)) {
+    return candidate
+  }
+  const safeCandidate = { ...candidate }
+  delete safeCandidate.authors
+  return safeCandidate
+}
+
 function getCorrectedReferenceData(ref) {
   // Verifier may attach typed URLs (doi, arxiv, journal) in
   // authoritative_urls. Surface them so the URL picker can prefer DOI
@@ -712,9 +734,7 @@ function getCorrectedReferenceData(ref) {
     return null
   })()
 
-  const candidate = ref.corrected_reference && typeof ref.corrected_reference === 'object'
-    ? ref.corrected_reference
-    : {}
+  const candidate = getCorrectionCandidate(ref)
   const hasCandidateValue = (field) => (
     candidate[field] !== undefined && candidate[field] !== null && candidate[field] !== ''
   )
@@ -724,7 +744,7 @@ function getCorrectedReferenceData(ref) {
     // each supplied field when individual issue messages contain abbreviated
     // or partial values from a lower-quality source.
     title: decodeReferenceText(candidate.title || ref.title),
-    authors: candidate.authors || ref.authors,
+    authors: candidate.authors || (hasAuthorListMembershipMismatch(ref) ? ref.cited_metadata?.authors ?? ref.authors : ref.authors),
     year: displayReferenceValue(decodeReferenceText(candidate.year || ref.year)),
     venue: displayReferenceValue(decodeReferenceText(candidate.venue || ref.venue)),
     doi: decodeReferenceText(candidate.doi)
@@ -738,6 +758,7 @@ function getCorrectedReferenceData(ref) {
   
   for (const issue of allIssues) {
     const errorType = (issue.error_type || issue.warning_type || '').toLowerCase()
+    if (isAuthorListMembershipMismatch(issue)) continue
     const candidateField = {
       title: 'title', author: 'authors', authors: 'authors', year: 'year',
       venue: 'venue', doi: 'doi', arxiv_id: 'arxiv_id',
@@ -1841,7 +1862,7 @@ function _citedShellForDiff(ref) {
 }
 
 function _correctedShellForDiff(ref) {
-  const c = ref.corrected_reference || {}
+  const c = getCorrectionCandidate(ref)
   return {
     title: c.title || ref.title,
     authors: c.authors || ref.authors,
@@ -1853,8 +1874,7 @@ function _correctedShellForDiff(ref) {
 }
 
 function _refHasCorrection(ref) {
-  const c = ref.corrected_reference
-  if (!c || typeof c !== 'object') return false
+  const c = getCorrectionCandidate(ref)
   return Object.keys(c).some(k => c[k] != null && c[k] !== '')
 }
 

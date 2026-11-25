@@ -1,4 +1,4 @@
-import { exportReferenceAsStyle } from './formatters'
+import { exportReferenceAsStyle, hasAuthorListMembershipMismatch } from './formatters'
 import { getEffectiveReferenceStatus } from './referenceStatus'
 
 /** Categories used consistently by the Corrections list and its tab count. */
@@ -37,7 +37,9 @@ export function citedReferenceShell(ref) {
 export function hasActionableCorrection(ref, style, index = 0, options = null) {
   try {
     const cited = exportReferenceAsStyle(citedReferenceShell(ref), style, index, options).trim()
-    const suggested = exportReferenceAsStyle(ref, style, index, options).trim()
+    // A catalogue link alone does not resolve a contributor-list discrepancy.
+    const previewRef = hasAuthorListMembershipMismatch(ref) ? { ...ref, authoritative_urls: [] } : ref
+    const suggested = exportReferenceAsStyle(previewRef, style, index, options).trim()
     return cited !== suggested
   } catch {
     // A formatter failure must not silently hide a potentially editable row.

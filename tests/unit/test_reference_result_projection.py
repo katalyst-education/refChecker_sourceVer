@@ -1,11 +1,18 @@
 """Contracts for the result shape shared by scan and single-ref rechecks."""
 
+from unittest.mock import AsyncMock
+
+import pytest
+
+from backend.database import _sanitize_loaded_reference_results
+from backend.refchecker_wrapper import _diff_cited_vs_truth
 from backend.reference_result import (
     citation_verification_input,
     derive_corrected_reference,
     merge_fresh_verification,
     project_verification_result,
 )
+from refchecker.utils.text_utils import compare_authors, format_corrected_reference
 
 
 def _reference():
@@ -119,3 +126,74 @@ def test_projection_exposes_author_position_correction_for_apply_fix():
     assert result["corrected_reference"] == {
         "authors": ["A. Sinha", "Pavan Kumar S", "R. Balaji", "N. Bhatt"],
     }
+
+
+def test_handbook_membership_warning_preserves_the_cited_contributors():
+    authors = ["J. W. Fleming", "M. J. Weber", "G. W. Day", "et al."]
+    reference = {"title": "Handbook of optical materials", "authors": authors}
+    verified = {"title": reference["title"], "authors": ["Marvin J. Weber"]}
+    matches, details = compare_authors(authors, verified["authors"])
+    assert not matches
+    finding = {"warning_type": "author", "warning_details": details}
+
+    result = project_verification_result(reference, verified, [finding], None, enrich_enabled=False)
+    assert result["status"] == "warning"
+    assert result["warnings"][0]["error_details"] == details
+    assert result["authors"] == result["cited_metadata"]["authors"] == authors
+    assert result["verified_authors"] == ["Marvin J. Weber"]
+    assert result["corrected_reference"] is None
+    assert derive_corrected_reference(reference, [finding]) is None
+    assert ", ".join(authors) in format_corrected_reference(reference, verified, finding)
+
+    errors, warnings = _diff_cited_vs_truth(reference, {"authors": "Marvin J. Weber"})
+    assert errors == []
+    assert warnings[0]["warning_details"] == details
+    assert derive_corrected_reference(reference, warnings) is None
+
+    [loaded] = _sanitize_loaded_reference_results([{
+        **result,
+        "corrected_reference": {"authors": ["Marvin J. Weber", *authors[1:]], "year": 2018},
+    }])
+    assert loaded["corrected_reference"] == {"year": 2018}
+    assert loaded["cited_metadata"]["authors"] == authors
+
+
+def test_truncated_database_author_list_is_also_review_only():
+    authors = ["J. W. Fleming", "G. W. Day"]
+    matches, details = compare_authors(authors, ["Marvin J. Weber", "et al."])
+    assert not matches
+    assert derive_corrected_reference(
+        {"authors": authors}, [{"error_type": "author", "error_details": details}]
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_apply_fix_cannot_use_a_saved_membership_warning_as_an_author_replacement(monkeypatch):
+    from backend import main
+
+    authors = ["J. W. Fleming", "M. J. Weber", "et al."]
+    verified = ["Marvin J. Weber"]
+    _, details = compare_authors(authors, verified)
+    reference = {
+        "index": 84,
+        "ref_uid": "ref-handbook",
+        "title": "Handbook of optical materials",
+        "authors": authors,
+        "warnings": [{"error_type": "author", "error_details": details}],
+        "status": "warning",
+        "verified_authors": verified,
+        "corrected_reference": {"authors": ["Marvin J. Weber", "M. J. Weber", "et al."]},
+    }
+    monkeypatch.setattr(main.db, "get_check_references", AsyncMock(return_value=[reference]))
+    monkeypatch.setattr(main.db, "lookup_verified_reference", AsyncMock(return_value={"result": reference}))
+    monkeypatch.setattr(main.db, "replace_check_reference_if_unchanged", AsyncMock(return_value="saved"))
+    user = main.UserInfo(id=0, name="Local", provider="local", is_admin=True)
+
+    response = await main.verify_single_reference(
+        25, "uid:ref-handbook", main._VerifySingleRequest(apply_correction=True), user,
+    )
+
+    verification_input = main.db.lookup_verified_reference.call_args.args[0]
+    assert verification_input["authors"] == authors
+    assert response["reference"]["authors"] == authors
+    assert response["reference"]["corrected_reference"] is None

@@ -491,6 +491,15 @@ def format_author_mismatch(author_number: int, cited_author: str, correct_author
     return format_three_line_mismatch(f"Author {author_number} mismatch", cited_author, correct_author)
 
 
+def is_author_list_membership_mismatch(details: str) -> bool:
+    """Recognize author findings whose actual value is a list checked for membership."""
+    details = details.lower()
+    return (
+        "(not found in author list - et al case)" in details
+        or "(expected author not found in cited list)" in details
+    )
+
+
 def format_potential_author_misspelling(author_number: int, cited_author: str, correct_author: str) -> str:
     """Format a likely misspelling-style author mismatch as a warning message."""
     return format_three_line_mismatch(

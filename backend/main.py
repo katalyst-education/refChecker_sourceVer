@@ -71,9 +71,11 @@ from .reference_status import classify_verification_result, split_errors_and_war
 from .reference_urls import build_authoritative_urls
 from .reference_result import (
     citation_verification_input,
+    derive_corrected_reference,
     merge_fresh_verification,
     project_cited_evidence,
     project_verification_result,
+    safe_correction_candidate,
 )
 from .reference_matching import find_reextracted_reference_index
 from .reference_editing import (
@@ -9004,15 +9006,12 @@ async def _verify_single_reference_impl(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if body and body.apply_correction:
-        corrected = target.get("corrected_reference") or {}
+        findings = [*(target.get("errors") or []), *(target.get("warnings") or [])]
+        corrected = safe_correction_candidate(target.get("corrected_reference"), findings) or {}
         # Older saved checks predate stored correction payloads. A positional
         # author fix also supersedes any stale one-name payload: Apply Fix
         # updates the named author while retaining every other cited author.
-        from backend.reference_result import derive_corrected_reference
-        derived_correction = derive_corrected_reference(
-            target,
-            [*(target.get("errors") or []), *(target.get("warnings") or [])],
-        )
+        derived_correction = derive_corrected_reference(target, findings)
         if derived_correction:
             corrected = {**corrected, **derived_correction}
         if isinstance(corrected, dict) and corrected:
@@ -9211,6 +9210,11 @@ async def _verify_single_reference_impl(
         updated["index"] = target.get("index")
         updated["ref_uid"] = target.get("ref_uid")
         updated["from_cache"] = True
+        if updated.get("corrected_reference"):
+            updated["corrected_reference"] = safe_correction_candidate(
+                updated["corrected_reference"],
+                [*(updated.get("errors") or []), *(updated.get("warnings") or [])],
+            )
         decision = await db.replace_check_reference_if_unchanged(check_id, original_reference, updated, user_id=user_id)
         if decision != 'saved':
             raise HTTPException(status_code=409, detail='The reference changed during verification; its newer data was preserved.')
