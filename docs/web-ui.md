@@ -40,6 +40,14 @@ Each extracted reference is checked through the shared source pipeline. The UI d
 - errors for substantive metadata conflicts;
 - unverified results when no reliable source match is available.
 
+DBLP and Springer Nature each have a request budget per reference. They retry
+temporary failures within that budget. Three failed lookups without a successful
+response pause the provider for 60 seconds across checks in the running app. After the pause,
+one request tests recovery. A successful response resets the pause, and another
+failure doubles the delay up to 15 minutes. Rate-limit responses use
+`Retry-After` when the provider supplies it. Search all DBs shows a reason for a
+skipped provider and continues with the other sources.
+
 ## Configuration
 
 Provider credentials can be stored through Settings or supplied as environment variables. Local and hosted modes share the same request schema and core defaults. API keys are optional unless a selected provider requires one.

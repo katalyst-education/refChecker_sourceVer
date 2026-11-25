@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from refchecker.checkers.provider_retry import ProviderRetryPolicy, ProviderUnavailable
 from refchecker.utils.text_utils import (
     clean_title_for_search,
     normalize_text,
@@ -50,19 +51,22 @@ class DBLPReferenceChecker:
     REQUEST_TIMEOUT = 15
     # DBLP asks for ≤1 req/s for unauthenticated clients
     MIN_REQUEST_INTERVAL = 1.1
+    manages_retries = True
+    _retry_policy = ProviderRetryPolicy()
 
-    def __init__(self, email: Optional[str] = None):
+    def __init__(self, email: Optional[str] = None, *, wait=time.sleep):
         self.session = requests.Session()
         self.session.headers.update({
             'Accept': 'application/json',
             'User-Agent': 'RefChecker/1.0.0 (https://github.com/markrussinovich/refchecker)',
         })
         self._last_request_time = 0.0
+        self._wait = wait
 
     def _throttle(self) -> None:
         elapsed = time.time() - self._last_request_time
         if elapsed < self.MIN_REQUEST_INTERVAL:
-            time.sleep(self.MIN_REQUEST_INTERVAL - elapsed)
+            self._wait(self.MIN_REQUEST_INTERVAL - elapsed)
 
     def _search(self, query: str, max_hits: int = 5) -> List[Dict[str, Any]]:
         from refchecker.utils.cache_utils import cached_api_response, cache_api_response
@@ -75,30 +79,23 @@ class DBLPReferenceChecker:
         return result
 
     def _search_uncached(self, query: str, max_hits: int = 5) -> List[Dict[str, Any]]:
-        self._throttle()
         params = {
             'q': query,
             'format': 'json',
             'h': max_hits,
         }
-        last_exc = None
-        for attempt in range(2):
+
+        def fetch(_attempt):
             try:
-                resp = self.session.get(self.BASE_URL, params=params, timeout=self.REQUEST_TIMEOUT)
+                return self.session.get(self.BASE_URL, params=params, timeout=self.REQUEST_TIMEOUT)
+            finally:
                 self._last_request_time = time.time()
-                resp.raise_for_status()
-                data = resp.json()
-                result = data.get('result', {})
-                hits_wrapper = result.get('hits', {})
-                hits = hits_wrapper.get('hit', [])
-                return hits if isinstance(hits, list) else []
-            except requests.exceptions.RequestException as exc:
-                last_exc = exc
-                if attempt == 0:
-                    logger.debug(f'DBLP: search attempt {attempt+1} failed ({exc}), retrying...')
-                    time.sleep(2)
-        logger.debug(f'DBLP: search failed after retries: {last_exc}')
-        raise last_exc
+
+        def parse(response):
+            hits = response.json().get('result', {}).get('hits', {}).get('hit', [])
+            return hits if isinstance(hits, list) else []
+
+        return self._retry_policy.run(self.BASE_URL, fetch, parse, attempts=2, wait=self._wait, pace=self._throttle)
 
     def verify_reference(
         self, reference: Dict[str, Any]
@@ -116,12 +113,8 @@ class DBLPReferenceChecker:
 
         try:
             hits = self._search(search_title)
-        except requests.exceptions.RequestException as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            finding = {'error_type': 'api_failure', 'error_details': 'DBLP API request failed'}
-            if status is not None:
-                finding['http_status'] = status
-            return None, [finding], None
+        except ProviderUnavailable as exc:
+            return None, [exc.finding()], None
 
         if not hits:
             logger.debug(f'DBLP: no results for "{search_title}"')

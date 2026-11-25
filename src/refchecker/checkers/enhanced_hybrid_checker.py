@@ -228,6 +228,7 @@ class EnhancedHybridReferenceChecker:
                 'SpringerNatureReferenceChecker',
                 'Springer Nature Meta API',
                 api_key=springer_nature_api_key,
+                wait=self._wait_or_cancel,
             )
 
         self.open_library = None
@@ -285,7 +286,8 @@ class EnhancedHybridReferenceChecker:
         
         # Initialize DBLP checker (curated CS bibliography, strong for conferences)
         self.dblp = self._initialize_checker(
-            'dblp', 'DBLPReferenceChecker', 'DBLP checker', email=contact_email
+            'dblp', 'DBLPReferenceChecker', 'DBLP checker', email=contact_email,
+            wait=self._wait_or_cancel,
         )
         
         # Initialize ACL Anthology checker (NLP/CL bibliography)
@@ -1298,6 +1300,8 @@ class EnhancedHybridReferenceChecker:
         if negative_attempts:
             return f"Paper not found by any checker; no match in {', '.join(negative_attempts)}"
         if failure_details:
+            if all(api.get('failure_type') == 'provider_paused' for api in failed_apis):
+                return f"Database searches were skipped: {'; '.join(failure_details)}"
             return f"All available checkers failed: {'; '.join(failure_details)}"
         return 'Paper not found by any checker'
     
@@ -1320,7 +1324,11 @@ class EnhancedHybridReferenceChecker:
         sem = self._api_semaphores.get(api_name)
         sem_wait_start = time.time()
         if sem is not None:
-            sem.acquire()
+            if getattr(self, 'cancel_event', None) is None:
+                sem.acquire()
+            else:
+                while not sem.acquire(timeout=0.1):
+                    self._raise_if_cancelled()
         sem_wait = time.time() - sem_wait_start
         
         start_time = time.time()
@@ -1345,18 +1353,20 @@ class EnhancedHybridReferenceChecker:
         )
         
         try:
+            self._raise_if_cancelled()
             verified_data, errors, url = api_instance.verify_reference(reference)
             self._raise_if_cancelled()
             duration = time.time() - start_time
             
-            # Check if we got API failure errors indicating retryable failure
+            # Separate unavailable providers from bibliographic findings.
             api_failure_errors = [err for err in errors if err.get('error_type') == 'api_failure']
             if api_failure_errors:
-                # This is a retryable API failure, not a verification result
-                self._update_api_stats(api_name, False, duration)
                 failure = api_failure_errors[0]
                 status_code = failure.get('http_status')
-                failure_type = 'throttled' if status_code == 429 else 'api_failure'
+                skipped = failure.get('provider_skipped', False)
+                if not skipped:
+                    self._update_api_stats(api_name, False, duration)
+                failure_type = 'provider_paused' if skipped else 'throttled' if status_code == 429 else 'api_failure'
                 if failure_type == 'throttled':
                     self.api_stats[api_name]['throttled'] += 1
                 api_failure_detail = failure.get('error_details', 'temporary API failure')
@@ -1370,9 +1380,10 @@ class EnhancedHybridReferenceChecker:
                 logger.debug(f"Enhanced Hybrid: {api_name} API failed in {duration:.2f}s: {api_failure_detail}")
                 self._emit_database_event(
                     database=api_name, label=self._format_api_name(api_name),
-                    status='rate_limited' if failure_type == 'throttled' else 'failed',
+                    status='not_searched' if skipped else 'rate_limited' if failure_type == 'throttled' else 'failed',
                     attempt=2 if is_retry else 1,
                     duration_ms=round(duration * 1000),
+                    reason=api_failure_detail,
                 )
                 return None, [], None, False, failure_type, self._format_failure_detail(
                     api_name,
@@ -3217,7 +3228,9 @@ class EnhancedHybridReferenceChecker:
             # Sort failed APIs to prioritize Semantic Scholar retries
             retryable_failures = [
                 api for api in failed_apis
-                if api.get('failure_type') in ('api_failure', 'throttled', 'timeout', 'server_error') and api.get('active', True)
+                if api.get('failure_type') in ('api_failure', 'throttled', 'timeout', 'server_error')
+                and api.get('active', True)
+                and getattr(api['instance'], 'manages_retries', False) is not True
             ]
             semantic_scholar_retries = [api for api in retryable_failures if api['name'] == 'semantic_scholar']
             other_retries = [api for api in retryable_failures if api['name'] != 'semantic_scholar']
@@ -3309,7 +3322,8 @@ class EnhancedHybridReferenceChecker:
         failed_count = len(active_failures)
         failed_api_names = {api['name'] for api in active_failures}
         failure_reason = self._build_unverified_error_details(attempted_apis, active_failures)
-        sources_checked = len(attempted_apis)
+        skipped_names = {api['name'] for api in active_failures if api.get('failure_type') == 'provider_paused'}
+        sources_checked = sum(api_name not in skipped_names for api_name in attempted_apis)
         sources_negative = len([api_name for api_name in attempted_apis if api_name not in failed_api_names])
         search_finding = {
             'error_type': 'unverified',
@@ -3320,7 +3334,7 @@ class EnhancedHybridReferenceChecker:
         }
         
         if failed_count > 0:
-            logger.debug(f"Enhanced Hybrid: Verification ended with {failed_count} active checker failures after {sources_checked} attempts")
+            logger.debug("Enhanced Hybrid: %d unavailable sources after %d checker lookups", failed_count, sources_checked)
         else:
             logger.debug("Enhanced Hybrid: All available APIs failed to verify reference")
         

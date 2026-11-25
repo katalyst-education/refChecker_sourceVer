@@ -2,7 +2,11 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
+from refchecker.checkers.dblp import DBLPReferenceChecker
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
+from refchecker.checkers.provider_retry import ProviderRetryPolicy
 from refchecker.checkers.springer_nature import SpringerNatureReferenceChecker
 
 
@@ -117,12 +121,16 @@ def test_429_starts_cooldown_without_retrying(tmp_path, monkeypatch):
         quota_state_path=str(tmp_path / "springer-quota.sqlite3"),
     )
     monkeypatch.setattr(checker, "_wait_for_slot", lambda: None)
+    monkeypatch.setattr(checker, "_retry_policy", ProviderRetryPolicy())
 
     with patch("refchecker.checkers.springer_nature.requests.get", return_value=response) as get:
-        assert checker.search_records('title:"limited"') == []
-        assert checker.search_records('title:"another"') == []
+        _, limited, _ = checker.verify_reference({'title': 'Limited lookup'})
+        _, skipped, _ = checker.verify_reference({'title': 'Another lookup'})
 
     assert get.call_count == 1
+    assert limited[0]['http_status'] == 429
+    assert '120s' in limited[0]['error_details']
+    assert skipped[0]['provider_skipped'] is True
 
 
 def test_403_content_restriction_is_not_retried(tmp_path, monkeypatch):
@@ -134,9 +142,10 @@ def test_403_content_restriction_is_not_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(checker, "_wait_for_slot", lambda: None)
 
     with patch("refchecker.checkers.springer_nature.requests.get", return_value=response) as get:
-        assert checker.search_records('"restricted record"') == []
+        _, findings, _ = checker.verify_reference({'title': 'Restricted record'})
 
     assert get.call_count == 1
+    assert findings[0]['http_status'] == 403
 
 
 def test_title_search_uses_basic_plan_exact_phrases():
@@ -313,3 +322,46 @@ def test_search_all_still_queries_springer_after_primary_match():
     checker._verify_reference_core(reference, force_all_databases=True)
 
     assert len(checker.springer_nature.calls) == 1
+
+
+@pytest.mark.parametrize(('provider', 'attempts'), [('dblp', 2), ('springer_nature', 3)])
+def test_search_all_uses_provider_budget_and_shares_pause_across_checks(provider, attempts, tmp_path, monkeypatch):
+    responses = Mock(return_value=Mock(status_code=503, headers={}))
+    checker_type = DBLPReferenceChecker if provider == 'dblp' else SpringerNatureReferenceChecker
+    monkeypatch.setattr(checker_type, '_retry_policy', ProviderRetryPolicy())
+    events = []
+
+    def build_search():
+        checker = _routing_checker()
+        checker.semantic_scholar = _RecordingProvider((None, [], None))
+        checker.progress_callback = events.append
+        if provider == 'dblp':
+            connector = DBLPReferenceChecker(wait=lambda _: None)
+            connector.session.get = responses
+        else:
+            connector = SpringerNatureReferenceChecker(
+                api_key='retry-budget-test', wait=lambda _: None,
+                quota_state_path=str(tmp_path / 'springer-quota.sqlite3'),
+            )
+            connector.max_retries = attempts
+            monkeypatch.setattr('refchecker.checkers.springer_nature.requests.get', responses)
+            monkeypatch.setattr(connector, '_wait_for_slot', lambda: None)
+        setattr(checker, provider, connector)
+        return checker
+
+    first = build_search()
+    for index in range(3):
+        first.verify_reference({'title': f'Unmatched sample paper {index}'}, force_all_databases=True)
+    assert responses.call_count == attempts * 3
+
+    second = build_search()
+    events.clear()
+    data, findings, _ = second.verify_reference({'title': 'Paper from a new check'}, force_all_databases=True)
+    assert data is None
+    assert 'Skipped during provider cooldown' in findings[0]['error_details']
+    assert findings[0]['verification_reason'] == 'provider_failure'
+    assert findings[0]['sources_checked'] == 1
+    assert responses.call_count == attempts * 3
+    assert len(second.semantic_scholar.calls) == 1
+    assert any(event['database'] == provider and event['status'] == 'not_searched'
+               and 'cooldown' in event['reason'] for event in events)

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from refchecker.checkers.provider_retry import ProviderRetryPolicy, ProviderUnavailable, retry_after_seconds
 from refchecker.config.settings import get_config
 from refchecker.utils.doi_utils import compare_dois
 from refchecker.utils.error_utils import create_author_error, create_venue_warning, validate_year
@@ -40,6 +41,9 @@ class SpringerNatureReferenceChecker:
     _fallback_quota_lock = threading.Lock()
     _fallback_request_times: Dict[str, List[float]] = {}
     _fallback_cooldowns: Dict[str, float] = {}
+    manages_retries = True
+    _retry_policy = ProviderRetryPolicy()
+    _rate_limit_fallback = 3600
 
     def __init__(
         self,
@@ -48,6 +52,7 @@ class SpringerNatureReferenceChecker:
         daily_request_limit: Optional[int] = None,
         minute_request_limit: Optional[int] = None,
         quota_state_path: Optional[str] = None,
+        wait=time.sleep,
     ) -> None:
         api_config = get_config().get("springer_nature", {})
         self.api_key = (
@@ -86,6 +91,7 @@ class SpringerNatureReferenceChecker:
         self.quota_state_path = quota_state_path
         self.max_retries = max(1, int(api_config.get("max_retries", 3)))
         self.timeout = max(1.0, float(api_config.get("timeout", 30)))
+        self._wait = wait
 
     @staticmethod
     def _float_setting(name: str, default: float, *, minimum: float) -> float:
@@ -220,33 +226,24 @@ class SpringerNatureReferenceChecker:
                 )
                 conn.execute(
                     "INSERT INTO springer_nature_cooldowns(key_id, blocked_until) "
-                    "VALUES (?, ?) ON CONFLICT(key_id) DO UPDATE SET blocked_until=excluded.blocked_until",
+                    "VALUES (?, ?) ON CONFLICT(key_id) DO UPDATE SET blocked_until=max(blocked_until, excluded.blocked_until)",
                     (self._key_id, blocked_until),
                 )
         except (OSError, sqlite3.Error):
             with type(self)._fallback_quota_lock:
-                type(self)._fallback_cooldowns[self._key_id] = blocked_until
-
-    @staticmethod
-    def _retry_after_seconds(response: requests.Response) -> float:
-        value = response.headers.get("Retry-After")
-        if value:
-            try:
-                return max(1.0, float(value))
-            except ValueError:
-                pass
-        # At RefChecker's conservative minute rate, a 429 without guidance is
-        # most likely the provider's daily allowance.  Avoid hammering it.
-        return 3600.0
+                cooldowns = type(self)._fallback_cooldowns
+                cooldowns[self._key_id] = max(cooldowns.get(self._key_id, 0), blocked_until)
 
     def _wait_for_slot(self) -> None:
         checker_type = type(self)
-        with checker_type._rate_lock:
-            now = time.monotonic()
-            wait = max(0.0, checker_type._next_request_at - now)
-            checker_type._next_request_at = max(now, checker_type._next_request_at) + self.request_delay
-        if wait:
-            time.sleep(wait)
+        while True:
+            with checker_type._rate_lock:
+                now = time.monotonic()
+                wait = checker_type._next_request_at - now
+                if wait <= 0:
+                    checker_type._next_request_at = now + self.request_delay
+                    return
+            self._wait(wait)
 
     @staticmethod
     def _clean_doi(value: Any) -> str:
@@ -317,8 +314,8 @@ class SpringerNatureReferenceChecker:
             query,
             page_size,
         )
-        for attempt in range(self.max_retries):
-            self._wait_for_slot()
+
+        def fetch(attempt):
             allowed, reason, detail = self._reserve_request()
             if not allowed:
                 logger.warning(
@@ -326,80 +323,33 @@ class SpringerNatureReferenceChecker:
                     reason,
                     detail,
                 )
-                return []
+                explanation = {
+                    'cooldown': 'the provider is cooling down',
+                    'daily_limit': 'the rolling daily request limit was reached',
+                    'minute_limit': 'the rolling minute request limit was reached',
+                }[reason]
+                remaining = f' ({detail}s remaining)' if detail else ''
+                raise ProviderUnavailable(f'Skipped because {explanation}{remaining}', skipped=True)
             logger.info(
                 "SPRINGER_NATURE_API_TRACE event=quota_reserved remaining_24h=%d",
                 detail,
             )
-            try:
-                response = requests.get(
-                    self.base_url,
-                    headers=self.headers,
-                    params=params,
-                    timeout=self.timeout,
-                )
-                logger.info(
-                    "SPRINGER_NATURE_API_TRACE event=response status=%d attempt=%d",
-                    response.status_code,
-                    attempt + 1,
-                )
-                if response.status_code == 429:
-                    cooldown = self._retry_after_seconds(response)
-                    self._set_cooldown(cooldown)
-                    logger.warning(
-                        "SPRINGER_NATURE_API_TRACE event=provider_limited cooldown_seconds=%d",
-                        int(cooldown),
-                    )
-                    return []
-                if response.status_code in (400, 403):
-                    # Basic keys can receive 403 for records outside their
-                    # content rights. Neither that nor a rejected query becomes
-                    # valid through retries, so preserve quota and continue
-                    # with RefChecker's other providers.
-                    logger.info(
-                        "SPRINGER_NATURE_API_TRACE event=request_rejected status=%d no_retry=true",
-                        response.status_code,
-                    )
-                    cache_api_response(
-                        getattr(self, "cache_dir", None),
-                        "springer_nature",
-                        "meta_v2",
-                        cache_key,
-                        [],
-                    )
-                    return []
-                if response.status_code == 401:
-                    # An invalid/inactive key affects every query; avoid
-                    # spending more requests for the rest of this run.
-                    self._set_cooldown(3600)
-                    logger.warning(
-                        "SPRINGER_NATURE_API_TRACE event=authentication_failed cooldown_seconds=3600"
-                    )
-                    return []
-                if response.status_code >= 500:
-                    if attempt < self.max_retries - 1:
-                        retry_after = response.headers.get("Retry-After")
-                        try:
-                            wait = float(retry_after) if retry_after else 2 ** attempt
-                        except ValueError:
-                            wait = 2 ** attempt
-                        time.sleep(min(30.0, max(0.0, wait)))
-                        continue
-                response.raise_for_status()
-                records = response.json().get("records") or []
-                cache_api_response(
-                    getattr(self, "cache_dir", None),
-                    "springer_nature",
-                    "meta_v2",
-                    cache_key,
-                    records,
-                )
-                return records
-            except requests.exceptions.RequestException:
-                if attempt >= self.max_retries - 1:
-                    raise
-                time.sleep(min(30.0, float(2 ** attempt)))
-        return []
+            response = requests.get(self.base_url, headers=self.headers, params=params, timeout=self.timeout)
+            logger.info("SPRINGER_NATURE_API_TRACE event=response status=%d attempt=%d", response.status_code, attempt)
+            if response.status_code == 429:
+                self._set_cooldown(retry_after_seconds(response, self._rate_limit_fallback))
+            elif response.status_code == 401:
+                self._set_cooldown(self._retry_policy.AUTH_COOLDOWN)
+            return response
+
+        records = self._retry_policy.run(
+            (self.base_url, self._key_id), fetch, lambda response: response.json().get("records") or [],
+            attempts=self.max_retries, wait=self._wait, pace=self._wait_for_slot,
+            rate_limit_delay=self._rate_limit_fallback,
+            query_rejections=(400, 403, 422),
+        )
+        cache_api_response(getattr(self, "cache_dir", None), "springer_nature", "meta_v2", cache_key, records)
+        return records
 
     @staticmethod
     def _year(value: Any) -> Optional[int]:
@@ -489,21 +439,8 @@ class SpringerNatureReferenceChecker:
 
         try:
             records = self.search_records(query)
-        except requests.exceptions.RequestException as exc:
-            # Request exception strings may include the fully prepared URL,
-            # including the query-parameter API key. Log only the exception
-            # class so credentials never enter logs.
-            logger.warning(
-                "Springer Nature API request failed (%s)",
-                type(exc).__name__,
-            )
-            finding = {
-                "error_type": "api_failure",
-                "error_details": "Springer Nature API was unavailable",
-            }
-            if exc.response is not None:
-                finding["http_status"] = exc.response.status_code
-            return None, [finding], None
+        except ProviderUnavailable as exc:
+            return None, [exc.finding()], None
 
         candidates = [self._normalise_record(record) for record in records]
         cited_doi = self._clean_doi(reference.get("doi") or reference.get("DOI"))
