@@ -882,6 +882,7 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
     from refchecker.utils.reference_metadata import attach_bibliography_sources
 
     pdf_content = None
+    extraction_mode = getattr(checker, 'extraction_mode', 'cascade')
     paper_id = paper.get_short_id()
     logger.debug('Bulk extracting bibliography for paper %s: %s', paper_id, getattr(paper, 'title', ''))
 
@@ -925,7 +926,7 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
         text = checker.extract_text_from_pdf(pdf_content)
         checker.last_paper_text = text or ''
 
-        if getattr(checker, 'extraction_mode', 'cascade') == 'cascade':
+        if extraction_mode == 'cascade':
             try:
                 from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
 
@@ -936,7 +937,7 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                     pdf_path=pdf_path,
                     pdf_content=pdf_content,
                     llm_available=bool(checker.llm_extractor),
-                    extraction_mode=getattr(checker, 'extraction_mode', 'cascade'),
+                    extraction_mode=extraction_mode,
                 )
                 if grobid_references:
                     from refchecker.utils.extraction_quality import (
@@ -960,7 +961,10 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
                     checker.fatal_error = False
                     checker.fatal_error_message = None
                     attach_bibliography_sources(grobid_references, comparison_bibliography, 'grobid')
-                    return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
+                    return ground_pdf_references(
+                        grobid_references, text, pdf_content=pdf_content,
+                        bibliography_text=comparison_bibliography,
+                    )
             except ValueError as exc:
                 logger.debug('GROBID cascade failed for %s: %s', paper_id, exc)
 
@@ -1023,11 +1027,17 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
         )
         return []
     references = parse_references_bulk(checker, bibliography_text, extraction_batcher)
+    if pdf_content is not None:
+        ground_pdf_references(
+            references, text, pdf_content=pdf_content,
+            bibliography_text=bibliography_text, extraction_mode=extraction_mode,
+        )
+        if references:
+            checker.fatal_error = False
+            checker.fatal_error_message = None
     if references or checker.llm_extractor:
-        if pdf_content is not None:
-            ground_pdf_references(references, text, pdf_content=pdf_content)
         return references
-    if getattr(checker, 'extraction_mode', 'cascade') != 'cascade':
+    if extraction_mode != 'cascade':
         return references
 
     try:
@@ -1040,7 +1050,7 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
             pdf_path=pdf_path,
             pdf_content=pdf_content,
             llm_available=False,
-            extraction_mode=getattr(checker, 'extraction_mode', 'cascade'),
+            extraction_mode=extraction_mode,
             failure_message=(
                 'No LLM configured for PDF reference extraction; falling back to GROBID.'
             ),
@@ -1049,7 +1059,10 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
             checker.fatal_error = False
             checker.fatal_error_message = None
             attach_bibliography_sources(grobid_references, bibliography_text, 'grobid')
-            return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
+            return ground_pdf_references(
+                grobid_references, text, pdf_content=pdf_content,
+                bibliography_text=bibliography_text,
+            )
     except Exception as exc:
         logger.debug('GROBID fallback failed for %s: %s', paper_id, exc)
 

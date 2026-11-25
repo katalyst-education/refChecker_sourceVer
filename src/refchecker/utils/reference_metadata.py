@@ -67,6 +67,32 @@ def cited_metadata_changed(previous, extracted):
     return cited_metadata_snapshot(previous) != cited_metadata_snapshot(extracted)
 
 
+def normalize_reference_fields(reference):
+    """Use the canonical venue slot and lift identifiers from cited text."""
+    if reference.get('journal') and not reference.get('venue'):
+        reference['venue'] = reference['journal']
+
+    text = [reference.get(field) for field in ('cited_url', 'url', 'raw_text', 'raw')]
+    text = [value for value in text if isinstance(value, str) and value]
+    if not reference.get('doi'):
+        for value in text:
+            match = re.search(r'10\.\d{4,9}/[\w.\-;()/:%]+', value)
+            if match:
+                reference['doi'] = match[0].rstrip('.,;)')
+                break
+    if not reference.get('arxiv_id'):
+        for value in text:
+            match = re.search(r'arxiv\.org/abs/([\w.\-/]+)', value, re.IGNORECASE)
+            if match:
+                reference['arxiv_id'] = re.sub(r'v\d+$', '', match[1].rstrip('.,;)'))
+                break
+            match = re.search(r'arxiv[: ]\s*(\d{4}\.\d{4,5})', value, re.IGNORECASE)
+            if match:
+                reference['arxiv_id'] = match[1]
+                break
+    return reference
+
+
 def numbered_source_entries(text):
     """Yield the printed label and original text of each numbered entry."""
     matches = list(_NUMBERED_ENTRY.finditer(text or ''))

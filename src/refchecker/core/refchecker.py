@@ -6948,7 +6948,10 @@ class ArxivReferenceChecker:
                         grobid_references, text_candidate
                     )
                 attach_bibliography_sources(grobid_references, comparison_bibliography, 'grobid')
-                return ground_pdf_references(grobid_references, text, pdf_content=pdf_content)
+                return ground_pdf_references(
+                    grobid_references, text, pdf_content=pdf_content,
+                    bibliography_text=comparison_bibliography, extraction_mode=self.extraction_mode,
+                )
         
         if not text:
             grobid_references = _maybe_use_grobid_fallback(
@@ -7034,6 +7037,14 @@ class ArxivReferenceChecker:
         
         # Parse references
         references = self.parse_references(bibliography_text)
+        if pdf_content is not None:
+            ground_pdf_references(
+                references, text, pdf_content=pdf_content,
+                bibliography_text=bibliography_text, extraction_mode=self.extraction_mode,
+            )
+            if references:
+                self.fatal_error = False
+                self.fatal_error_message = None
         if not self.last_bibliography_extraction_method:
             self.last_bibliography_extraction_method = 'pdf'
 
@@ -7044,9 +7055,7 @@ class ArxivReferenceChecker:
             )
             if grobid_references:
                 references = attach_bibliography_sources(grobid_references, bibliography_text, 'grobid')
-
-        if pdf_content is not None:
-            ground_pdf_references(references, text, pdf_content=pdf_content)
+                ground_pdf_references(references, text, pdf_content=pdf_content)
         
         # Save the extracted references for debugging
         if debug_mode:

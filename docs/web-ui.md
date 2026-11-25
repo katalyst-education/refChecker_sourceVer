@@ -36,6 +36,12 @@ repairs, and any fields that need review. PDF references link to the original
 page when the source entry can be located. **Re-extract** saves source evidence
 for flagged references and searches all databases only when cited metadata changes.
 
+In cascade mode, PDF extraction retries the affected pages when a numbered
+bibliography has a short gap, repeated labels, joined entries, or signs of
+damaged text. A recovered entry must agree with its source text or the
+surrounding bibliography entries before it is included in verification.
+Clean bibliographies take the normal extraction path.
+
 ## Verification
 
 Each extracted reference is checked through the shared source pipeline. The UI displays:

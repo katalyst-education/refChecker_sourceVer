@@ -39,6 +39,7 @@ from backend.reference_result import project_cited_evidence, project_verificatio
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.utils.extraction_quality import ground_pdf_references
 from refchecker.utils.reference_metadata import attach_bibliography_sources, cited_metadata_changed
+from refchecker.utils.reference_metadata import normalize_reference_fields as _normalize_reference_fields
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.llm.base import create_llm_provider, ReferenceExtractor
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
@@ -1026,62 +1027,6 @@ def _extract_pdf_text_cli_style(pdf_path: str, llm_provider) -> str:
     cli_checker = _make_cli_checker(llm_provider)
     with open(pdf_path, 'rb') as pdf_file:
         return cli_checker.extract_text_from_pdf(io.BytesIO(pdf_file.read()))
-
-
-def _normalize_reference_fields(ref: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize reference field names for consistency.
-
-    The parser uses 'journal' but the rest of the pipeline expects 'venue'.
-    This function normalizes field names for consistent handling.
-
-    Also lifts DOIs and arXiv IDs out of cited_url / url / raw_text into
-    the top-level fields so the verifier's DOI/arXiv compare always
-    has them. The LaTeX bibitem parser was leaving DOIs embedded in
-    the trailing URL ("…1992. https://doi.org/10.xxxx/yyyy"), which
-    meant the cited DOI never reached the checkers — so DOI mismatches
-    were silently missed when the cited DOI differed from the verified
-    one.
-    """
-    # Map 'journal' to 'venue' if venue is not set
-    if ref.get('journal') and not ref.get('venue'):
-        ref['venue'] = ref['journal']
-
-    # Backfill top-level doi / arxiv_id from cited_url / raw_text when
-    # missing — covers LaTeX bibitems where the DOI URL is the last
-    # token of the entry.
-    if not ref.get('doi'):
-        import re as _re
-        scan_blobs = []
-        for key in ('cited_url', 'url', 'raw_text', 'raw'):
-            v = ref.get(key)
-            if isinstance(v, str) and v:
-                scan_blobs.append(v)
-        for blob in scan_blobs:
-            m = _re.search(r'(?:10\.\d{4,9}/[\w.\-;()/:%]+)', blob)
-            if m:
-                # Strip trailing punctuation that often follows the URL
-                # in flowing prose ("…10.xxxx/yyyy. The paper shows…").
-                doi = m.group(0).rstrip('.,;)')
-                ref['doi'] = doi
-                break
-
-    if not ref.get('arxiv_id'):
-        import re as _re
-        for key in ('cited_url', 'url', 'raw_text', 'raw'):
-            v = ref.get(key)
-            if isinstance(v, str) and v:
-                m = _re.search(r'arxiv\.org/abs/([\w.\-/]+)', v, _re.IGNORECASE)
-                if m:
-                    aid = m.group(1).rstrip('.,;)')
-                    # Strip version suffix so 2410.10150v2 → 2410.10150.
-                    ref['arxiv_id'] = _re.sub(r'v\d+$', '', aid)
-                    break
-                m2 = _re.search(r'arxiv[: ]\s*(\d{4}\.\d{4,5})', v, _re.IGNORECASE)
-                if m2:
-                    ref['arxiv_id'] = m2.group(1)
-                    break
-
-    return ref
 
 
 # Default max concurrent reference checks (similar to CLI default)
@@ -2931,10 +2876,25 @@ class ProgressRefChecker:
                 _usage_tracker.set_current_check(str(self.check_id))
             with _usage_tracker.FlowScope('reverify'):
                 bibliography = cli_checker.find_bibliography_section(paper_text)
-                reference = cli_checker.parse_reference_entry(bibliography, reference_number)
-                if reference and pdf_path:
-                    ground_pdf_references([reference], paper_text, pdf_path=pdf_path)
-                return reference
+                if not pdf_path:
+                    return cli_checker.parse_reference_entry(bibliography, reference_number)
+                try:
+                    reference = cli_checker.parse_reference_entry(bibliography, reference_number)
+                except ValueError as exc:
+                    error = exc
+                    reference = None
+                else:
+                    error = None
+                references = [reference] if reference else []
+                ground_pdf_references(
+                    references, paper_text, pdf_path=pdf_path, extraction_mode=self.extraction_mode,
+                    bibliography_text=bibliography, reference_numbers=[reference_number],
+                )
+                if references:
+                    return references[0]
+                if error:
+                    raise error
+                return None
 
         reference = await asyncio.to_thread(extract)
         return _normalize_reference_fields(reference) if reference else None
@@ -2947,7 +2907,11 @@ class ProgressRefChecker:
         if not entries:
             references = await self._extract_references(paper_text)
             if pdf_path:
-                await asyncio.to_thread(ground_pdf_references, references, paper_text, pdf_path=pdf_path)
+                await asyncio.to_thread(
+                    ground_pdf_references, references, paper_text, pdf_path=pdf_path,
+                    bibliography_text=bibliography, reference_numbers=reference_numbers,
+                    extraction_mode=self.extraction_mode,
+                )
             return references, []
         parsed = []
         if self.extraction_mode == 'cascade':
@@ -2977,7 +2941,14 @@ class ProgressRefChecker:
                 'message': f'Re-extracting flagged references ({position + 1}/{len(reference_numbers)})…',
             })
         if pdf_path:
-            await asyncio.to_thread(ground_pdf_references, references, paper_text, pdf_path=pdf_path)
+            await asyncio.to_thread(
+                ground_pdf_references, references, paper_text, pdf_path=pdf_path,
+                bibliography_text=bibliography, reference_numbers=reference_numbers,
+                extraction_mode=self.extraction_mode,
+            )
+            recovered = {reference.get('entry_number') for reference in references}
+            failures = [failure for failure in failures if failure['index'] not in recovered]
+            references = [_normalize_reference_fields(reference) for reference in references]
         return references, failures
 
     async def _extract_references(self, paper_text: str) -> List[Dict[str, Any]]:
@@ -3155,7 +3126,10 @@ class ProgressRefChecker:
                         grobid_candidate, deterministic_candidate,
                     )
                 attach_bibliography_sources(grobid_candidate, bibliography_text, 'grobid')
-                await asyncio.to_thread(ground_pdf_references, grobid_candidate, paper_text, pdf_path=pdf_path)
+                await asyncio.to_thread(
+                    ground_pdf_references, grobid_candidate, paper_text, pdf_path=pdf_path,
+                    bibliography_text=bibliography_text,
+                )
                 return [_normalize_reference_fields(ref) for ref in grobid_candidate], 'grobid'
             logger.info(
                 "GROBID candidate rejected by PDF cascade (quality %.2f, "
@@ -3167,14 +3141,20 @@ class ProgressRefChecker:
             )
 
         parsed_references = await self._extract_references(paper_text)
+        await asyncio.to_thread(
+            ground_pdf_references, parsed_references, paper_text, pdf_path=pdf_path,
+            bibliography_text=bibliography_text,
+        )
         if parsed_references:
-            await asyncio.to_thread(ground_pdf_references, parsed_references, paper_text, pdf_path=pdf_path)
-            return parsed_references, self._last_reference_parser_method or 'pdf'
+            return [_normalize_reference_fields(ref) for ref in parsed_references], self._last_reference_parser_method or 'pdf'
 
         if grobid_candidate:
             logger.warning("Using weak GROBID candidate because no parser produced a replacement")
             attach_bibliography_sources(grobid_candidate, bibliography_text, 'grobid')
-            await asyncio.to_thread(ground_pdf_references, grobid_candidate, paper_text, pdf_path=pdf_path)
+            await asyncio.to_thread(
+                ground_pdf_references, grobid_candidate, paper_text, pdf_path=pdf_path,
+                bibliography_text=bibliography_text,
+            )
             return [_normalize_reference_fields(ref) for ref in grobid_candidate], 'grobid'
         if grobid_error is not None:
             raise grobid_error
