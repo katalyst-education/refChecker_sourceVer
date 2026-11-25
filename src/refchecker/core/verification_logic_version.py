@@ -41,8 +41,9 @@ History:
         browser retries use the same shared webpage verifier.
     8 - inaccessible scholarly URLs are unverified and authentication
         findings survive the database search fallback.
+   11 - inspect access screens before trusting redirected HTML or PDF responses.
 """
 
-VERIFICATION_LOGIC_VERSION = 10
+VERIFICATION_LOGIC_VERSION = 11
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

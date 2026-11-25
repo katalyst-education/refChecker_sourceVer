@@ -15,6 +15,7 @@ from pypdf import PdfReader
 from fuzzywuzzy import fuzz
 from bs4 import BeautifulSoup
 
+from refchecker.checkers.webpage_checker import detect_authentication_interstitial, is_access_restriction_page
 from refchecker.utils.text_utils import normalize_text, calculate_title_similarity
 
 logger = logging.getLogger(__name__)
@@ -193,14 +194,14 @@ class PDFPaperChecker:
             response.raise_for_status()
             
             # Check if the response itself is a PDF (after redirects)
-            content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' in content_type or response.content.startswith(b'%PDF-'):
+            if response.content.startswith(b'%PDF-'):
                 logger.debug("Page redirected directly to PDF")
                 return response.url
             
             # Parse HTML to look for PDF links
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(response.content, 'html.parser')
+            if detect_authentication_interstitial(soup, response.url) or is_access_restriction_page(soup):
+                return None
             
             # Look for links that might be PDFs
             pdf_links = []

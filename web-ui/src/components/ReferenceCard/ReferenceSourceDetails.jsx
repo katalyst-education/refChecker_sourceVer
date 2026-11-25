@@ -12,6 +12,7 @@ const repairReasons = {
   bibliography_authors: 'Bibliography author list',
   bibliography_title: 'Bibliography title',
   bibliography_venue: 'Bibliography venue',
+  bibliography_url: 'Bibliography URL',
   bibliography_publication: 'Bibliography publication details',
   bibliography_parser: 'Bibliography text parser',
   pdf_layout: 'PDF page layout',

@@ -14,6 +14,18 @@ class TestPDFPaperChecker(unittest.TestCase):
     
     def setUp(self):
         self.checker = PDFPaperChecker()
+
+    def test_pdf_links_on_access_pages_are_not_treated_as_source_documents(self):
+        url = 'https://example.org/document.pdf'
+        for heading in ('Log in', 'Access denied'):
+            with self.subTest(heading=heading):
+                response = Mock(
+                    url='https://example.org/access',
+                    content=f'<h1>{heading}</h1><a href="/terms.pdf">Terms of use</a>'.encode(),
+                    headers={'content-type': 'application/pdf'},
+                )
+                with patch.object(self.checker.session, 'get', return_value=response):
+                    self.assertIsNone(self.checker._find_pdf_url_in_page(url))
     
     def test_can_check_reference_pdf_url(self):
         """Test that direct PDF URLs are recognized"""

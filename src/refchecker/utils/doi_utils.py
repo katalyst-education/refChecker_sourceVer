@@ -8,6 +8,7 @@ This module provides utilities for DOI handling, extraction, and validation.
 import re
 from typing import Any, Mapping, Optional
 
+from refchecker.utils.citation_urls import strip_citation_url_punctuation
 
 def extract_doi_from_url(url: str) -> Optional[str]:
     """
@@ -43,7 +44,7 @@ def extract_doi_from_url(url: str) -> Optional[str]:
                 suffix = doi_candidate.split('/', 1)[1]
                 if len(suffix) < 2:
                     continue
-                return doi_candidate
+                return strip_citation_url_punctuation(doi_candidate)
     
     return None
 
@@ -97,7 +98,7 @@ def normalize_doi(doi: str) -> str:
     normalized = normalized.strip()
     
     # Remove trailing punctuation that might be included in extraction
-    normalized = normalized.rstrip('.,;:)')
+    normalized = strip_citation_url_punctuation(normalized, punctuation='.,;:')
     
     # Convert to lowercase for consistency (DOI suffixes are case-insensitive)
     return normalized.lower()

@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
+from .citation_urls import strip_citation_url_punctuation
 from .doi_utils import normalize_doi
 
 logger = logging.getLogger(__name__)
@@ -433,33 +434,7 @@ def clean_url(url: str) -> str:
     Returns:
         Cleaned URL
     """
-    if not url:
-        return ""
-    
-    # Remove leading/trailing whitespace
-    url = url.strip()
-    
-    # Handle malformed URLs that contain \url{} wrappers within the URL text
-    # e.g., "https://\url{https://www.example.com/}" -> "https://www.example.com/"
-    import re
-    url_pattern = r'https?://\\url\{(https?://[^}]+)\}'
-    url_match = re.search(url_pattern, url)
-    if url_match:
-        url = url_match.group(1)
-    
-    # Handle markdown-style links like [text](url) or [url](url)
-    # e.g., "[https://example.com](https://example.com)" -> "https://example.com"
-    markdown_pattern = r'\[([^\]]*)\]\((https?://[^)]+)\)'
-    markdown_match = re.search(markdown_pattern, url)
-    if markdown_match:
-        # Use the URL from parentheses
-        url = markdown_match.group(2)
-    
-    url = _strip_glued_pdf_citation_tail(url)
-
-    # Remove trailing punctuation that's commonly part of sentence structure
-    # but preserve legitimate URL characters
-    url = url.rstrip('.,;!?)')
+    url = clean_url_punctuation(url)
     
     # Note: Preserving query parameters for all URLs now
     # Previously this function removed query parameters for non-DOI URLs,
@@ -494,7 +469,6 @@ def clean_url_punctuation(url: str) -> str:
     
     # Handle malformed URLs that contain \\url{} wrappers within the URL text
     # e.g., "https://\\url{https://www.example.com/}" -> "https://www.example.com/"
-    import re
     url_pattern = r'https?://\\url\{(https?://[^}]+)\}'
     url_match = re.search(url_pattern, url)
     if url_match:
@@ -502,19 +476,17 @@ def clean_url_punctuation(url: str) -> str:
     
     # Handle markdown-style links like [text](url) or [url](url)
     # e.g., "[https://example.com](https://example.com)" -> "https://example.com"
-    markdown_pattern = r'\[([^\]]*)\]\((https?://[^)]+)\)'
+    markdown_pattern = r'\[[^\]]*\]\((https?://\S+)\)(?=\s|[.,;!?]*$)'
     markdown_match = re.search(markdown_pattern, url)
     if markdown_match:
         # Use the URL from parentheses
-        url = markdown_match.group(2)
+        url = markdown_match.group(1)
     
     url = _strip_glued_pdf_citation_tail(url)
 
     # Remove trailing punctuation that's commonly part of sentence structure
     # but preserve legitimate URL characters
-    url = url.rstrip('.,;!?)')
-    
-    return url
+    return strip_citation_url_punctuation(url)
 
 
 def _strip_glued_pdf_citation_tail(url: str) -> str:

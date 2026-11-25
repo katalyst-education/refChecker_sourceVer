@@ -17,6 +17,26 @@ _AUTH_TITLE_MARKERS = (
     'sign in', 'signin', 'log in', 'login', 'authentication required',
     'institutional login', 'institutional sign in', 'access through your institution',
 )
+_AUTH_HEADING = re.compile(
+    r'(?:(?:log\s?in|sign\s?in)(?: required| to (?:continue|access|view|read)(?: .+)?)?|'
+    r'please (?:log in|sign in)(?: to .+)?|(?:institutional |single )sign[- ](?:in|on)|'
+    r'access through your institution|authentication(?: (?:required|request))?|'
+    r'shibboleth authentication request)[.!]?'
+)
+_BLOCKED_HEADING = re.compile(
+    r'(?:access|permission) denied[.!]?|verify (?:that )?you(?: are|.re) human[.!]?|'
+    r'you (?:do not|don.t) have (?:access|permission)(?: to .+)?[.!]?'
+)
+
+
+def _page_headings(soup):
+    """Normalize the tab title and main heading of a potential access screen."""
+    headings = set()
+    for element in (soup.title, soup.find('h1')):
+        if element:
+            text = element.get_text(' ', strip=True).casefold()
+            headings.add(re.split(r'\s+(?:[|–—-])\s+', text, maxsplit=1)[0])
+    return headings
 
 
 def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '') -> Optional[str]:
@@ -26,12 +46,10 @@ def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '')
     keep login-shaped permalinks after authentication. Detection instead needs
     explicit sign-in titles or corroborating signals from the returned page.
     """
-    title = ''
-    if soup.title and soup.title.get_text(strip=True):
-        title = soup.title.get_text(' ', strip=True).casefold()
+    headings = _page_headings(soup)
     visible = soup.get_text(' ', strip=True).casefold()[:12000]
     has_password = soup.find('input', attrs={'type': re.compile(r'^password$', re.I)}) is not None
-    has_auth_title = any(marker in title for marker in _AUTH_TITLE_MARKERS)
+    has_auth_title = any(marker in heading for heading in headings for marker in _AUTH_TITLE_MARKERS)
     has_auth_content = any(
         marker in visible[:2500]
         for marker in (
@@ -42,19 +60,34 @@ def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '')
         )
     )
 
-    # Identity providers commonly return a minimal redirect page with no
-    # password form or visible sign-in controls. These page titles are an
-    # explicit authentication protocol signal, independent of the host.
-    if 'shibboleth' in title or re.search(r'\bauthentication\b', title):
-        return 'The source requires an authenticated browser session.'
-    if re.fullmatch(r'please (?:log in|sign in)(?: to [^.!?]+)?[.!]?', title):
-        return 'The source requires an authenticated browser session.'
-
-    if has_password and (has_auth_title or has_auth_content):
-        return 'The source returned a sign-in page instead of the cited content.'
+    # A publication can itself be about authentication or include a sign-in
+    # element. A main heading or multiple indicators identify the gate.
+    for heading in headings:
+        if heading == 'authentication' and soup.find('meta', attrs={'name': 'citation_author'}):
+            continue
+        if _AUTH_HEADING.fullmatch(heading):
+            return 'The source requires an authenticated browser session.'
     if has_auth_title and has_auth_content:
         return 'The source requires an authenticated browser session.'
+    if has_password and has_auth_title:
+        return 'The source returned a sign-in page instead of the cited content.'
     return None
+
+
+def is_access_restriction_page(soup: BeautifulSoup) -> bool:
+    """Identify a block or challenge presented as the page itself."""
+    return any(_BLOCKED_HEADING.fullmatch(heading) for heading in _page_headings(soup))
+
+
+def _is_pdf_response(response):
+    content_type = response.headers.get('content-type', '').split(';', 1)[0].strip().lower()
+    payload = response.content
+    if isinstance(payload, bytes):
+        if payload.lstrip().startswith(b'%PDF-'):
+            return True
+        if payload.lstrip().startswith(b'<'):
+            return False
+    return content_type == 'application/pdf'
 
 class WebPageChecker:
     """
@@ -293,6 +326,25 @@ class WebPageChecker:
             'authentication_url': web_url,
         }
 
+    def _inspect_access_response(self, response, web_url):
+        """Read the HTML gate before status or filename-based verification."""
+        status = response.status_code
+        if status not in (200, 401, 403):
+            return None, None
+        payload = getattr(response, 'content', None)
+        if not isinstance(payload, (str, bytes)) or _is_pdf_response(response):
+            return None, None
+        soup = BeautifulSoup(payload, 'html.parser')
+        reason = detect_authentication_interstitial(soup, response.url)
+        if reason:
+            return soup, self._authentication_finding(reason, web_url)
+        if is_access_restriction_page(soup):
+            return soup, self._url_access_failure(
+                'The source returned an access restriction page.',
+                status if status != 200 else None,
+            )
+        return soup, None
+
     def verify_reference(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """
         Verify a web page reference
@@ -318,6 +370,9 @@ class WebPageChecker:
         response = self._respectful_request(web_url)
         if response is None:
             return None, [self._url_access_failure('Could not fetch web page')], web_url
+        soup, access_finding = self._inspect_access_response(response, web_url)
+        if access_finding:
+            return None, [access_finding], web_url
         
         if response.status_code == 404:
             return None, [{"error_type": "unverified", "error_details": "Web page not found (404)"}], web_url
@@ -332,16 +387,9 @@ class WebPageChecker:
         
         try:
             # Handle PDF content differently
-            content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' in content_type or web_url.lower().endswith('.pdf'):
+            if _is_pdf_response(response):
                 return self._handle_pdf_reference(reference, response, web_url)
-            
-            # Parse HTML content
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            authentication_reason = detect_authentication_interstitial(soup, response.url)
-            if authentication_reason:
-                return None, [self._authentication_finding(authentication_reason, web_url)], web_url
+            soup = soup if soup is not None else BeautifulSoup(response.content, 'html.parser')
             
             # Extract page metadata
             page_title = self._extract_page_title(soup)
@@ -933,6 +981,11 @@ class WebPageChecker:
         response = self._respectful_request(web_url)
         if response is None:
             return "paper not verified; cited URL could not be accessed"
+        soup, access_finding = self._inspect_access_response(response, web_url)
+        if access_finding:
+            if access_finding.get('requires_authentication'):
+                return "authentication required"
+            return "paper not verified; cited URL could not be accessed"
         
         if response.status_code == 404:
             return "non-existent web page"
@@ -943,17 +996,12 @@ class WebPageChecker:
         
         try:
             # Parse HTML content to search for title
-            content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' in content_type or web_url.lower().endswith('.pdf'):
+            if _is_pdf_response(response):
                 # For PDFs, we can't search content, so assume it's referenced if accessible
                 return "paper not verified but URL references paper"
             
             # Parse HTML content
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            authentication_reason = detect_authentication_interstitial(soup, response.url)
-            if authentication_reason:
-                return "authentication required"
+            soup = soup if soup is not None else BeautifulSoup(response.content, 'html.parser')
             
             # Extract page content for searching
             page_title = self._extract_page_title(soup)
@@ -1025,6 +1073,9 @@ class WebPageChecker:
         access_details = 'paper not verified; cited URL could not be accessed'
         if response is None:
             return None, [self._url_access_failure(access_details)], web_url
+        soup, access_finding = self._inspect_access_response(response, web_url)
+        if access_finding:
+            return None, [access_finding], web_url
         
         if response.status_code == 404:
             return None, [{"error_type": "unverified", "error_details": "non-existent web page"}], web_url
@@ -1056,8 +1107,7 @@ class WebPageChecker:
         
         try:
             # Parse HTML content to search for title
-            content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' in content_type or web_url.lower().endswith('.pdf'):
+            if _is_pdf_response(response):
                 # For PDFs, treat as verified if no venue or venue is web content
                 venue_field = reference.get('journal') or reference.get('venue') or reference.get('booktitle')
                 if not venue_field or self._is_web_content_venue(venue_field, web_url):
@@ -1078,11 +1128,7 @@ class WebPageChecker:
                     return None, [{"error_type": "unverified", "error_details": "paper not verified but URL references paper"}], web_url
             
             # Parse HTML content
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            authentication_reason = detect_authentication_interstitial(soup, response.url)
-            if authentication_reason:
-                return None, [self._authentication_finding(authentication_reason, web_url)], web_url
+            soup = soup if soup is not None else BeautifulSoup(response.content, 'html.parser')
             
             # Extract page content for searching
             page_title = self._extract_page_title(soup)

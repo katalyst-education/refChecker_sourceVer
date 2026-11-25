@@ -1,3 +1,5 @@
+import pytest
+
 from refchecker.checkers.webpage_checker import (
     WebPageChecker,
     detect_authentication_interstitial,
@@ -239,6 +241,71 @@ def test_article_about_login_is_not_an_authentication_interstitial():
         BeautifulSoup(html, "html.parser"),
         "https://docs.example.org/how-to-login",
     ) is None
+
+
+@pytest.mark.parametrize('status', [200, 401, 403])
+@pytest.mark.parametrize('entry_point', ['verify_reference', 'verify_raw_url_for_unverified_reference'])
+def test_redirect_to_repository_login_carries_only_an_access_finding(monkeypatch, status, entry_point):
+    checker = WebPageChecker(request_delay=0)
+    url = 'https://example.org/repository/item.pdf'
+    html = """
+    <html><head><title>Log in | Research repository</title>
+      <meta name="citation_title" content="Source title on authentication page">
+      <meta name="citation_author" content="Repository Administrator">
+    </head><body><h1>Log in</h1></body></html>
+    """
+    response = DummyResponse(html, url='https://identity.example.org/login', status_code=status)
+    response.headers['content-type'] = 'application/pdf'
+    monkeypatch.setattr(checker, '_respectful_request', lambda requested: response)
+
+    data, issues, checked_url = getattr(checker, entry_point)({
+        'title': 'Surface passivation of silicon using light-activated tio2 films',
+        'authors': ['A. Cuevas'],
+        'cited_url': url,
+    })
+
+    assert data is None
+    assert checked_url == url
+    assert [issue['warning_type'] for issue in issues] == ['authentication']
+    assert issues[0]['authentication_url'] == url
+
+
+def test_access_restriction_does_not_supply_matching_metadata(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = 'https://example.org/record/123'
+    html = """
+    <html><head><title>Access denied | Publisher</title>
+      <meta name="citation_title" content="A study of silicon">
+    </head><body><h1>Access denied</h1><p>A study of silicon</p></body></html>
+    """
+    monkeypatch.setattr(checker, '_respectful_request', lambda requested: DummyResponse(html, url))
+
+    data, issues, checked_url = checker.verify_raw_url_for_unverified_reference({
+        'title': 'A study of silicon', 'cited_url': url,
+    })
+
+    assert data is None
+    assert checked_url == url
+    assert [issue['verification_reason'] for issue in issues] == ['url_access_failed']
+
+
+def test_open_publication_about_authentication_can_be_verified(monkeypatch):
+    checker = WebPageChecker(request_delay=0)
+    url = 'https://example.org/record/123'
+    title = 'Authentication methods for distributed repositories'
+    html = f"""
+    <html><head><title>{title}</title>
+      <meta name="citation_title" content="{title}">
+      <meta name="citation_author" content="A. Author">
+    </head><body><nav><a href="/login">Log in</a></nav><main><h1>{title}</h1></main></body></html>
+    """
+    monkeypatch.setattr(checker, '_respectful_request', lambda requested: DummyResponse(html, url))
+
+    data, issues, _ = checker.verify_reference({'title': title, 'authors': ['A. Author'], 'url': url})
+
+    assert data['title'] == title
+    assert data['authors'] == ['A. Author']
+    assert issues == []
 
 
 def test_authenticated_catalogue_prefers_structured_record_metadata(monkeypatch):

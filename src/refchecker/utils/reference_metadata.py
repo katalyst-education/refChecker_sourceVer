@@ -4,6 +4,8 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 import re
 
+from refchecker.utils.citation_urls import citation_links, strip_citation_url_punctuation
+from refchecker.utils.doi_utils import extract_doi_from_url, normalize_doi
 from refchecker.utils.publication_fields import (
     PUBLICATION_FIELDS, parse_publication_tail, publication_tail, publication_value_key,
 )
@@ -86,7 +88,7 @@ def normalize_reference_fields(reference):
         for value in text:
             match = re.search(r'10\.\d{4,9}/[\w.\-;()/:%]+', value)
             if match:
-                reference['doi'] = match[0].rstrip('.,;)')
+                reference['doi'] = strip_citation_url_punctuation(match[0])
                 break
     if not reference.get('arxiv_id'):
         for value in text:
@@ -160,6 +162,42 @@ def _review_field(provenance, field, parsed, source):
     }
 
 
+def _reconcile_citation_urls(reference, source, layout_source=''):
+    if '://' not in source:
+        return
+    links = list(dict.fromkeys(citation_links(source)))
+    if not links:
+        return
+    layout_links = {link.resolved for link in citation_links(layout_source) if not link.alternative}
+    provenance = reference['extraction_provenance']
+    fields = [field for field in ('url', 'cited_url') if reference.get(field)] or ['url']
+    for field in fields:
+        before = reference.get(field)
+        if before:
+            matches = [link for link in links if before in (link.original, link.resolved, link.original.rstrip(')'))]
+        else:
+            matches = links
+        if len(matches) != 1:
+            continue
+        link = matches[0]
+        confirmed_by_layout = link.alternative in layout_links and link.resolved not in layout_links
+        after = link.alternative if confirmed_by_layout else link.resolved
+        if link.alternative and not confirmed_by_layout:
+            _review_field(provenance, field, before or after, link.alternative)
+        elif field in provenance.get('review', {}):
+            provenance['review'].pop(field)
+        if not after or after == before or (not before and after == link.original):
+            continue
+        reason = 'pdf_layout' if confirmed_by_layout else 'bibliography_url'
+        reference[field] = after
+        record_extraction_change(reference, field, before, after, reason)
+        doi = extract_doi_from_url(after)
+        previous_doi = reference.get('doi')
+        if doi and (not previous_doi or normalize_doi(previous_doi) == normalize_doi(extract_doi_from_url(before or ''))):
+            reference['doi'] = doi
+            record_extraction_change(reference, 'doi', previous_doi, doi, reason)
+
+
 def _reconcile_publication_fields(reference, tail, title):
     fields, ambiguous = parse_publication_tail(tail)
     provenance = reference['extraction_provenance']
@@ -203,6 +241,9 @@ def reconcile_reference_source(reference, *, layout_text=None):
     prefix, title, tail = _quoted_parts(raw_text)
     if not title:
         parsed_title = reference.get('title') or ''
+        if layout_text and {'url', 'cited_url'}.intersection(provenance.get('review', {})):
+            provenance['layout_text'] = layout_text
+        _reconcile_citation_urls(reference, raw_text, layout_text or '')
         _reconcile_publication_fields(reference, publication_tail(raw_text, parsed_title), parsed_title)
         return reference
     if _title_key(title) != _title_key(reference.get('title') or ''):
@@ -250,6 +291,12 @@ def reconcile_reference_source(reference, *, layout_text=None):
     elif _FUSED_INITIALS.search(prefix) and 'authors' not in review:
         _review_field(provenance, 'authors', before, prefix)
 
+    _, layout_title, layout_tail = _quoted_parts(layout_text or '')
+    if _title_key(layout_title) != _title_key(title):
+        layout_tail = ''
+    if layout_tail and {'url', 'cited_url'}.intersection(provenance.get('review', {})):
+        provenance['layout_text'] = layout_text
+    _reconcile_citation_urls(reference, tail, layout_tail)
     _reconcile_publication_fields(reference, tail, title)
     return reference
 
@@ -292,10 +339,11 @@ def attach_bibliography_sources(references, bibliography_text, parser):
 
 
 def needs_pdf_layout_review(reference):
-    """Select entries whose author spacing is uncertain in the text layer."""
+    """Select entries with ambiguous URL breaks or fused author initials."""
     provenance = reference.get('extraction_provenance') or {}
     prefix, _, _ = _quoted_parts(provenance.get('source_text', ''))
-    return bool(_FUSED_INITIALS.search(prefix) and 'authors' in provenance.get('review', {}))
+    review = provenance.get('review', {})
+    return bool({'url', 'cited_url'} & review.keys() or ('authors' in review and _FUSED_INITIALS.search(prefix)))
 
 
 def repair_pdf_citation_wraps(references, paper_text):

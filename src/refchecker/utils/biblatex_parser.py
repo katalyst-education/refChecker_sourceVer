@@ -11,6 +11,7 @@ Handles parsing of biblatex .bbl format references like:
 import re
 import logging
 from typing import List, Dict, Any
+from refchecker.utils.citation_urls import strip_citation_url_punctuation
 from refchecker.utils.publication_fields import PUBLICATION_FIELDS, parse_publication_tail, publication_tail
 from refchecker.utils.text_normalization import normalize_wrapped_hyphens
 
@@ -416,7 +417,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     if not url:
         url_match = re.search(r'https?://[^\s]+', content)
         if url_match:
-            url = url_match.group(0).rstrip('.,')  # Remove trailing punctuation
+            url = strip_citation_url_punctuation(url_match.group(0))
     
     # 6. Extract authors - improved to handle various biblatex patterns
     authors_text = book_style_authors_text

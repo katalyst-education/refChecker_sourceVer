@@ -293,7 +293,7 @@ def ground_pdf_references(references, paper_text, *, pdf_path=None, pdf_content=
         return references
     requested = set(reference_numbers) if reference_numbers is not None else None
     normalized_pages = [' '.join(page.split()) for page in pages]
-    author_reviews = defaultdict(list)
+    layout_reviews = defaultdict(list)
     for reference in references:
         provenance = reference.get('extraction_provenance') or {}
         matches = _source_pages(provenance.get('source_text', ''), normalized_pages)
@@ -303,10 +303,10 @@ def ground_pdf_references(references, paper_text, *, pdf_path=None, pdf_content=
         provenance['pdf_page'] = page_index + 1
         number = provenance.get('entry_number')
         if number is not None and (requested is None or number in requested) and needs_pdf_layout_review(reference):
-            author_reviews[page_index].append(reference)
+            layout_reviews[page_index].append(reference)
 
     quality_check = bibliography_text and extraction_mode == 'cascade'
-    selected = set(author_reviews)
+    selected = set(layout_reviews)
     if quality_check:
         primary, by_number, targets, merged, gaps = _plan_layout_retry(
             references, bibliography_text, normalized_pages, requested,
@@ -325,7 +325,7 @@ def ground_pdf_references(references, paper_text, *, pdf_path=None, pdf_content=
         return references
 
     logger.debug('Retried bibliography extraction on PDF pages %s', [page + 1 for page in sorted(selected)])
-    for page, rows in author_reviews.items():
+    for page, rows in layout_reviews.items():
         for reference in rows:
             entries = [raw for position, raw in layout.get(reference['entry_number'], []) if position[0] == page]
             if len(entries) == 1:
