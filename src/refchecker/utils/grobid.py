@@ -15,6 +15,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 
+from refchecker.utils.publication_fields import publication_value_key
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_GROBID_FALLBACK_ERROR = (
@@ -174,6 +176,21 @@ def extract_refs_via_grobid(pdf_path: str) -> List[Dict[str, Any]]:
             if m:
                 ref["year"] = int(m.group(1))
                 break
+        if monogr is not None:
+            for scope in monogr.iter(f'{ns}biblScope'):
+                unit = (scope.get('unit') or '').lower()
+                field = {'volume': 'volume', 'issue': 'issue', 'page': 'pages', 'article-number': 'article_number'}.get(unit)
+                if not field:
+                    continue
+                value = (scope.text or '').strip()
+                start, end = scope.get('from'), scope.get('to')
+                if unit == 'page' and (start or end):
+                    value = f'{start}–{end}' if start and end and start != end else start or end
+                if value:
+                    ref.setdefault(field, publication_value_key(field, value))
+            publisher = monogr.findtext(f'{ns}imprint/{ns}publisher', '').strip()
+            if publisher:
+                ref['publisher'] = publisher
         for idno in bib.iter(f'{ns}idno'):
             id_type = (idno.get('type') or '').lower()
             if id_type == 'doi' and idno.text:

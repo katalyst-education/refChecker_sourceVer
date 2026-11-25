@@ -11,6 +11,7 @@ Handles parsing of biblatex .bbl format references like:
 import re
 import logging
 from typing import List, Dict, Any
+from refchecker.utils.publication_fields import PUBLICATION_FIELDS, parse_publication_tail, publication_tail
 from refchecker.utils.text_normalization import normalize_wrapped_hyphens
 
 logger = logging.getLogger(__name__)
@@ -294,7 +295,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     Returns:
         Dictionary with parsed entry data
     """
-    from refchecker.utils.text_utils import parse_authors_with_initials, clean_title
+    from refchecker.utils.text_utils import clean_title, clean_title_basic, parse_authors_with_initials
     from refchecker.utils.doi_utils import construct_doi_url, is_valid_doi_format
     
     # Initialize default values
@@ -324,6 +325,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         title = clean_title(book_style_match.group(2).strip())
         journal = book_style_match.group(3).strip()
         year = int(book_style_match.group(4))
+    quoted_title = None
     
     # Pattern matching for different biblatex formats:
     
@@ -331,8 +333,9 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     # Handle both regular quotes (") and smart quotes (", ")
     title_match = re.search(r'["\u201c\u201d]([^"\u201c\u201d]+)["\u201c\u201d]', content)
     if title_match:
+        quoted_title = title_match
         raw_title = title_match.group(1)
-        title = clean_title(raw_title)
+        title = clean_title_basic(raw_title)
     elif not title:
         # If no quoted title, look for title after author names
         # Pattern: "FirstAuthor et al. Title Goes Here. Year." or "Author. Title. Year."
@@ -364,7 +367,12 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
                     title = clean_title(potential_title)
                     break
     
-    # 2. Extract year - prioritize year in parentheses over ArXiv IDs
+    tail = content[quoted_title.end():] if quoted_title else publication_tail(content, title)
+    publication, ambiguous = parse_publication_tail(tail)
+    if book_style_match:
+        publication.setdefault('publisher', journal)
+
+    # 2. Extract year - prioritize publication-tail dates over title and locator digits.
     year_patterns = [
         r'\((\d{4})\)',  # Year in parentheses like "(2024)" - most reliable
         r'\b(\d{4})\.$',  # Year at end of sentence like "2024."
@@ -372,7 +380,10 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         r'\b(\d{4})\b',  # Any 4-digit number as fallback
     ]
     
-    for pattern in year_patterns:
+    if 'year' in publication:
+        year = publication['year']
+    has_locators = any(field in publication or field in ambiguous for field in PUBLICATION_FIELDS[:4])
+    for pattern in ([] if year or has_locators else year_patterns):
         year_match = re.search(pattern, content)
         if year_match:
             try:
@@ -544,7 +555,9 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         r'([A-Z][^.]*(?:Conference|Workshop|Journal|Proceedings)[^.]*)',  # Conference/journal names
     ]
     
-    for pattern in journal_patterns:
+    if publication.get('venue'):
+        journal = publication['venue']
+    for pattern in ([] if publication.get('venue') else journal_patterns):
         journal_match = re.search(pattern, content)
         if journal_match:
             potential_journal = journal_match.group(1).strip()
@@ -589,7 +602,8 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         'bibtex_key': f"ref{entry_num}",  # Generate key since biblatex doesn't have explicit keys
         'bibtex_type': 'biblatex',
         'raw_text': f"[{entry_num}] {raw_content}",
-        'entry_number': int(entry_num)
+        'entry_number': int(entry_num),
+        **{field: publication[field] for field in PUBLICATION_FIELDS if field in publication},
     }
     
     return reference

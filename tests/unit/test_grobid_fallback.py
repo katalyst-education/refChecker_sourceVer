@@ -4,7 +4,30 @@ from unittest.mock import patch
 import pytest
 
 from refchecker.core.refchecker import ArxivReferenceChecker
-from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback
+from refchecker.utils.grobid import extract_pdf_references_with_grobid_fallback, extract_refs_via_grobid
+
+
+def test_grobid_preserves_imprint_fields(tmp_path, monkeypatch):
+    pdf_path = tmp_path / 'paper.pdf'
+    pdf_path.write_bytes(b'%PDF-1.4 fake')
+    tei = '''<TEI xmlns="http://www.tei-c.org/ns/1.0"><biblStruct>
+        <analytic><title>Experimental results</title></analytic>
+        <monogr><title>Materials Journal</title><imprint>
+            <publisher>University Press</publisher><date when="2001" />
+            <biblScope unit="volume">65</biblScope><biblScope unit="issue">1-4</biblScope>
+            <biblScope unit="page" from="239" to="248" />
+        </imprint></monogr>
+    </biblStruct></TEI>'''
+    monkeypatch.setattr('refchecker.utils.grobid.ensure_grobid_running', lambda: True)
+    with patch('requests.post') as post:
+        post.return_value.status_code = 200
+        post.return_value.text = tei
+        [reference] = extract_refs_via_grobid(str(pdf_path))
+
+    assert reference['volume'] == '65'
+    assert reference['issue'] == '1–4'
+    assert reference['pages'] == '239–248'
+    assert reference['publisher'] == 'University Press'
 
 
 def test_grobid_cascade_runs_when_llm_is_available(tmp_path):

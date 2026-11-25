@@ -37,6 +37,11 @@ def _layout_document(monkeypatch, *pages):
 FIRST = '[1] H. Adams, “Solar absorber characterization,” Solar Energy, vol. 18, 2020.'
 SECOND = '[2] A. Baker, “Thin film deposition,” Solar Energy, vol. 19, 2021.'
 THIRD = '[3] J. Chen, “Crystalline interface measurements,” Solar Energy, vol. 20, 2022.'
+ABERLE = (
+    '[39] A. G. Aberle, “Overview on sin surface passivation of crystalline sil-\n'
+    'icon solar cells,” Solar energy materials and solar cells, vol. 65, no.\n'
+    '1-4, pp. 239–248, 2001.'
+)
 
 
 def test_clean_bibliography_does_not_open_pdf_again(monkeypatch):
@@ -182,13 +187,13 @@ def test_pdf_wraps_use_intact_source_spellings(monkeypatch, both_spellings):
 
 
 def test_full_pdf_and_selected_reextraction_share_the_same_recovery(monkeypatch, tmp_path):
+    from backend.reference_result import citation_verification_input, project_cited_evidence
     from backend.refchecker_wrapper import ProgressRefChecker
     from refchecker.core.bulk_pipeline import extract_bibliography_bulk
     from refchecker.utils.reference_metadata import cited_metadata_snapshot
 
-    fourth = '[4] L. Diaz, “Solar diffusion measurements,” Solar Energy, vol. 21, 2023.'
-    paper_text = 'Introduction\nBody text.\n\nReferences\n' + '\n'.join([FIRST + ' ' + SECOND, THIRD, fourth])
-    _layout_document(monkeypatch, '\n'.join([FIRST, SECOND, THIRD, fourth]))
+    paper_text = 'Introduction\nCrystalline silicon.\n\nReferences\n' + '\n'.join([FIRST + ' ' + SECOND, THIRD, ABERLE])
+    _layout_document(monkeypatch, '\n'.join([FIRST, SECOND, THIRD, ABERLE]))
     monkeypatch.setattr('refchecker.utils.arxiv_utils.get_bibtex_content', lambda _paper: None)
     monkeypatch.setattr('refchecker.core.bulk_pipeline.get_bibtex_content', lambda _paper: None)
     monkeypatch.setattr('refchecker.utils.grobid.extract_pdf_references_with_grobid_fallback',
@@ -214,13 +219,22 @@ def test_full_pdf_and_selected_reextraction_share_the_same_recovery(monkeypatch,
     web.progress_callback = None
     web_refs, _ = asyncio.run(web._extract_references_from_pdf(paper.file_path, paper_text))
     selected, failures = asyncio.run(web._extract_references_for_reverification(
-        paper_text, [2], pdf_path=paper.file_path,
+        paper_text, [2, 39], pdf_path=paper.file_path,
     ))
     assert failures == []
     for refs in (cli, bulk, web_refs):
-        assert [ref['entry_number'] for ref in refs] == [1, 2, 3, 4]
+        assert [ref['entry_number'] for ref in refs] == [1, 2, 3, 39]
         assert cited_metadata_snapshot(refs[1]) == cited_metadata_snapshot(selected[0])
         assert refs[1]['extraction_provenance'] == selected[0]['extraction_provenance']
+        aberle = refs[-1]
+        assert cited_metadata_snapshot(aberle) == cited_metadata_snapshot(selected[1])
+        assert aberle['extraction_provenance']['source_text'] == ABERLE
+        assert aberle['title'] == 'Overview on sin surface passivation of crystalline silicon solar cells'
+        assert aberle['venue'] == 'Solar energy materials and solar cells'
+        assert aberle['authors'] == ['A. G. Aberle']
+        assert aberle['year'] == 2001
+        saved = citation_verification_input(project_cited_evidence(aberle))
+        assert (saved['volume'], saved['issue'], saved['pages']) == ('65', '1–4', '239–248')
 
 
 def test_grounded_merge_recovers_truncated_grobid_author_list():

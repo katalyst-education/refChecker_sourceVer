@@ -405,6 +405,11 @@ def parse_bibtex_references(bibliography_text: str) -> List[Dict[str, Any]]:
         elif entry_type == 'book':
             reference['publisher'] = fields.get('publisher', '')
             reference['isbn'] = fields.get('isbn', '')
+
+        publication = {key: fields.get(key) for key in ('volume', 'publisher', 'pages', 'series')}
+        publication['issue'] = (reference.get('number') if entry_type == 'article' else None) or fields.get('issue')
+        publication['article_number'] = fields.get('eid') or fields.get('articlenumber')
+        reference.update({key: value for key, value in publication.items() if value})
         
         from refchecker.utils.reference_metadata import record_extraction_source
 

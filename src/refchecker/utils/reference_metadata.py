@@ -4,6 +4,9 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 import re
 
+from refchecker.utils.publication_fields import (
+    PUBLICATION_FIELDS, parse_publication_tail, publication_tail, publication_value_key,
+)
 from refchecker.utils.text_normalization import (
     align_supported_wraps,
     normalize_initial_spacing,
@@ -15,18 +18,13 @@ from refchecker.utils.text_normalization import (
 
 
 _CITATION_FIELDS = (
-    'title', 'year', 'doi', 'arxiv_id', 'pmid', 'volume', 'issue', 'pages',
-    'publisher', 'isbn', 'issn', 'edition',
-)
+    'title', 'year', 'doi', 'arxiv_id', 'pmid', 'isbn', 'issn', 'edition',
+) + PUBLICATION_FIELDS
 CITED_REFERENCE_FIELDS = _CITATION_FIELDS + ('authors', 'venue', 'journal', 'url', 'cited_url')
 REFERENCE_SOURCE_FIELDS = ('raw_text', 'entry_number', 'extraction_provenance')
 
 _NUMBERED_ENTRY = re.compile(r'(?m)^[ \t]*\[(\d{1,4})\][ \t]*')
 _QUOTED_TITLE = re.compile(r'^([^"“”]+?)[ \t\n]*[“"]([^"“”]+)[”"]')
-_LABELED_VENUE = re.compile(
-    r'^\s*[,.;]?\s*(?:in\s+)?([^,]+),\s*(?:vol\.|no\.|pp?\.)\s*\d',
-    re.IGNORECASE,
-)
 _INITIAL = r'[^\W\d_]\.'
 _INITIALLED_NAME = re.compile(
     rf'(?:{_INITIAL}(?:-{_INITIAL})?\s*)+\s+[^\W\d_][\w\s\-’\']*',
@@ -61,7 +59,7 @@ def cited_metadata_snapshot(reference):
     Parser bookkeeping, raw source layout, and verification results have their
     own lifecycles and are excluded from this citation snapshot.
     """
-    result = {field: _text(reference.get(field)) for field in _CITATION_FIELDS}
+    result = {field: publication_value_key(field, reference.get(field)) for field in _CITATION_FIELDS}
     result['title'] = _text(normalize_wrapped_hyphens(str(reference.get('title') or '')))
     result['venue'] = sorted({_text(reference.get(field)) for field in ('venue', 'journal')} - {''})
     result['url'] = sorted({_text(reference.get(field)) for field in ('cited_url', 'url')} - {''})
@@ -162,6 +160,37 @@ def _review_field(provenance, field, parsed, source):
     }
 
 
+def _reconcile_publication_fields(reference, tail, title):
+    fields, ambiguous = parse_publication_tail(tail)
+    provenance = reference['extraction_provenance']
+    for field, values in ambiguous.items():
+        _review_field(provenance, field, reference.get(field), values)
+    for field in PUBLICATION_FIELDS:
+        if field not in fields:
+            continue
+        source = fields[field]
+        parsed = reference.get(field)
+        if not parsed:
+            reference[field] = source
+            record_extraction_change(reference, field, parsed, source, 'bibliography_publication')
+        elif publication_value_key(field, parsed) != publication_value_key(field, source):
+            _review_field(provenance, field, parsed, source)
+
+    venue = fields.get('venue')
+    if not venue:
+        return
+    current = reference.get('venue') or reference.get('journal') or ''
+    title_key = _title_key(title)
+    if (not current or current.startswith(venue + ',') or venue.startswith(current.rstrip('.') + '. ')
+        or (len(title_key) >= 12 and title_key in _title_key(current))):
+        reference['venue'] = venue
+        if 'journal' in reference:
+            reference['journal'] = venue
+        record_extraction_change(reference, 'venue', current, venue, 'bibliography_venue')
+    elif _title_key(venue) != _title_key(current) and len(venue.split()) > 1:
+        _review_field(provenance, 'venue', current, venue)
+
+
 def reconcile_reference_source(reference, *, layout_text=None):
     """Use explicit citation boundaries to repair fields and surface uncertainty.
 
@@ -172,8 +201,12 @@ def reconcile_reference_source(reference, *, layout_text=None):
     provenance = reference['extraction_provenance']
     raw_text = provenance.get('source_text', '')
     prefix, title, tail = _quoted_parts(raw_text)
-    if not title or _title_key(title) != _title_key(reference.get('title') or ''):
-        if title and prefix and provenance.get('entry_number') is not None:
+    if not title:
+        parsed_title = reference.get('title') or ''
+        _reconcile_publication_fields(reference, publication_tail(raw_text, parsed_title), parsed_title)
+        return reference
+    if _title_key(title) != _title_key(reference.get('title') or ''):
+        if prefix and provenance.get('entry_number') is not None:
             _review_field(provenance, 'title', reference.get('title'), title)
         return reference
 
@@ -217,17 +250,7 @@ def reconcile_reference_source(reference, *, layout_text=None):
     elif _FUSED_INITIALS.search(prefix) and 'authors' not in review:
         _review_field(provenance, 'authors', before, prefix)
 
-    venue_match = _LABELED_VENUE.match(tail)
-    if venue_match:
-        venue = _text(venue_match[1])
-        current = reference.get('venue') or reference.get('journal') or ''
-        if not current or (len(title) >= 12 and _title_key(title) in _title_key(current)):
-            reference['venue'] = venue
-            if 'journal' in reference:
-                reference['journal'] = venue
-            record_extraction_change(reference, 'venue', current, venue, 'bibliography_venue')
-        elif _title_key(venue) != _title_key(current) and len(venue.split()) > 1:
-            _review_field(provenance, 'venue', current, venue)
+    _reconcile_publication_fields(reference, tail, title)
     return reference
 
 

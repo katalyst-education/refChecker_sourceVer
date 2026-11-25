@@ -25,3 +25,22 @@ it('shows ambiguous author evidence alongside the original text and PDF page', (
   expect(screen.getByRole('link', { name: 'Open PDF page 177' }))
     .toHaveAttribute('href', '/api/paper-pdf/7#page=177')
 })
+
+it('shows cited publication fields and competing source readings', () => {
+  const reference = {
+    cited_metadata: { volume: '65', issue: '1–4', pages: '239–248' },
+    extraction_provenance: {
+      entry_number: 39,
+      source_text: '[39] A. G. Aberle, Solar energy materials and solar cells, vol. 65, no.\n1-4, pp. 239–248, 2001.',
+      review: { issue: { parsed: '1–4', source: ['1–4', '5'] } },
+    },
+  }
+
+  render(<ReferenceSourceDetails reference={reference} />)
+  screen.getByText(/Source bibliography \[39\]/).closest('details').open = true
+
+  expect(screen.getByText('Volume').nextElementSibling).toHaveTextContent('65')
+  expect(screen.getByText('Pages').nextElementSibling).toHaveTextContent('239–248')
+  expect(screen.getByText(/Review Issue/)).toBeVisible()
+  expect(screen.getByText('1–4 / 5')).toBeVisible()
+})

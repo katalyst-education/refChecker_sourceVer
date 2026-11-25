@@ -8,6 +8,7 @@ from refchecker.utils.reference_metadata import attach_bibliography_sources, cit
     ('venue', 'Other Journal'), ('doi', '10.1000/new'), ('arxiv_id', '2601.00001'),
     ('pmid', '1234'), ('url', 'https://example.org/new'), ('volume', '2'),
     ('issue', '3'), ('pages', '5–8'), ('publisher', 'Other Press'),
+    ('article_number', 'e123456'), ('series', 'Research Reports'),
     ('isbn', '9780000000000'), ('issn', '1234-5678'), ('edition', 'Second'),
 ])
 def test_each_cited_field_change_requires_verification(field, value):

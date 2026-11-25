@@ -18,6 +18,7 @@ from refchecker.utils.reference_metadata import (
     record_extraction_source,
     repair_pdf_citation_wraps,
 )
+from refchecker.utils.publication_fields import PUBLICATION_FIELDS
 
 
 logger = logging.getLogger(__name__)
@@ -371,7 +372,7 @@ def merge_grounded_reference_candidates(
 
         combined = dict(structured_ref)
         record_extraction_source(combined, 'grobid')
-        for field in ('title', 'year', 'venue', 'journal', 'doi', 'arxiv_id', 'url', 'raw_text'):
+        for field in ('title', 'year', 'venue', 'journal', 'doi', 'arxiv_id', 'url', 'raw_text', *PUBLICATION_FIELDS):
             if not combined.get(field) and text_ref.get(field):
                 combined[field] = text_ref[field]
                 if field != 'raw_text':
