@@ -31,8 +31,15 @@ import re
 from typing import Dict, List, Tuple, Optional, Any, Union
 from urllib.parse import quote_plus
 from refchecker.utils.doi_utils import extract_doi_from_url
-from refchecker.utils.text_utils import normalize_author_name, normalize_text, clean_title_basic, find_best_match, is_name_match, compare_authors, clean_title_for_search
-from refchecker.utils.error_utils import format_year_mismatch, format_doi_mismatch
+from refchecker.utils.text_utils import (
+    clean_title_basic, clean_title_for_search, compare_authors, compare_titles_with_latex_cleaning,
+    find_best_match, is_name_match, normalize_author_name, normalize_text, titles_match_with_typo_tolerance,
+)
+from refchecker.utils.error_utils import format_year_mismatch, format_doi_mismatch, format_title_mismatch
+from refchecker.utils.publication_fields import (
+    STRUCTURED_CITATION_BASIS, first_cited_page, journal_citation_locator, publication_value_key,
+)
+from refchecker.utils.venue_abbreviations import venues_core_match
 from refchecker.config.settings import get_config
 
 # Set up logging
@@ -66,6 +73,8 @@ def _normalize_crossref_work(work: Optional[Dict[str, Any]]) -> Optional[Dict[st
 # Get configuration
 config = get_config()
 SIMILARITY_THRESHOLD = config["text_processing"]["similarity_threshold"]
+_STRUCTURED_TITLE_THRESHOLD = 0.65
+_LOCATOR_SELECT = ",short-container-title,volume,issue,page,article-number"
 
 class CrossRefReferenceChecker:
     """
@@ -96,7 +105,7 @@ class CrossRefReferenceChecker:
     
     def search_works(self, query: str, year: Optional[int] = None, limit: int = 5) -> List[Dict[str, Any]]:
         from refchecker.utils.cache_utils import cached_api_response, cache_api_response
-        cache_q = f"{query}|{year}|{limit}"
+        cache_q = f"{query}|{year}|{limit}|{_LOCATOR_SELECT}"
         hit = cached_api_response(getattr(self, 'cache_dir', None), 'crossref', 'search_works', cache_q)
         if hit is not None:
             return hit
@@ -114,7 +123,7 @@ class CrossRefReferenceChecker:
         params = {
             "query": query,
             "rows": min(limit, 20),  # Limit for performance
-            "select": "DOI,title,author,published,publisher,container-title,type,URL,link,abstract,subject,is-referenced-by-count,references-count,funder"
+            "select": "DOI,title,author,published,publisher,container-title,type,URL,link,abstract,subject,is-referenced-by-count,references-count,funder" + _LOCATOR_SELECT,
         }
         
         # Add year filter if provided
@@ -179,7 +188,7 @@ class CrossRefReferenceChecker:
         cited title in the PDF was mangled by extraction).
         """
         from refchecker.utils.cache_utils import cached_api_response, cache_api_response
-        cache_q = f"bib|{bib_string}|{year}|{limit}"
+        cache_q = f"bib|{bib_string}|{year}|{limit}|{_LOCATOR_SELECT}"
         hit = cached_api_response(getattr(self, 'cache_dir', None), 'crossref', 'search_bib', cache_q)
         if hit is not None:
             return hit
@@ -199,7 +208,7 @@ class CrossRefReferenceChecker:
         params = {
             "query.bibliographic": bib_string,
             "rows": min(limit, 20),
-            "select": "DOI,title,author,published,published-print,published-online,issued,created,publisher,container-title,type,URL,link,abstract,subject,is-referenced-by-count,references-count,funder",
+            "select": "DOI,title,author,published,published-print,published-online,issued,created,publisher,container-title,type,URL,link,abstract,subject,is-referenced-by-count,references-count,funder" + _LOCATOR_SELECT,
         }
         if year:
             # Widen the window to year±1 for the bib fallback. This is
@@ -256,6 +265,90 @@ class CrossRefReferenceChecker:
         if reference.get('year'):
             bits.append(str(reference['year']))
         return '. '.join(bits)
+
+    @staticmethod
+    def _build_locator_query(locator):
+        parts = [locator.venue, f"vol. {locator.volume}"]
+        if locator.issue:
+            parts.append(f"no. {locator.issue}")
+        if locator.article_number:
+            parts.append(f"article {locator.article_number}")
+        else:
+            parts.append(f"p. {locator.first_page}")
+        return ', '.join(parts)
+
+    @staticmethod
+    def _compare_journal_locator(locator, work):
+        """Return True for confirmed coordinates, False for conflicts, or None for gaps."""
+        venues = [work[field] for field in ('container-title', 'short-container-title') if work.get(field)]
+        venue_match = any(venues_core_match(locator.venue, venue) for venue in venues)
+        volume = publication_value_key('volume', work.get('volume')).casefold()
+        issue = publication_value_key('issue', work.get('issue')).casefold()
+        page_text = publication_value_key('pages', work.get('page')).casefold()
+        first_page = first_cited_page(page_text)
+        article = publication_value_key('article_number', work.get('article-number')).casefold()
+        if work.get('type') not in (None, '', 'journal-article'):
+            return None
+        if venues and not venue_match:
+            return False
+        if (volume and volume != locator.volume) or (issue and locator.issue and issue != locator.issue):
+            return False
+        if locator.article_number:
+            # Some records deposit an electronic locator as a single page.
+            actual = article or (page_text if '–' not in page_text else '')
+            expected = locator.article_number
+            if (
+                (article or '–' in page_text) and locator.first_page and first_page
+                and locator.first_page != first_page
+            ):
+                return False
+        else:
+            actual = first_page or (article if article == locator.first_page else '')
+            expected = locator.first_page
+        if actual and actual != expected:
+            return False
+        return True if venue_match and volume and actual else None
+
+    def _search_candidates(self, results):
+        """Normalize search results for the shared title and author comparators."""
+        for result in results:
+            work = _normalize_crossref_work(result)
+            if work and work.get('title'):
+                work['publication_year'] = self.extract_best_publication_year(work)
+                work['authors'] = self._crossref_author_names(work.get('author', []))
+                yield work
+
+    def _pick_locator_match(self, results, locator, title, authors, year):
+        """Identify a single work with corroborating publication, title, and author data."""
+        cited_names = [authors] if isinstance(authors, str) else authors
+        first_author = self._author_name(cited_names[0]) if cited_names else ''
+        if not first_author or not title:
+            return None
+        matches = {}
+        for work in results:
+            if self._compare_journal_locator(locator, work) is not True:
+                continue
+            actual_authors = work['authors']
+            if not actual_authors or not is_name_match(first_author, actual_authors[0]):
+                continue
+            try:
+                if year and work['publication_year'] and abs(int(year) - int(work['publication_year'])) > 1:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            score = compare_titles_with_latex_cleaning(title, work['title'])
+            # Pagination can restart with each issue. Require issue agreement
+            # as extra corroboration before accepting a weaker title match.
+            confirmed_issue = locator.issue and work.get('issue')
+            title_matches = score >= SIMILARITY_THRESHOLD or confirmed_issue and (
+                score >= _STRUCTURED_TITLE_THRESHOLD or titles_match_with_typo_tolerance(title, work['title'])
+            )
+            doi = str(work.get('DOI') or '').strip().casefold()
+            if title_matches and doi:
+                matches.setdefault(doi, work)
+        if len(matches) != 1:
+            return None
+        return {**next(iter(matches.values())), '_verification_basis': STRUCTURED_CITATION_BASIS}
 
     def get_work_by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
         from refchecker.utils.cache_utils import cached_api_response, cache_api_response
@@ -523,7 +616,7 @@ class CrossRefReferenceChecker:
         authors = reference.get('authors', [])
         year = reference.get('year', 0)
         url = reference.get('url', '')
-        raw_text = reference.get('raw_text', '')
+        locator = journal_citation_locator(reference) if title and authors else None
         
         # If we have a DOI, try to get the work directly
         doi = None
@@ -569,24 +662,10 @@ class CrossRefReferenceChecker:
             
             # Search for the work
             search_results = self.search_works(cleaned_title, year)
-            
-            # Process search results for CrossRef format
-            processed_results = []
-            for result in search_results:
-                # CrossRef title format: ["Title of the Paper"]
-                result_titles = result.get('title', [])
-                if result_titles:
-                    result_title = result_titles[0] if isinstance(result_titles, list) else str(result_titles)
-                    # Create a normalized result for the utility function
-                    processed_result = dict(result)
-                    processed_result['title'] = result_title
-                    processed_result['publication_year'] = self.extract_best_publication_year(result)
-                    # ``find_best_match`` consumes the normalized ``authors``
-                    # key, while Crossref returns singular ``author``.
-                    processed_result['authors'] = self._crossref_author_names(
-                        result.get('author', [])
-                    )
-                    processed_results.append(processed_result)
+            processed_results = [
+                work for work in self._search_candidates(search_results)
+                if not locator or self._compare_journal_locator(locator, work) is not False
+            ]
             
             if processed_results:
                 best_match, best_score = find_best_match(processed_results, cleaned_title, year, authors)
@@ -626,31 +705,17 @@ class CrossRefReferenceChecker:
             else:
                 logger.debug(f"No works found for title in CrossRef: {cleaned_title}")
 
-        # Bibliographic-string fallback: when title-only search misses
-        # (typically because the PDF extractor mangled the title or the
-        # cited form differs heavily from the canonical), feed Crossref
-        # the raw citation string. query.bibliographic is purpose-built
-        # for unstructured bib lines and frequently recovers papers the
-        # title path drops.
+        # Allocate the existing bibliographic lookup to the best available input.
         if not work_data:
-            bib_query = self._build_bibliographic_query(reference)
-            if bib_query and len(bib_query) >= 20:
+            bib_query = self._build_locator_query(locator) if locator else self._build_bibliographic_query(reference)
+            if locator or len(bib_query) >= 20:
                 logger.debug(f"Trying CrossRef bibliographic search: {bib_query[:80]}...")
-                bib_results = self.search_works_bibliographic(bib_query, year)
-                processed_bib = []
-                for result in bib_results:
-                    result_titles = result.get('title', [])
-                    if not result_titles:
-                        continue
-                    result_title = result_titles[0] if isinstance(result_titles, list) else str(result_titles)
-                    processed_result = dict(result)
-                    processed_result['title'] = result_title
-                    processed_result['publication_year'] = self.extract_best_publication_year(result)
-                    processed_result['authors'] = self._crossref_author_names(
-                        result.get('author', [])
-                    )
-                    processed_bib.append(processed_result)
-                if processed_bib:
+                candidates = self._search_candidates(self.search_works_bibliographic(bib_query, year))
+                if locator:
+                    work_data = self._pick_locator_match(candidates, locator, title, authors, year)
+                    if work_data:
+                        logger.debug("Found work by Crossref journal locator: %s", work_data.get('DOI'))
+                else:
                     # When the title field is present we score against the
                     # clean Crossref title and demand the normal threshold.
                     # When title is missing entirely (extractor mangled it)
@@ -664,7 +729,7 @@ class CrossRefReferenceChecker:
                     else:
                         cmp_title = reference.get('raw_text') or ''
                         threshold = 0.5
-                    best_match, best_score = find_best_match(processed_bib, cmp_title, year, authors)
+                    best_match, best_score = find_best_match(list(candidates), cmp_title, year, authors)
                     if best_match and best_score >= threshold:
                         candidate_authors = best_match.get('authors', [])
                         if not (
@@ -681,7 +746,7 @@ class CrossRefReferenceChecker:
                             )
                             logger.debug(f"Found work via CrossRef bibliographic fallback (score {best_score:.2f})")
 
-        if not work_data and deferred_title_match:
+        if not work_data and deferred_title_match and not locator:
             work_data = deferred_title_match
             logger.info(
                 "[DOI_TRACE] stage=crossref_deferred_title_restored matched_doi=%r",
@@ -692,6 +757,16 @@ class CrossRefReferenceChecker:
         if not work_data:
             logger.debug("Could not find matching work in CrossRef")
             return None, [], None
+
+        if (
+            work_data.get('_verification_basis') == STRUCTURED_CITATION_BASIS
+            and compare_titles_with_latex_cleaning(title, work_data['title']) < SIMILARITY_THRESHOLD
+        ):
+            errors.append({
+                'warning_type': 'title',
+                'warning_details': format_title_mismatch(title, work_data['title']),
+                'ref_title_correct': work_data['title'],
+            })
         
         # Verify authors
         if authors:

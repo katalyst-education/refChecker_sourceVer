@@ -1,9 +1,11 @@
 """Extract publication details from the part of a printed citation after its title."""
 
 import re
+from typing import NamedTuple
 
 
 PUBLICATION_FIELDS = ('volume', 'issue', 'pages', 'article_number', 'publisher', 'series')
+STRUCTURED_CITATION_BASIS = 'structured_citation'
 
 _NUMBER = r'[A-Za-z]?\d+[A-Za-z]?'
 _RANGE = rf'{_NUMBER}(?:\s*[-\u2010-\u2014]+\s*{_NUMBER})?'
@@ -34,6 +36,40 @@ _TRAILING_LINK = re.compile(
 _PLACE_AND_PUBLISHER = re.compile(
     r'[^,:;\d]+(?:,\s*[^,:;\d]+)?\s*:\s*([^,;]+),\s*(?:19|20)\d{2}[.;]?\s*$'
 )
+
+
+class JournalCitationLocator(NamedTuple):
+    venue: str
+    volume: str
+    issue: str
+    first_page: str
+    article_number: str
+
+
+def first_cited_page(value):
+    pages = publication_value_key('pages', value)
+    if re.fullmatch(_RANGE, pages):
+        return pages.split('–', 1)[0].casefold()
+    return ''
+
+
+def journal_citation_locator(reference):
+    """Use cited fields that can anchor a journal search independently of the title."""
+    review = (reference.get('extraction_provenance') or {}).get('review') or {}
+    if review.keys() & {'venue', 'journal', 'volume', 'issue', 'pages', 'article_number'}:
+        return None
+    if reference.get('bibtex_type') not in (None, '', 'article', 'biblatex'):
+        return None
+    venue = ' '.join(str(reference.get('venue') or reference.get('journal') or '').split())
+    volume = publication_value_key('volume', reference.get('volume')).casefold()
+    issue = publication_value_key('issue', reference.get('issue')).casefold()
+    page = first_cited_page(reference.get('pages'))
+    article = publication_value_key('article_number', reference.get('article_number')).casefold()
+    if not venue or not re.fullmatch(_RANGE, volume) or not (article or page):
+        return None
+    if article and not re.fullmatch(r'[a-z0-9][a-z0-9.-]*', article):
+        return None
+    return JournalCitationLocator(venue, volume, issue, page, article)
 
 
 def publication_tail(source, title):

@@ -38,6 +38,7 @@ from backend.reference_urls import build_authoritative_urls
 from backend.reference_result import project_cited_evidence, project_verification_result
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.utils.extraction_quality import ground_pdf_references
+from refchecker.utils.publication_fields import STRUCTURED_CITATION_BASIS, journal_citation_locator
 from refchecker.utils.reference_metadata import attach_bibliography_sources, cited_metadata_changed
 from refchecker.utils.reference_metadata import normalize_reference_fields as _normalize_reference_fields
 from refchecker.services.pdf_processor import PDFProcessor
@@ -3498,9 +3499,13 @@ class ProgressRefChecker:
             try:
                 from .database import db as _db
                 cached = await _db.lookup_verified_reference(reference)
-                if not (cached and isinstance(cached.get("result"), dict) and cached["result"]):
+                locator = journal_citation_locator(reference)
+                if not locator and not (cached and isinstance(cached.get("result"), dict) and cached["result"]):
                     fuzzy = await _db.find_verified_by_fuzzy(reference)
-                    if fuzzy and isinstance(fuzzy.get("result"), dict) and fuzzy["result"]:
+                    if (
+                        fuzzy and isinstance(fuzzy.get("result"), dict) and fuzzy["result"]
+                        and fuzzy["result"].get("verification_basis") != STRUCTURED_CITATION_BASIS
+                    ):
                         cached = fuzzy
                         logger.debug(
                             "Fuzzy cache hit (score=%s) for ref '%s' — short-circuited LLM/network",
@@ -3509,6 +3514,8 @@ class ProgressRefChecker:
                 if cached and isinstance(cached.get("result"), dict) and cached["result"]:
                     cached_result = dict(cached["result"])
                     if not self._can_reuse_cached_result(cached_result) or (
+                        cached_result.get("verification_basis") == STRUCTURED_CITATION_BASIS and not locator
+                    ) or (
                         "_fuzzy_match_score" not in cached and cited_metadata_changed(
                             cached_result.get("cited_metadata", reference), reference,
                         )

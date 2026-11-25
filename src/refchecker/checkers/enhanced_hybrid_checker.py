@@ -824,9 +824,17 @@ class EnhancedHybridReferenceChecker:
                 from refchecker.utils.text_utils import (
                     compare_titles_with_latex_cleaning,
                     titles_align_with_subtitle_tolerance,
+                    titles_match_with_typo_tolerance,
                 )
+                from refchecker.utils.publication_fields import STRUCTURED_CITATION_BASIS
+
                 title_similarity = float(compare_titles_with_latex_cleaning(cited_title, actual_title))
-                title_aligned = titles_align_with_subtitle_tolerance(cited_title, actual_title)
+                # The locator search already checked the journal, volume,
+                # locator, and first author before assigning this basis.
+                title_aligned = titles_align_with_subtitle_tolerance(cited_title, actual_title) or (
+                    data.get('_verification_basis') == STRUCTURED_CITATION_BASIS
+                    and titles_match_with_typo_tolerance(cited_title, actual_title)
+                )
             except Exception:
                 title_similarity = 1.0 if cited_title.casefold() == actual_title.casefold() else 0.0
 

@@ -19,6 +19,9 @@ from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
 from refchecker.utils.arxiv_utils import get_bibtex_content
+from refchecker.utils.doi_utils import extract_doi_from_url, normalize_doi
+from refchecker.utils.publication_fields import journal_citation_locator
+from refchecker.utils.reference_metadata import cited_metadata_snapshot
 from refchecker.utils.reference_suggestions import should_suggest_arxiv_url
 from refchecker.utils.text_utils import (
     detect_latex_bibliography_format,
@@ -63,7 +66,7 @@ def _safe_print_labeled(emoji: str, text: str) -> None:
 def _normalize_cache_key(reference: Dict[str, Any]) -> Optional[tuple]:
     """Build a normalized cache key from a reference dict.
 
-    Returns (title_lower, first_author_last_lower, year_str) or None if
+    Returns title, first author, year, and optional journal identity, or None if
     the reference doesn't have enough information to cache reliably.
     """
     title = (reference.get('title') or '').strip().lower()
@@ -83,13 +86,19 @@ def _normalize_cache_key(reference: Dict[str, Any]) -> Optional[tuple]:
 
     year = str(reference.get('year') or '').strip()
 
-    return (title, first_author_last, year)
+    locator = journal_citation_locator(reference)
+    journal_identity = None
+    if locator:
+        doi = reference.get('doi') or extract_doi_from_url(reference.get('url') or reference.get('cited_url') or '')
+        cited_authors = tuple(name.casefold() for name in cited_metadata_snapshot(reference)['authors'])
+        journal_identity = (locator, normalize_doi(doi or ''), cited_authors)
+    return (title, first_author_last, year, journal_identity)
 
 
 class BulkVerificationCache:
     """Thread-safe cross-paper cache for reference verification results.
 
-    Keyed on normalized (title, first_author_last, year).  Stores the full
+    Keyed on normalized title, first author, year, and journal identity. Stores the full
     (errors, url, verified_data) tuple so subsequent papers citing the same
     reference skip the API calls entirely.
     """
