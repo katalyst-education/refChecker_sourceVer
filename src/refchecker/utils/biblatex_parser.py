@@ -11,6 +11,7 @@ Handles parsing of biblatex .bbl format references like:
 import re
 import logging
 from typing import List, Dict, Any
+from refchecker.utils.text_normalization import normalize_wrapped_hyphens
 
 logger = logging.getLogger(__name__)
 
@@ -32,28 +33,7 @@ def _handle_hyphenated_line_breaks(content: str) -> str:
     Returns:
         Content with appropriate hyphen handling
     """
-    # Find all hyphen + line break patterns
-    hyphen_matches = list(re.finditer(r'(\w+)-\s*\n\s*(\w+)', content))
-    
-    # Process matches in reverse order to avoid offset issues
-    for match in reversed(hyphen_matches):
-        before_word = match.group(1)
-        after_word = match.group(2)
-        full_match = match.group(0)
-        
-        # Determine if this is a syllable break or compound word
-        if _is_syllable_break(before_word, after_word):
-            # Remove hyphen for syllable breaks
-            replacement = before_word + after_word
-        else:
-            # Keep hyphen for compound words
-            replacement = before_word + '-' + after_word
-            
-        # Replace in content
-        start, end = match.span()
-        content = content[:start] + replacement + content[end:]
-    
-    return content
+    return normalize_wrapped_hyphens(content, join=_is_syllable_break)
 
 
 def _is_syllable_break(before_word: str, after_word: str) -> bool:
@@ -67,6 +47,10 @@ def _is_syllable_break(before_word: str, after_word: str) -> bool:
     Returns:
         True if this appears to be a syllable break, False if compound word
     """
+    # A capital after the break can begin the second part of a compound name.
+    if after_word[0].isupper():
+        return False
+
     # Convert to lowercase for analysis
     before_lower = before_word.lower()
     after_lower = after_word.lower()
@@ -81,8 +65,8 @@ def _is_syllable_break(before_word: str, after_word: str) -> bool:
         (before_lower.endswith(('ing', 'tion', 'sion', 'ness', 'ment', 'ful', 'less', 'ity', 'ies', 'ly', 'ed')) and
          len(after_lower) <= 4),
         
-        # Short fragments that are likely syllable breaks
-        (len(before_lower) <= 4 and len(after_lower) <= 4),
+        # Short title-cased name fragments, e.g. "Auth-or".
+        (before_word[0].isupper() and len(before_lower) <= 4 and len(after_lower) <= 4),
         
         # Common prefixes that typically form single words/suffixes
         (before_lower in ['pre', 'post', 'anti', 'co', 'sub', 'out', 'up', 'non', 'dis', 'mis', 'un', 'in', 're'] or
@@ -101,9 +85,6 @@ def _is_syllable_break(before_word: str, after_word: str) -> bool:
         # Common compound word patterns
         (before_lower.endswith('er') and len(before_lower) >= 4 and len(after_lower) >= 6),
         
-        # Both words start with capital (likely proper nouns or technical terms)
-        (before_word[0].isupper() and after_word[0].isupper() and 
-         len(before_word) >= 4 and len(after_word) >= 4),
     ]
     
     # Check compound word patterns first (more specific)
@@ -327,6 +308,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     # Normalize whitespace and remove line breaks
     # Handle hyphenated words split across lines with intelligence to distinguish
     # between syllable breaks (remove hyphen) and compound words (keep hyphen)
+    raw_content = content
     content = _handle_hyphenated_line_breaks(content)
     # Then normalize all other whitespace
     content = re.sub(r'\s+', ' ', content.strip())
@@ -606,7 +588,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         'type': ref_type,
         'bibtex_key': f"ref{entry_num}",  # Generate key since biblatex doesn't have explicit keys
         'bibtex_type': 'biblatex',
-        'raw_text': f"[{entry_num}] {content}",
+        'raw_text': f"[{entry_num}] {raw_content}",
         'entry_number': int(entry_num)
     }
     

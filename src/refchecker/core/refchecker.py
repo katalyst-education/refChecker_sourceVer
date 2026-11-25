@@ -69,6 +69,7 @@ from refchecker.utils.reference_metadata import (
     record_extraction_change,
     record_extraction_source,
 )
+from refchecker.utils.text_normalization import normalize_initial_spacing, normalize_wrapped_hyphens
 from refchecker.utils.extraction_quality import ground_pdf_references
 from refchecker.services.pdf_processor import PDFProcessor
 from refchecker.checkers.enhanced_hybrid_checker import EnhancedHybridReferenceChecker
@@ -2283,20 +2284,13 @@ class ArxivReferenceChecker:
             return [{"is_url_reference": True}]
         
         # Normalize whitespace and fix line breaks in names
-        authors_text = re.sub(r'\s+', ' ', authors_text).strip()
+        authors_text = ' '.join(normalize_wrapped_hyphens(authors_text).split())
         
         # Handle cases like "Vinyals & Kaiser" -> "Vinyals, Kaiser"
         authors_text = re.sub(r'([A-Za-z]+)\s*&\s*([A-Za-z]+)', r'\1, \2', authors_text)
         
-        # Fix common hyphenation issues from line breaks (e.g., "Fredrik- son" -> "Fredrikson")
-        authors_text = re.sub(r'([a-z])- ([a-z])', r'\1\2', authors_text, flags=re.IGNORECASE)
-        
         # Normalize spacing around periods
-        authors_text = re.sub(r'([A-Z])\s+\.\s+', r'\1. ', authors_text)
-        
-        # Fix issues with spaces between initials (e.g., "V . Le" -> "V. Le")
-        authors_text = re.sub(r'([A-Z])\s+\.\s*([A-Z])', r'\1. \2', authors_text)
-        authors_text = re.sub(r'([A-Z])\s+\.\s*([a-z])', r'\1. \2', authors_text)
+        authors_text = normalize_initial_spacing(authors_text)
         
         # Check if we potentially have a full reference instead of just authors
         # Look for patterns that indicate this might include the title
@@ -2385,11 +2379,7 @@ class ArxivReferenceChecker:
             Tuple of (authors list, title) or None if extraction failed
         """
         # First, normalize the text - replace newlines with spaces
-        cleaned_ref = re.sub(r'\s+', ' ', ref_text).strip()
-        
-        # Fix common hyphenation issues from line breaks BEFORE pattern matching
-        # This handles cases like "Fredrik- son" -> "Fredrikson"
-        cleaned_ref = re.sub(r'([a-z])- ([a-z])', r'\1\2', cleaned_ref, flags=re.IGNORECASE)
+        cleaned_ref = ' '.join(normalize_wrapped_hyphens(ref_text).split())
         
         # Remove any leading reference numbers like [1]
         cleaned_ref = re.sub(r'^\s*\[\d+\]\s*', '', cleaned_ref)

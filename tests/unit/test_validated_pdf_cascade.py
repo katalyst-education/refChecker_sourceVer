@@ -157,6 +157,30 @@ def test_pdf_layout_recovers_a_citation_tail_on_the_following_page(monkeypatch):
     assert references[0]['extraction_provenance']['layout_text'].endswith('vol. 18, 2020.')
 
 
+@pytest.mark.parametrize('both_spellings', [False, True])
+def test_pdf_wraps_use_intact_source_spellings(monkeypatch, both_spellings):
+    raw = FIRST.replace('Solar absorber characterization', 'Kinetics of amor-\nphous films in non-\nempty layers')
+    body = 'The amorphous samples have a non-empty layer.'
+    if both_spellings:
+        body += ' A table also uses amor-phous.'
+    checker = _checker()
+    references = checker._parse_references_regex(raw)
+    _, open_pdf = _layout_document(monkeypatch, raw)
+    paper_text = body + '\n\f\nReferences\n' + raw
+
+    ground_pdf_references(references, paper_text, bibliography_text=raw, pdf_path='sample.pdf')
+    ground_pdf_references(references, paper_text, bibliography_text=raw, pdf_path='sample.pdf')
+
+    [reference] = references
+    material = 'amor-phous' if both_spellings else 'amorphous'
+    assert reference['title'] == f'Kinetics of {material} films in non-empty layers'
+    evidence = reference['extraction_provenance']
+    assert evidence['source_text'] == raw
+    assert reference['raw_text'] == raw
+    assert len([repair for repair in evidence['repairs'] if repair['field'] == 'title']) == 1
+    open_pdf.assert_not_called()
+
+
 def test_full_pdf_and_selected_reextraction_share_the_same_recovery(monkeypatch, tmp_path):
     from backend.refchecker_wrapper import ProgressRefChecker
     from refchecker.core.bulk_pipeline import extract_bibliography_bulk

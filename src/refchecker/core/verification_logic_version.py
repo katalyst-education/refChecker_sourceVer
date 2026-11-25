@@ -43,6 +43,6 @@ History:
         findings survive the database search fallback.
 """
 
-VERIFICATION_LOGIC_VERSION = 9
+VERIFICATION_LOGIC_VERSION = 10
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

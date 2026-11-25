@@ -3,7 +3,15 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 import re
-import unicodedata
+
+from refchecker.utils.text_normalization import (
+    align_supported_wraps,
+    normalize_initial_spacing,
+    normalize_pdf_typography,
+    normalize_wrapped_hyphens,
+    unbroken_words,
+    wrapped_word_parts,
+)
 
 
 _CITATION_FIELDS = (
@@ -20,7 +28,6 @@ _LABELED_VENUE = re.compile(
     re.IGNORECASE,
 )
 _INITIAL = r'[^\W\d_]\.'
-_INITIAL_SPACING = re.compile(rf'\b({_INITIAL})\s*(?=[^\W\d_])')
 _INITIALLED_NAME = re.compile(
     rf'(?:{_INITIAL}(?:-{_INITIAL})?\s*)+\s+[^\W\d_][\w\s\-’\']*',
 )
@@ -36,12 +43,14 @@ def _authors(reference):
     authors = reference.get('authors') or []
     if isinstance(authors, str):
         authors = [authors]
-    return [
-        _text(author.get('name') or ' '.join(
-            _text(author.get(field)) for field in ('givenName', 'familyName')
-        )) if isinstance(author, dict) else _text(author)
-        for author in authors
-    ]
+    names = []
+    for author in authors:
+        if isinstance(author, dict):
+            author = author.get('name') or ' '.join(
+                _text(author.get(field)) for field in ('givenName', 'familyName')
+            )
+        names.append(_text(normalize_wrapped_hyphens(str(author) if author is not None else '')))
+    return names
 
 
 def cited_metadata_snapshot(reference):
@@ -53,10 +62,11 @@ def cited_metadata_snapshot(reference):
     own lifecycles and are excluded from this citation snapshot.
     """
     result = {field: _text(reference.get(field)) for field in _CITATION_FIELDS}
+    result['title'] = _text(normalize_wrapped_hyphens(str(reference.get('title') or '')))
     result['venue'] = sorted({_text(reference.get(field)) for field in ('venue', 'journal')} - {''})
     result['url'] = sorted({_text(reference.get(field)) for field in ('cited_url', 'url')} - {''})
     result['authors'] = [
-        _INITIAL_SPACING.sub(r'\1 ', author)
+        normalize_initial_spacing(author)
         for author in _authors(reference)
     ]
     return result
@@ -131,7 +141,7 @@ def record_extraction_change(reference, field, before, after, reason):
 
 
 def _compact(value):
-    return ''.join(unicodedata.normalize('NFC', value).split()).casefold()
+    return ''.join(normalize_pdf_typography(value).split()).casefold()
 
 
 def _title_key(value):
@@ -168,7 +178,7 @@ def reconcile_reference_source(reference, *, layout_text=None):
         return reference
 
     parsed_title = reference['title']
-    source_title = _text(title)
+    source_title = _text(normalize_wrapped_hyphens(title))
     if _compact(source_title) == _compact(parsed_title) and len(source_title.split()) > len(parsed_title.split()):
         reference['title'] = source_title
         record_extraction_change(reference, 'title', parsed_title, source_title, 'bibliography_title')
@@ -263,3 +273,47 @@ def needs_pdf_layout_review(reference):
     provenance = reference.get('extraction_provenance') or {}
     prefix, _, _ = _quoted_parts(provenance.get('source_text', ''))
     return bool(_FUSED_INITIALS.search(prefix) and 'authors' in provenance.get('review', {}))
+
+
+def repair_pdf_citation_wraps(references, paper_text):
+    """Use intact spellings in the document to resolve ambiguous citation wraps."""
+    vocabulary = None
+    for reference in references:
+        provenance = reference.get('extraction_provenance') or {}
+        pairs = {
+            (left.casefold(), right.casefold())
+            for field in ('source_text', 'layout_text')
+            for left, right in wrapped_word_parts(provenance.get(field, ''))
+            if left[-1].islower() and right[0].islower()
+        }
+        if not pairs:
+            continue
+        if vocabulary is None:
+            vocabulary = unbroken_words(paper_text)
+        unhyphenated = {
+            (left, right) for left, right in pairs
+            if left + right in vocabulary and f'{left}-{right}' not in vocabulary
+        }
+        hyphenated = {
+            (left, right) for left, right in pairs
+            if f'{left}-{right}' in vocabulary and left + right not in vocabulary
+        }
+        if not unhyphenated and not hyphenated:
+            continue
+        title = reference.get('title')
+        if isinstance(title, str):
+            repaired = align_supported_wraps(title, unhyphenated, hyphenated)
+            reference['title'] = repaired
+            record_extraction_change(reference, 'title', title, repaired, 'pdf_layout')
+        authors = reference.get('authors')
+        if isinstance(authors, str):
+            repaired = align_supported_wraps(authors, unhyphenated, hyphenated)
+        elif isinstance(authors, list):
+            repaired = [
+                align_supported_wraps(name, unhyphenated, hyphenated) if isinstance(name, str) else name
+                for name in authors
+            ]
+        else:
+            continue
+        reference['authors'] = repaired
+        record_extraction_change(reference, 'authors', authors, repaired, 'pdf_layout')

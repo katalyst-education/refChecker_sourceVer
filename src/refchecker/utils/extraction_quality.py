@@ -16,6 +16,7 @@ from refchecker.utils.reference_metadata import (
     reconcile_reference_source,
     record_extraction_change,
     record_extraction_source,
+    repair_pdf_citation_wraps,
 )
 
 
@@ -312,12 +313,14 @@ def ground_pdf_references(references, paper_text, *, pdf_path=None, pdf_content=
         selected.update(page for pages in targets.values() for page in pages)
 
     if not selected or (not pdf_path and pdf_content is None):
+        repair_pdf_citation_wraps(references, paper_text)
         return references
     try:
         source = pdf_path or io.BytesIO(pdf_content.getvalue())
         layout = _read_pdf_layout(source, selected)
     except Exception as exc:
         logger.debug('Could not read alternate PDF layout for bibliography: %s', exc)
+        repair_pdf_citation_wraps(references, paper_text)
         return references
 
     logger.debug('Retried bibliography extraction on PDF pages %s', [page + 1 for page in sorted(selected)])
@@ -328,6 +331,7 @@ def ground_pdf_references(references, paper_text, *, pdf_path=None, pdf_content=
                 reconcile_reference_source(reference, layout_text=entries[0])
     if quality_check:
         _repair_layout_entries(references, layout, primary, by_number, targets, merged, gaps)
+    repair_pdf_citation_wraps(references, paper_text)
     return references
 
 

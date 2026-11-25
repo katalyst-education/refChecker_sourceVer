@@ -25,6 +25,31 @@ from refchecker.utils.text_utils import (
     compare_titles_with_latex_cleaning,
     compare_authors
 )
+
+
+def test_pdf_typography_keeps_real_hyphens_in_a_search_title():
+    from refchecker.utils.text_utils import clean_title_for_search, compare_titles_with_latex_cleaning
+
+    extracted = 'Classiﬁcation of amor\u00ad\nphous thin-\nfilm materials'
+    canonical = 'Classification of amorphous thin-film materials'
+    assert clean_title_for_search(extracted) == canonical
+    assert compare_titles_with_latex_cleaning(extracted, canonical) == 1.0
+
+
+def test_detached_accents_preserve_unrelated_word_boundaries():
+    from refchecker.utils.text_utils import normalize_diacritics_simple
+
+    assert normalize_diacritics_simple('A Study of R ´enyi Flow') == 'A Study of Renyi Flow'
+    assert normalize_diacritics_simple('The Łu\u0301na ﬂow') == 'The Łuna flow'
+
+
+def test_compact_initials_accent_and_line_wrap_in_author_name():
+    from refchecker.utils.text_utils import clean_author_name, enhanced_name_match
+
+    assert clean_author_name('É . -J .Tejada-\nRomero') == 'É.-J. Tejada-Romero'
+    assert enhanced_name_match('É . -J .Tejada-\nRomero', 'É.-J. Tejada-Romero')
+    assert enhanced_name_match('A.G.Aberle', 'A. G. Aberle')
+    assert not enhanced_name_match('A.G.Aberle', 'T. P. Aberle')
 from refchecker.utils.url_utils import extract_arxiv_id_from_url
 
 

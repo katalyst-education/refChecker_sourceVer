@@ -58,6 +58,15 @@ def test_initial_spacing_is_equivalent_but_a_fused_surname_changes_the_citation(
     assert cited_metadata_changed(source, {'authors': ['R.A.MarquesLameirinhas']})
 
 
+def test_equal_citation_typography_does_not_require_database_search():
+    before = {'title': 'Classiﬁcation of thin-\nfilm', 'authors': ['S .Ru\u0308hle']}
+    after = {'title': 'Classification of thin-film', 'authors': ['S. Rühle']}
+    assert not cited_metadata_changed(before, after)
+
+    assert cited_metadata_changed(after, {**after, 'title': 'Classification of thinfilm'})
+    assert cited_metadata_changed(after, {**after, 'authors': ['S. Ruhle']})
+
+
 def test_numbered_entry_restores_missing_author_and_records_original_values():
     raw = '[21] S. Rühle, “A photovoltaic study,”Solar Energy, vol. 130, 2016.'
     parsed = {'entry_number': 21, 'title': 'A photovoltaic study', 'authors': ['Unknown Author']}

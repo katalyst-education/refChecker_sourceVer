@@ -42,6 +42,11 @@ damaged text. A recovered entry must agree with its source text or the
 surrounding bibliography entries before it is included in verification.
 Clean bibliographies take the normal extraction path.
 
+RefChecker normalizes presentation ligatures, soft hyphens, accent artifacts,
+and spacing around author initials for matching. When the PDF contains an
+intact spelling that resolves an ambiguous line wrap in a citation, RefChecker
+uses that spelling and records the repair alongside the original entry.
+
 ## Verification
 
 Each extracted reference is checked through the shared source pipeline. The UI displays:

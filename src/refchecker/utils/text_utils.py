@@ -9,6 +9,12 @@ import unicodedata
 import html
 from typing import List, Optional
 
+from refchecker.utils.text_normalization import (
+    normalize_initial_spacing,
+    normalize_pdf_typography,
+    normalize_wrapped_hyphens,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,7 +128,7 @@ def normalize_text(text):
         return ""
         
     # First normalize apostrophes to standard form
-    text = normalize_apostrophes(text)
+    text = normalize_apostrophes(normalize_wrapped_hyphens(text))
         
     # Replace common special characters with their ASCII equivalents
     replacements = {
@@ -191,10 +197,10 @@ def parse_authors_with_initials(authors_text):
     # Clean LaTeX commands early to prevent parsing issues
     # This fixes cases like "Hochreiter, Sepp and Schmidhuber, J{\"u}rgen" 
     # which should parse as 2 authors, not get split incorrectly due to LaTeX braces
-    authors_text = strip_latex_commands(authors_text)
+    authors_text = strip_latex_commands(normalize_wrapped_hyphens(authors_text))
     
     # Fix spacing around periods in initials (e.g., "Y . Li" -> "Y. Li") before parsing
-    authors_text = re.sub(r'(\w)\s+\.', r'\1.', authors_text)
+    authors_text = normalize_initial_spacing(authors_text)
     
     # Normalize multi-line whitespace (especially for BibTeX author strings with line breaks)
     # This fixes cases like "Haotian Liu and\n                     Chunyuan Li and\n                     Qingyang Wu"
@@ -573,8 +579,8 @@ def clean_author_name(author):
     
     import unicodedata
     
-    # Normalize Unicode characters (e.g., combining diacritics)
-    author = unicodedata.normalize('NFKC', author)
+    # Normalize the text-layer typography before compatibility normalization.
+    author = unicodedata.normalize('NFKC', normalize_wrapped_hyphens(author))
     
     # Normalize apostrophes first before other processing
     author = normalize_apostrophes(author)
@@ -625,7 +631,7 @@ def clean_author_name(author):
     author = re.sub(r'\s+', ' ', author).strip()
     
     # Fix spacing around periods in initials (e.g., "Y . Li" -> "Y. Li")
-    author = re.sub(r'(\w)\s+\.', r'\1.', author)
+    author = normalize_initial_spacing(author)
     
     # Remove common honorific prefixes only when they are standalone at the start (require trailing whitespace)
     # Previous pattern falsely removed the leading "Mr" from names like "Mrinmaya" due to optional whitespace.
@@ -737,8 +743,7 @@ def clean_title_basic(title):
         return str(title) if title is not None else ''
     
     # Clean up newlines and normalize whitespace
-    title = title.replace('\n', ' ').strip()
-    title = re.sub(r'\s+', ' ', title)
+    title = ' '.join(normalize_wrapped_hyphens(title).split())
     
     # Remove trailing punctuation
     title = re.sub(r'[.,;:]+$', '', title)
@@ -769,7 +774,7 @@ def clean_title_for_search(title):
     
     # Strip markup to handle math formatting and other title markup
     # from APIs (e.g. OpenAlex/DBLP HTML subscript tags).
-    title = strip_html_markup(title)
+    title = strip_html_markup(normalize_wrapped_hyphens(title))
 
     # Strip LaTeX commands to handle math formatting and other LaTeX markup
     title = strip_latex_commands(title)
@@ -794,7 +799,7 @@ def clean_title_for_search(title):
 
 def clean_title(title):
     """
-    Full title cleaning and normalization including quote removal, hyphen fixes, and year removal.
+    Full title cleaning including line wraps, quotes, and year removal.
     Used for final title processing and comparison.
     
     Args:
@@ -808,9 +813,6 @@ def clean_title(title):
     
     # Start with basic cleaning
     title = clean_title_basic(title)
-    
-    # Fix hyphenated words broken across lines (e.g., "jailbreak- ing" -> "jailbreaking")
-    title = re.sub(r'([a-z])-\s+([a-z])', r'\1\2', title)
     
     # Remove quotes
     title = title.strip('"\'')
@@ -914,7 +916,7 @@ def normalize_author_name(name: str) -> str:
     name = re.sub(r'^\[\d+\]', '', name)
     
     # Fix spacing around periods in initials (e.g., "Y . Li" -> "Y. Li")
-    name = re.sub(r'(\w)\s+\.', r'\1.', name)
+    name = normalize_initial_spacing(name)
     
     # Use common normalization function
     return normalize_text(name)
@@ -936,7 +938,7 @@ def normalize_paper_title(title: str) -> str:
     
     # Strip markup first to handle math formatting consistently, including
     # API titles such as "<i>l</i><sub>2</sub>".
-    normalized = strip_html_markup(title)
+    normalized = strip_html_markup(normalize_wrapped_hyphens(title))
     normalized = strip_latex_commands(normalized)
     
     # Normalize diacritics (ü -> u, é -> e, etc.) for consistent comparison
@@ -975,6 +977,22 @@ def normalize_paper_title(title: str) -> str:
 
 
 
+_SPACING_ACCENTS = '\u00b4\u00a8\u02dc\u00af\u02d8\u02d9\u00b8\u02da\u02dd\u02c7'
+_LETTER = r'[^\W\d_]'
+_DETACHED_ACCENT = re.compile(
+    rf'(?<={_LETTER})(?:[^\S\r\n]+[\u0300-\u036f]+|[^\S\r\n]*[{_SPACING_ACCENTS}])'
+    rf'[^\S\r\n]*(?={_LETTER})'
+)
+_REMOVE_SPACING_ACCENTS = str.maketrans('', '', _SPACING_ACCENTS)
+
+
+def _prepare_diacritic_folding(text: str) -> str:
+    # Remove whitespace at the detached mark itself. Unrelated word
+    # boundaries elsewhere in the name or title have no bearing on it.
+    text = normalize_wrapped_hyphens(text)
+    return _DETACHED_ACCENT.sub('', text).translate(_REMOVE_SPACING_ACCENTS)
+
+
 def normalize_diacritics(text: str) -> str:
     """
     Normalize diacritics in text by removing accent marks and converting to ASCII equivalent.
@@ -993,63 +1011,8 @@ def normalize_diacritics(text: str) -> str:
         'J. Gl¨ uck' -> 'J. Gluck'
         'D'Amato' -> 'D'Amato' (apostrophes normalized)
     """
-    # PDF extraction can split a combining accent away from its base letter,
-    # e.g. "Z ̈ugner" for "Zügner". Merge that artifact before decomposing
-    # and dropping combining marks, otherwise the name becomes "z ugner".
-    text = re.sub(r'([A-Za-z])\s+[\u0300-\u036f]+\s*([A-Za-z])', r'\1\2', text)
+    text = normalize_apostrophes(_prepare_diacritic_folding(text)).replace('^', '')
 
-    # Handle standalone diacritics FIRST (before apostrophe normalization)
-    # so that ´ (U+00B4) is treated as a diacritic and removed, not converted
-    # to an apostrophe.  PDF extraction often produces "R ´enyi" (Rényi)
-    # where ´ is a decomposed accent mark.
-    # We handle ALL standalone diacritics here, merging adjacent letters
-    # only around the diacritic position (not globally).
-    _standalone_diacritics_chars = ''.join([
-        '\u00B4',  # Acute accent ´
-        '\u00A8',  # Diaeresis ¨
-        '\u02DC',  # Small tilde ˜
-        '\u00AF',  # Macron ¯
-        '\u02D8',  # Breve ˘
-        '\u02D9',  # Dot above ˙
-        '\u00B8',  # Cedilla ¸
-        '\u02DA',  # Ring above ˚
-        '\u02DD',  # Double acute accent ˝
-        '\u02C7',  # Caron ˇ
-    ])
-    # Pattern: letter + optional space + diacritic + optional space + lowercase letters
-    # Merges them into a single word: "R ´enyi" → "Renyi", "Natschl ¨ager" → "Natschlager"
-    text = re.sub(
-        r'([a-zA-Z])\s?[' + _standalone_diacritics_chars + r']\s?([a-z])',
-        r'\1\2', text,
-    )
-    # Also remove any remaining standalone diacritics not between letters
-    text = re.sub(r'[' + _standalone_diacritics_chars + r']', '', text)
-
-    # Then normalize apostrophes
-    text = normalize_apostrophes(text)
-    
-    # Expand typographic ligatures that PDF extractors often produce.
-    # These are single Unicode code-points that represent multi-character
-    # sequences (e.g. ﬁ = U+FB01 = "fi").  Database titles store the
-    # expanded forms, so we must expand before comparison.
-    _ligatures = {
-        '\ufb00': 'ff',   # ﬀ
-        '\ufb01': 'fi',   # ﬁ
-        '\ufb02': 'fl',   # ﬂ
-        '\ufb03': 'ffi',  # ﬃ
-        '\ufb04': 'ffl',  # ﬄ
-        '\ufb05': 'st',   # ﬅ (long s t)
-        '\ufb06': 'st',   # ﬆ
-    }
-    for lig, expansion in _ligatures.items():
-        text = text.replace(lig, expansion)
-
-    # Canonically compose base-letter + combining-mark sequences before the
-    # language-specific transliterations below.  XML catalogues such as DNB
-    # can return "fu\u0308r" (decomposed) while citations contain "für"
-    # (composed); both must become "fuer", not "fur" versus "fuer".
-    text = unicodedata.normalize('NFC', text)
-    
     # Then handle special characters that don't decompose properly
     # Including common transliterations
     special_chars = {
@@ -1076,44 +1039,6 @@ def normalize_diacritics(text: str) -> str:
     
     for special, replacement in special_chars.items():
         text = text.replace(special, replacement)
-    
-    # Handle standalone diacritics and modifier symbols that aren't handled by NFD
-    # These often appear in incorrectly formatted academic papers
-    # We need to be careful not to create mid-word spaces when removing diacritics
-    standalone_diacritics = {
-        '¨': '',    # Diaeresis (U+00A8) - category Sk
-        '´': '',    # Acute accent (U+00B4) - category Sk  
-        '`': '',    # Grave accent (U+0060) - category Sk (except when used as quotes)
-        '^': '',    # Circumflex accent (U+005E) - category Sk
-        '˜': '',    # Small tilde (U+02DC) - category Sk
-        '¯': '',    # Macron (U+00AF) - category Sk
-        '˘': '',    # Breve (U+02D8) - category Sk
-        '˙': '',    # Dot above (U+02D9) - category Sk
-        '¸': '',    # Cedilla (U+00B8) - category Sk
-        '˚': '',    # Ring above (U+02DA) - category Sk
-        '˝': '',    # Double acute accent (U+02DD) - category Sk
-        'ˇ': '',    # Caron (U+02C7) - category Sk
-    }
-    
-    # Remove standalone diacritics, being careful about spacing
-    # Use a targeted regex that merges adjacent letters around the diacritic
-    # position rather than globally scanning the entire string.
-    _all_standalone = ''.join(
-        d for d in standalone_diacritics if d != '`'  # grave accent handled separately
-    )
-    # Merge letter-diacritic-letter patterns first: "R ´enyi" → "Renyi"
-    text = re.sub(
-        r'([a-zA-Z])\s?[' + re.escape(_all_standalone) + r']\s?([a-z])',
-        r'\1\2', text,
-    )
-    # Remove any remaining standalone diacritics not between letters
-    text = re.sub(r'[' + re.escape(_all_standalone) + r']', '', text)
-    
-    # Handle grave accent separately (skip if used as quote marks)
-    if '`' in standalone_diacritics:
-        if not ('`' in text[1:] if len(text) > 1 else False):
-            text = re.sub(r'([a-zA-Z])\s?`\s?([a-z])', r'\1\2', text)
-            text = text.replace('`', '')
     
     # Normalize different hyphen-like characters to standard hyphen
     # Common hyphen variants that appear in academic papers
@@ -1163,33 +1088,8 @@ def normalize_diacritics_simple(text: str) -> str:
     Simple diacritic normalization that only removes accents without transliteration.
     Used as an alternative normalization for name matching.
     """
-    # Same PDF extraction artifact handled in normalize_diacritics().
-    text = re.sub(r'([A-Za-z])\s+[\u0300-\u036f]+\s*([A-Za-z])', r'\1\2', text)
+    text = _prepare_diacritic_folding(text).replace("`", "").replace("^", "")
 
-    # Remove standalone diacritics without transliteration
-    standalone_diacritics = {
-        '¨': '',    # Diaeresis
-        '´': '',    # Acute accent
-        '`': '',    # Grave accent
-        '^': '',    # Circumflex accent
-        '˜': '',    # Small tilde
-        '¯': '',    # Macron
-        '˘': '',    # Breve
-        '˙': '',    # Dot above
-        '¸': '',    # Cedilla
-        '˚': '',    # Ring above
-        '˝': '',    # Double acute accent
-        'ˇ': '',    # Caron
-    }
-    
-    for diacritic in standalone_diacritics:
-        if diacritic in text:
-            old_text = text
-            text = text.replace(diacritic, '')
-            if old_text != text:
-                # Only merge if we created a pattern like "Gl uck" -> "Gluck"
-                text = re.sub(r'([a-zA-Z]) ([a-z]{1,4})\b', r'\1\2', text)
-    
     # NFD normalization to decompose characters
     normalized = unicodedata.normalize('NFD', text)
     # Remove combining characters (accents, diacritics)
@@ -1351,6 +1251,8 @@ def is_name_match(name1: str, name2: str) -> bool:
     """
     if not name1 or not name2:
         return False
+    name1 = normalize_initial_spacing(normalize_wrapped_hyphens(name1))
+    name2 = normalize_initial_spacing(normalize_wrapped_hyphens(name2))
 
     # v0.7.66 (Issue B): keep the truly-original inputs around. The
     # function reassigns name1/name2 after Vancouver rotation, but the
@@ -6053,8 +5955,8 @@ def compare_titles_with_latex_cleaning(cited_title: str, database_title: str) ->
         return 0.0
 
     # Clean markup from cited title and database title to match formatting.
-    clean_cited = strip_latex_commands(strip_html_markup(cited_title))
-    clean_database = strip_latex_commands(strip_html_markup(database_title))
+    clean_cited = strip_latex_commands(strip_html_markup(normalize_wrapped_hyphens(cited_title)))
+    clean_database = strip_latex_commands(strip_html_markup(normalize_wrapped_hyphens(database_title)))
 
     artifact_cited = normalize_extracted_title_artifacts(clean_cited)
     artifact_database = normalize_extracted_title_artifacts(clean_database)
@@ -6107,7 +6009,7 @@ def normalize_extracted_title_artifacts(title: str) -> str:
     if not isinstance(title, str):
         return str(title) if title is not None else ''
 
-    title = title.replace('ℓ', 'l').replace('ℒ', 'L')
+    title = normalize_pdf_typography(title).replace('ℓ', 'l').replace('ℒ', 'L')
     title = normalize_apostrophes(title)
 
     # Join detached combining marks/accent glyphs back to the following token so
@@ -6167,8 +6069,8 @@ def calculate_title_similarity(title1: str, title2: str) -> float:
     if not title1 or not title2:
         return 0.0
 
-    raw_title1 = strip_latex_commands(strip_html_markup(title1))
-    raw_title2 = strip_latex_commands(strip_html_markup(title2))
+    raw_title1 = strip_latex_commands(strip_html_markup(normalize_wrapped_hyphens(title1)))
+    raw_title2 = strip_latex_commands(strip_html_markup(normalize_wrapped_hyphens(title2)))
 
     # Remove trailing year suffixes like ", 2024" or " 2024" for robust matching
     def strip_trailing_year(s: str) -> str:
