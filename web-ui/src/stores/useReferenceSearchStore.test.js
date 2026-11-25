@@ -94,6 +94,19 @@ describe('reference search operation state', () => {
     expect(useCheckStore.getState().status).not.toBe('completed')
   })
 
+  it('ignores an older completed search result after a manual move', () => {
+    const moved = { id: 'ref-1', status: 'warning', review_list: 'could_not_find', review_revision: 'newer-move' }
+    useCheckStore.setState({ currentCheckId: 17, references: [moved] })
+    useHistoryStore.setState({ selectedCheckId: 17, selectedCheck: { id: 17, results: [moved] } })
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'old-search', check_id: 17, reference_key: 'id:ref-1', status: 'running' })
+    store.applySnapshot({ operation_id: 'old-search', check_id: 17, reference_key: 'id:ref-1', status: 'completed',
+      reference: { id: 'ref-1', status: 'verified', review_revision: 'earlier-move' } })
+
+    expect(useHistoryStore.getState().selectedCheck.results[0]).toEqual(moved)
+    expect(useCheckStore.getState().references[0]).toEqual(moved)
+  })
+
   it('replaces old verification fields and invalidates cached details after a search finishes offscreen', () => {
     const old = { ref_uid: 'row-139', status: 'error', errors: [{ error_type: 'author' }], verified_authors: ['Wrong match'] }
     const fresh = { ref_uid: 'row-139', status: 'verified', errors: [], warnings: [] }

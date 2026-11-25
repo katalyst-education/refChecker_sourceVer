@@ -27,6 +27,7 @@ import {
 } from '../../utils/correctionUtils'
 import { referenceRowIdentity, toApiReferenceId } from '../../utils/referenceIdentity'
 import ReferenceSourceDetails from '../ReferenceCard/ReferenceSourceDetails'
+import { getReviewList } from '../../utils/referenceStatus'
 
 /**
  * Mirrors the chip ids exposed by the Summary panel above the tab.
@@ -269,6 +270,7 @@ export default function CorrectionsView({ references, isCheckComplete = false })
       .filter(({ tags, _decisionKey, _hasCorrection }) => (
         (tags.size > 0 && _hasCorrection) || !!decisions[_decisionKey]
       ))
+      .filter(({ ref }) => getReviewList(ref) === 'automated')
       .sort((a, b) => {
         const ai = typeof a.ref?.index === 'number' ? a.ref.index : 999999
         const bi = typeof b.ref?.index === 'number' ? b.ref.index : 999999

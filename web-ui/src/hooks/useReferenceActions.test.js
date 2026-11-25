@@ -4,6 +4,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../utils/api', () => ({
   addReferenceToCheck: vi.fn(),
   removeReferenceFromCheck: vi.fn(),
+  moveReferenceReviewList: vi.fn(),
   startReferenceSearch: vi.fn(),
   startReferenceVerification: vi.fn(),
   cancelReferenceSearch: vi.fn(),
@@ -12,6 +13,7 @@ vi.mock('../utils/api', () => ({
 
 import useReferenceActions from './useReferenceActions'
 import {
+  moveReferenceReviewList,
   startReferenceSearch,
   startReferenceVerification,
   suggestAlternativeReference,
@@ -101,6 +103,22 @@ describe('useReferenceActions re-verification', () => {
       operation_id: 'op-1',
       status: 'queued',
     })
+    expect(startReferenceVerification).not.toHaveBeenCalled()
+  })
+
+  it('saves a move to Unverified in both views without enqueuing a search', async () => {
+    const reviewed = { ...reference, status: 'unverified', warnings: [], review_revision: 'move-1' }
+    moveReferenceReviewList.mockResolvedValue({ data: { reference: reviewed } })
+    const { result } = renderHook(() => useReferenceActions())
+
+    await act(async () => {
+      await result.current.handleMoveReviewList(reference, 0, 'unverified')
+    })
+
+    expect(moveReferenceReviewList).toHaveBeenCalledWith(17, 'uid:row-ref-1', 'unverified')
+    expect(useHistoryStore.getState().selectedCheck.results[0]).toEqual(reviewed)
+    expect(useCheckStore.getState().references[0]).toEqual(reviewed)
+    expect(startReferenceSearch).not.toHaveBeenCalled()
     expect(startReferenceVerification).not.toHaveBeenCalled()
   })
 

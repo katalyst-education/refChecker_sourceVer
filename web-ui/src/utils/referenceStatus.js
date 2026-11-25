@@ -1,5 +1,7 @@
 const FINAL_STATUSES = ['error', 'warning', 'suggestion', 'unverified', 'verified', 'website_verified']
 
+export const getReviewList = reference => reference?.review_list || 'automated'
+
 export const isWebsiteVerifiedReference = (reference = {}) => {
   if (reference?.verified_via_website) return true
 
@@ -58,6 +60,7 @@ export const computeReferenceStats = (references = [], isCheckComplete = false) 
   let verified = 0
 
   for (const reference of processed) {
+    if (getReviewList(reference) !== 'automated') continue
     const status = getEffectiveReferenceStatus(reference, isCheckComplete)
     errorsCount += (reference?.errors || []).filter(issue => issue?.error_type !== 'unverified').length
     warningsCount += (reference?.warnings || []).length
@@ -131,6 +134,7 @@ export function applyStatusFilter(references, statusFilter, isCheckComplete = fa
   if (filters.length === 0) return references || []
 
   return (references || []).filter(reference => {
+    if (getReviewList(reference) !== 'automated') return false
     const status = String(getEffectiveReferenceStatus(reference, isCheckComplete) || '').toLowerCase()
     return filters.some(filter => {
       switch (filter) {

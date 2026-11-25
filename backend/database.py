@@ -12,6 +12,7 @@ import sys
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+from uuid import uuid4
 from cryptography.fernet import Fernet, InvalidToken
 
 # Module logger. Several call sites in this file (Seen-Refs backstop,
@@ -128,6 +129,15 @@ def _sanitize_loaded_reference_results(results: Any) -> Any:
             normalized["corrected_reference"] = None
         cleaned.append(normalized)
     return ensure_reference_uids(cleaned)
+
+
+def _read_reference_lists(value: Optional[str]) -> List[Dict[str, str]]:
+    if value is None:
+        return [
+            {"id": "further_checks", "name": "Further Checks"},
+            {"id": "could_not_find", "name": "Could not Find"},
+        ]
+    return json.loads(value)
 
 
 SECRET_VALUE_PREFIX = "enc:"
@@ -373,6 +383,8 @@ def _compute_reference_buckets_from_results(
         "refs_verified": 0,
     }
     for ref in latest_results_by_citation.values():
+        if ref.get("review_list"):
+            continue
         effective_status = _get_effective_reference_status(ref, is_complete)
         errors = ref.get("errors") or []
         warnings = ref.get("warnings") or []
@@ -471,6 +483,7 @@ class Database:
                     refs_with_warnings_only INTEGER DEFAULT 0,
                     refs_verified INTEGER DEFAULT 0,
                     results_json TEXT,
+                    reference_lists_json TEXT,
                     llm_provider TEXT,
                     llm_model TEXT,
                     extraction_method TEXT,
@@ -743,6 +756,8 @@ class Database:
             await db.execute("ALTER TABLE check_history ADD COLUMN source_type TEXT DEFAULT 'url'")
         if "custom_label" not in columns:
             await db.execute("ALTER TABLE check_history ADD COLUMN custom_label TEXT")
+        if "reference_lists_json" not in columns:
+            await db.execute("ALTER TABLE check_history ADD COLUMN reference_lists_json TEXT")
         if "suggestions_count" not in columns:
             await db.execute("ALTER TABLE check_history ADD COLUMN suggestions_count INTEGER DEFAULT 0")
         if "refs_with_errors" not in columns:
@@ -1236,6 +1251,7 @@ class Database:
                 row = await cursor.fetchone()
                 if row:
                     result = dict(row)
+                    result["reference_lists"] = _read_reference_lists(result.pop("reference_lists_json", None))
                     # Parse JSON results
                     if result['results_json']:
                         result['results'] = _sanitize_loaded_reference_results(
@@ -2762,7 +2778,7 @@ class Database:
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute('PRAGMA busy_timeout=5000')
             await conn.execute('BEGIN IMMEDIATE')
-            query, params = 'SELECT results_json FROM check_history WHERE id = ?', [check_id]
+            query, params = 'SELECT results_json, reference_lists_json FROM check_history WHERE id = ?', [check_id]
             if user_id is not None:
                 query += ' AND user_id = ?'
                 params.append(user_id)
@@ -2773,18 +2789,74 @@ class Database:
             matches = [i for i, ref in enumerate(results) if ref.get('ref_uid') == expected.get('ref_uid')]
             if len(matches) != 1 or results[matches[0]] != expected:
                 return 'reference_changed'
+            destination = updated.get("review_list")
+            if destination and all(item["id"] != destination for item in _read_reference_lists(row[1])):
+                return 'list_not_found'
             results[matches[0]] = updated
-            results = ensure_reference_uids(results)
-            buckets = _compute_reference_buckets_from_results(results, is_complete=True, stored_total_refs=len(results))
-            columns = ('total_refs', 'errors_count', 'warnings_count', 'suggestions_count',
-                       'unverified_count', 'refs_with_errors', 'refs_with_warnings_only',
-                       'refs_with_suggestions_only', 'refs_verified')
-            await conn.execute(
-                'UPDATE check_history SET results_json = ?, ' + ', '.join(f'{name} = ?' for name in columns) + ' WHERE id = ?',
-                [json.dumps(results, default=str), *(buckets[name] for name in columns), check_id],
-            )
+            await self._write_updated_reference_rows(conn, check_id, results)
             await conn.commit()
             return 'saved'
+
+    @staticmethod
+    async def _write_updated_reference_rows(conn, check_id, results):
+        results = ensure_reference_uids(results)
+        buckets = _compute_reference_buckets_from_results(results, is_complete=True, stored_total_refs=len(results))
+        columns = ('total_refs', 'errors_count', 'warnings_count', 'suggestions_count',
+                   'unverified_count', 'refs_with_errors', 'refs_with_warnings_only',
+                   'refs_with_suggestions_only', 'refs_verified')
+        await conn.execute(
+            'UPDATE check_history SET results_json = ?, ' + ', '.join(f'{name} = ?' for name in columns) + ' WHERE id = ?',
+            [json.dumps(results, default=str), *(buckets[name] for name in columns), check_id],
+        )
+
+    async def update_reference_lists(self, check_id, user_id, *, list_id=None, name=None):
+        """Create or rename a list, or remove a list and return its entries to Unverified."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("BEGIN IMMEDIATE")
+            query = "SELECT reference_lists_json, results_json FROM check_history WHERE id = ?"
+            params = [check_id]
+            if user_id is not None:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            row = await (await conn.execute(query, params)).fetchone()
+            if row is None:
+                raise LookupError("Check not found.")
+            lists = _read_reference_lists(row[0])
+            current = next((item for item in lists if item["id"] == list_id), None)
+            if list_id is not None and current is None:
+                raise LookupError("Reference list not found.")
+            if name is not None and any(
+                item["id"] != list_id and item["name"].casefold() == name.casefold() for item in lists
+            ):
+                raise ValueError("A reference list with this name already exists.")
+
+            changed_rows = []
+            if current is None:
+                current = {"id": str(uuid4()), "name": name}
+                lists.append(current)
+            elif name is not None:
+                current["name"] = name
+            else:
+                from backend.reference_result import mark_reference_unverified
+
+                lists.remove(current)
+                results = _sanitize_loaded_reference_results(json.loads(row[1] or "[]"))
+                for position, reference in enumerate(results):
+                    if reference.get("review_list") == list_id:
+                        updated = mark_reference_unverified(reference)
+                        results[position] = updated
+                        changed_rows.append(updated)
+                if changed_rows:
+                    await self._write_updated_reference_rows(conn, check_id, results)
+                current = None
+
+            await conn.execute(
+                "UPDATE check_history SET reference_lists_json = ? WHERE id = ?",
+                (json.dumps(lists), check_id),
+            )
+            await conn.commit()
+            return {"lists": lists, "list": current, "references": changed_rows}
 
     async def commit_reference_investigation(
         self, check_id: int, expected: Dict[str, Any], updated: Optional[Dict[str, Any]],
@@ -3067,7 +3139,8 @@ class Database:
         from refchecker.utils.reference_metadata import REFERENCE_SOURCE_FIELDS
 
         result_json = json.dumps({
-            field: value for field, value in ref.items() if field not in REFERENCE_SOURCE_FIELDS
+            field: value for field, value in ref.items()
+            if field not in REFERENCE_SOURCE_FIELDS and field not in {"review_list", "review_revision"}
         }, default=str)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout=5000")

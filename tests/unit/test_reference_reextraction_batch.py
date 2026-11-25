@@ -50,9 +50,10 @@ def test_batch_reads_source_once_and_only_updates_errors_and_unverified(setup_ba
     main, database, check_id, extractor, user = setup_batch
     verified_uids = []
 
-    async def verify(_check_id, ref_id, body, _user, *, source_reference, cancel_event):
+    async def verify(_check_id, ref_id, body, _user, *, source_reference, cancel_event, expected_reference):
         rows = await database.get_check_references(check_id)
         old = next(ref for ref in rows if f'uid:{ref["ref_uid"]}' == ref_id)
+        assert old == expected_reference
         updated = {**old, **source_reference, 'status': 'verified'}
         assert body.force_all_databases
         assert not body.reextract_from_document
@@ -63,6 +64,9 @@ def test_batch_reads_source_once_and_only_updates_errors_and_unverified(setup_ba
     monkeypatch.setattr(main, '_verify_single_reference_impl', verify)
 
     async def scenario():
+        rows = await database.get_check_references(check_id)
+        rows[2].update(status='unverified', review_list='further_checks')
+        await database.replace_check_references(check_id, rows)
         before = await database.get_check_references(check_id)
         await database.create_reference_search_operation('op', 'session', check_id, 'check:reextract-errors')
         await main._run_reference_reextraction_job(

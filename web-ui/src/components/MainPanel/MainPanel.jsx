@@ -3,6 +3,7 @@ import InputSection from './InputSection'
 import StatusSection from './StatusSection'
 import StatsSection from './StatsSection'
 import ReferenceList from './ReferenceList'
+import ReferenceListControls from './ReferenceListControls'
 import ReferenceReextractionButton from './ReferenceReextractionButton'
 import CorrectionsView from './CorrectionsView'
 import OnboardingBanner from './OnboardingBanner'
@@ -25,7 +26,7 @@ import { useCheckStore } from '../../stores/useCheckStore'
 import { useHistoryStore } from '../../stores/useHistoryStore'
 import { useStyleStore } from '../../stores/useStyleStore'
 import { useShallow } from 'zustand/react/shallow'
-import { applyStatusFilter } from '../../utils/referenceStatus'
+import { applyStatusFilter, getReviewList } from '../../utils/referenceStatus'
 import { CITATION_STYLE_DEFAULTS, filterIssuesForStyle } from '../../utils/formatters'
 import { classifyCorrectionReference, hasActionableCorrection } from '../../utils/correctionUtils'
 
@@ -73,7 +74,7 @@ function ResultsTabButton({ active, onClick, label, count }) {
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className="no-hover-fx px-3 py-1.5 text-sm font-medium transition-colors"
+      className="no-hover-fx min-w-0 max-w-full break-words px-3 py-1.5 text-sm font-medium transition-colors"
       style={{
         color: active || hover ? accent : 'var(--color-text-secondary)',
         borderBottom: active
@@ -113,20 +114,11 @@ export default function MainPanel() {
   const [showScrollTop, setShowScrollTop] = useState(false)
   const [workflow, setWorkflow] = useState('check')
   const [checkTab, setCheckTab] = useState('references')
+  const [reviewTab, setReviewTab] = useState(null)
   const [exploreTab, setExploreTab] = useState('suggested')
-  const resultsTab = workflow === 'check' ? checkTab : exploreTab
-  const setResultsTab = workflow === 'check' ? setCheckTab : setExploreTab
   const [globalView, setGlobalView] = useState(null) // 'seen' | null — overrides the per-check views when set
   const [showExplore, setShowExplore] = useState(false) // ResearchRabbit-style fullscreen Explore graph overlay (#68)
 
-  // When a citation highlight in the document links back to its reference,
-  // make sure the References tab is showing so the target card can flash.
-  useEffect(() => {
-    const onFocus = () => { setGlobalView(null); setWorkflow('check'); setCheckTab('references'); setShowExplore(false) }
-    window.addEventListener('refchecker:focus-reference', onFocus)
-    return () => window.removeEventListener('refchecker:focus-reference', onFocus)
-  }, [])
-  
   const {
     status: checkStoreStatus,
     references: checkStoreRefs,
@@ -202,6 +194,24 @@ export default function MainPanel() {
   // Fall back to checkStore only if selectedCheck isn't loaded yet for current check
   const isCurrentCheck = selectedCheckId === currentCheckId
   const hasSelectedCheckData = selectedCheck && selectedCheck.id === selectedCheckId
+  const referenceLists = hasSelectedCheckData ? selectedCheck.reference_lists || [] : []
+  const activeReviewList = !statusFilter.length && reviewTab && reviewTab.checkId === selectedCheckId
+    ? referenceLists.find(list => list.id === reviewTab.listId) : null
+  const resultsTab = workflow === 'explore' ? exploreTab
+    : activeReviewList ? `review:${activeReviewList.id}` : checkTab
+  const selectReviewList = useCallback(listId => {
+    clearStatusFilter()
+    setCheckTab('references')
+    setReviewTab(listId ? { checkId: selectedCheckId, listId } : null)
+  }, [clearStatusFilter, selectedCheckId])
+  const setResultsTab = useCallback(key => {
+    if (workflow === 'explore') setExploreTab(key)
+    else if (key.startsWith('review:')) selectReviewList(key.slice('review:'.length))
+    else {
+      setReviewTab(null)
+      setCheckTab(key)
+    }
+  }, [workflow, selectReviewList])
   const useLiveCheckStore = isCurrentCheck && (
     checkStoreStatus === 'checking' || checkStoreStatus === 'in_progress'
   )
@@ -239,6 +249,37 @@ export default function MainPanel() {
     
     return []
   }, [useLiveCheckStore, checkStoreRefs, hasSelectedCheckData, selectedCheck])
+
+  // Open the tab containing the reference when following a citation from the PDF.
+  const pendingReferenceFocus = useRef(null)
+  useEffect(() => {
+    const onFocus = event => {
+      if (event.detail?.afterTabSwitch) return
+      const refId = event.detail?.refId
+      const reference = refId == null ? null
+        : displayRefs.find(ref => String(ref.id ?? ref.index) === String(refId))
+      const listId = getReviewList(reference)
+      const targetTab = listId === 'automated' ? 'references' : `review:${listId}`
+      if (refId != null && (globalView || workflow !== 'check' || resultsTab !== targetTab || statusFilter.length)) {
+        pendingReferenceFocus.current = { refId, targetTab, checkId: selectedCheckId }
+      }
+      setGlobalView(null)
+      setWorkflow('check')
+      setShowExplore(false)
+      selectReviewList(listId === 'automated' ? null : listId)
+    }
+    window.addEventListener('refchecker:focus-reference', onFocus)
+    return () => window.removeEventListener('refchecker:focus-reference', onFocus)
+  }, [displayRefs, globalView, workflow, resultsTab, statusFilter.length, selectedCheckId, selectReviewList])
+  useEffect(() => {
+    const pending = pendingReferenceFocus.current
+    if (pending && pending.checkId === selectedCheckId && resultsTab === pending.targetTab) {
+      pendingReferenceFocus.current = null
+      window.dispatchEvent(new CustomEvent('refchecker:focus-reference', {
+        detail: { refId: pending.refId, afterTabSwitch: true },
+      }))
+    }
+  }, [resultsTab, selectedCheckId, globalView, statusFilter.length])
 
   // Build unified stats
   // For current check, prefer live checkStore stats; for other checks, compute from selectedCheck
@@ -446,11 +487,10 @@ export default function MainPanel() {
         {showContent && (
           <div>
             <div
-              className="flex flex-wrap items-center gap-1 mb-3 border-b"
+              className="flex flex-wrap items-end gap-1 mb-3 border-b"
               style={{ borderColor: 'var(--color-border)' }}
-              role="tablist"
-              aria-label="Results view"
             >
+              <div className="flex flex-1 flex-wrap items-center gap-1" role="tablist" aria-label="Results view">
               {(() => {
                 if (workflow === 'explore') return [
                   ['suggested', 'Suggested papers', null],
@@ -469,7 +509,7 @@ export default function MainPanel() {
                 // the Summary and References list. A style-suppressed issue
                 // must not turn an otherwise website-verified reference into
                 // an excluded error here.
-                const styleFilteredRefs = (displayRefs || []).map(ref => {
+                const styleFilteredRefs = displayRefs.filter(ref => getReviewList(ref) === 'automated').map(ref => {
                   const filteredErrors = filterIssuesForStyle(ref.errors, ref, activeStyle)
                   const filteredWarnings = filterIssuesForStyle(ref.warnings, ref, activeStyle)
                   if (filteredErrors === ref.errors && filteredWarnings === ref.warnings) return ref
@@ -497,6 +537,9 @@ export default function MainPanel() {
                 return [
                   ['references', 'References', refsForCount.length],
                   ['corrections', 'Corrections', correctionsCount],
+                  ...referenceLists.map(list => [
+                    `review:${list.id}`, list.name, displayRefs.filter(ref => getReviewList(ref) === list.id).length,
+                  ]),
                 ]
               })().map(([key, label, count]) => (
                 <ResultsTabButton
@@ -507,6 +550,15 @@ export default function MainPanel() {
                   count={count}
                 />
               ))}
+              </div>
+              {workflow === 'check' && hasSelectedCheckData && selectedCheckId > 0 && (
+                <ReferenceListControls
+                  key={`${selectedCheckId}:${activeReviewList?.id || ''}`}
+                  checkId={selectedCheckId}
+                  activeList={activeReviewList}
+                  onSelectList={selectReviewList}
+                />
+              )}
             </div>
             {/*
              * Tabs render with display:none rather than unmount/remount,
@@ -522,11 +574,13 @@ export default function MainPanel() {
              * libs in use (react-force-graph-2d, the similar-papers
              * fetch) are cheap enough that this is a net win for UX.
              */}
-            <div style={{ display: resultsTab === 'references' ? 'block' : 'none' }}>
+            <div style={{ display: (resultsTab === 'references' || resultsTab.startsWith('review:')) ? 'block' : 'none' }}>
               <ReferenceList
                 references={displayRefs}
                 isLoading={isLoadingDetail}
                 isCheckComplete={isComplete}
+                referenceLists={referenceLists}
+                activeList={activeReviewList}
               />
             </div>
             <div style={{ display: resultsTab === 'corrections' ? 'block' : 'none' }}>

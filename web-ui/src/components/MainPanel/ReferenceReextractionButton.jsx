@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { cancelReferenceSearch, getReferenceReextractions, startReferenceReextraction } from '../../utils/api'
 import { referenceSearchKey, useReferenceSearchStore } from '../../stores/useReferenceSearchStore'
+import { getReviewList } from '../../utils/referenceStatus'
 
 export default function ReferenceReextractionButton({ checkId, references, disabled = false }) {
   const operation = useReferenceSearchStore(s => s.operations[referenceSearchKey(checkId, 'check:reextract-errors')])
@@ -11,7 +12,9 @@ export default function ReferenceReextractionButton({ checkId, references, disab
   const [recoveryError, setRecoveryError] = useState('')
   const [recoveryAttempt, setRecoveryAttempt] = useState(0)
   const [recentRuns, setRecentRuns] = useState([])
-  const count = (references || []).filter(ref => ['error', 'unverified'].includes(ref.status)).length
+  const count = (references || []).filter(ref =>
+    getReviewList(ref) === 'automated' && ['error', 'unverified'].includes(ref.status)
+  ).length
   const active = ['queued', 'running', 'cancelling'].includes(operation?.status)
   const progress = operation?.progress || operation || {}
   const failures = progress.failures || []

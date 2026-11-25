@@ -325,6 +325,14 @@ export const addReferenceToCheck = (checkId, payload) =>
   api.post(`/history/${checkId}/references`, payload)
 export const removeReferenceFromCheck = (checkId, refId) =>
   api.delete(`/history/${checkId}/references/${encodeURIComponent(refId)}`)
+export const moveReferenceReviewList = (checkId, refId, destination) =>
+  api.patch(`/history/${checkId}/references/${encodeURIComponent(refId)}/review-list`, { destination })
+export const createReferenceList = (checkId, name) =>
+  api.post(`/history/${checkId}/reference-lists`, { name })
+export const renameReferenceList = (checkId, listId, name) =>
+  api.patch(`/history/${checkId}/reference-lists/${encodeURIComponent(listId)}`, { name })
+export const deleteReferenceList = (checkId, listId) =>
+  api.delete(`/history/${checkId}/reference-lists/${encodeURIComponent(listId)}`)
 export const suggestAlternativeReference = (checkId, refId) =>
   api.post(`/history/${checkId}/references/${encodeURIComponent(refId)}/suggest-alternative`)
 export const investigateReferenceSuggestion = (checkId, refId, candidate) =>

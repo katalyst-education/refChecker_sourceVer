@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   addReferenceToCheck,
+  moveReferenceReviewList,
   removeReferenceFromCheck,
   suggestAlternativeReference,
   startReferenceSearch,
@@ -10,7 +11,7 @@ import {
 import { useHistoryStore } from '../stores/useHistoryStore'
 import { useCheckStore } from '../stores/useCheckStore'
 import { useKeyStore } from '../stores/useKeyStore'
-import { referenceSearchKey, useReferenceSearchStore } from '../stores/useReferenceSearchStore'
+import { patchCompletedReference, referenceSearchKey, useReferenceSearchStore } from '../stores/useReferenceSearchStore'
 import { referenceRowIdentity, toApiReferenceId } from '../utils/referenceIdentity'
 
 const EMPTY_NEW = { title: '', authors: '', year: '', doi: '', arxiv_id: '' }
@@ -77,6 +78,7 @@ export default function useReferenceActions() {
   const [reverifyBusy, setReverifyBusy] = useState(() => new Map())
   const [suggestBusy, setSuggestBusy] = useState(() => new Set())
   const [removeBusy, setRemoveBusy] = useState(() => new Set())
+  const [moveBusy, setMoveBusy] = useState(() => new Set())
   // Global busy slot: '__add__' while Add-reference is in flight,
   // '__restore__' during Undo, null otherwise. Kept separate from the
   // per-row sets so per-row ops survive a parallel Undo.
@@ -357,6 +359,23 @@ export default function useReferenceActions() {
     }
   }
 
+  const handleMoveReviewList = async (ref, i, destination) => {
+    if (!selectedCheckId) return
+    const ident = referenceRowIdentity(ref, i)
+    const referenceKey = toApiReferenceId(ref, i)
+    enterBusy(setMoveBusy, ident)
+    try {
+      const { data } = await moveReferenceReviewList(selectedCheckId, referenceKey, destination)
+      patchCompletedReference({ check_id: selectedCheckId, reference_key: referenceKey }, data.reference, {
+        reviewMove: true,
+      })
+    } catch (error) {
+      alert(error?.response?.data?.detail || error?.message || 'The reference could not be moved.')
+    } finally {
+      leaveBusy(setMoveBusy, ident)
+    }
+  }
+
   const getReferenceSearchOperation = (ref, i) => {
     if (!selectedCheckId) return null
     const identity = referenceRowIdentity(ref, i)
@@ -406,6 +425,7 @@ export default function useReferenceActions() {
   const isReverifying = (ident) => !!getReverifyAction(ident)
   const isSuggesting = (ident) => suggestBusy.has(String(ident))
   const isRemoving = (ident) => removeBusy.has(String(ident))
+  const isMoving = (ident) => moveBusy.has(String(ident))
 
   return {
     selectedCheckId,
@@ -422,6 +442,7 @@ export default function useReferenceActions() {
     handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
+    handleMoveReviewList,
     getReferenceSearchOperation,
     handleCancelReferenceSearch,
     handleEditMetadata,
@@ -433,5 +454,6 @@ export default function useReferenceActions() {
     isReverifying,
     isSuggesting,
     isRemoving,
+    isMoving,
   }
 }

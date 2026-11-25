@@ -72,6 +72,7 @@ from .reference_urls import build_authoritative_urls
 from .reference_result import (
     citation_verification_input,
     derive_corrected_reference,
+    mark_reference_unverified,
     merge_fresh_verification,
     project_cited_evidence,
     project_verification_result,
@@ -7619,6 +7620,9 @@ def _find_ref_index_precise(
     hint-based scoring so the clicked UI row is targeted deterministically.
     """
     base_idx = _find_ref_index(refs, ref_id)
+    # A durable UID identifies the row even when its displayed number changed.
+    if str(ref_id).startswith("uid:"):
+        return base_idx
     wanted_id = None if expected_id is None else str(expected_id)
     wanted_index = None if expected_index is None else str(expected_index)
     wanted_title = _normalize_ref_title_for_match(expected_title)
@@ -8076,6 +8080,81 @@ async def remove_reference_from_check(
     return {"removed": True, "total_refs": len(refs)}
 
 
+class _ReferenceListNameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+def _reference_list_name(body: _ReferenceListNameRequest) -> str:
+    name = " ".join(body.name.split())
+    if not name:
+        raise HTTPException(status_code=422, detail="Enter a reference list name.")
+    if name.casefold() in {"references", "corrections", "unverified"}:
+        raise HTTPException(status_code=422, detail="Choose a name distinct from References, Corrections, and Unverified.")
+    return name
+
+
+async def _update_reference_lists(check_id, current_user, *, list_id=None, name=None):
+    try:
+        return await db.update_reference_lists(
+            check_id, get_user_id_filter(current_user), list_id=list_id, name=name,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/history/{check_id}/reference-lists", status_code=201)
+async def create_reference_list(
+    check_id: int, body: _ReferenceListNameRequest, current_user: UserInfo = Depends(require_user),
+):
+    return await _update_reference_lists(check_id, current_user, name=_reference_list_name(body))
+
+
+@app.patch("/api/history/{check_id}/reference-lists/{list_id}")
+async def rename_reference_list(
+    check_id: int, list_id: str, body: _ReferenceListNameRequest, current_user: UserInfo = Depends(require_user),
+):
+    return await _update_reference_lists(check_id, current_user, list_id=list_id, name=_reference_list_name(body))
+
+
+@app.delete("/api/history/{check_id}/reference-lists/{list_id}")
+async def delete_reference_list(
+    check_id: int, list_id: str, current_user: UserInfo = Depends(require_user),
+):
+    return await _update_reference_lists(check_id, current_user, list_id=list_id)
+
+
+class _ReferenceReviewListRequest(BaseModel):
+    destination: str = Field(min_length=1, max_length=64)
+
+
+@app.patch("/api/history/{check_id}/references/{ref_id}/review-list")
+async def move_reference_to_review_list(
+    check_id: int, ref_id: str, body: _ReferenceReviewListRequest,
+    current_user: UserInfo = Depends(require_user),
+):
+    """File a citation by its saved row identity without starting verification."""
+    user_id = get_user_id_filter(current_user)
+    refs = await db.get_check_references(check_id, user_id=user_id)
+    if refs is None:
+        raise HTTPException(status_code=404, detail="Check not found")
+    idx = _find_ref_index(refs, ref_id)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Reference not found in check")
+    target = refs[idx]
+    if body.destination == "unverified":
+        updated = mark_reference_unverified(target)
+    else:
+        updated = {**target, "review_list": body.destination, "review_revision": str(uuid.uuid4())}
+    decision = await db.replace_check_reference_if_unchanged(check_id, target, updated, user_id=user_id)
+    if decision == "list_not_found":
+        raise HTTPException(status_code=404, detail="Reference list not found.")
+    if decision != "saved":
+        raise HTTPException(status_code=409, detail="The reference changed. Reload the check and try the move again.")
+    return {"reference": updated}
+
+
 class _VerifySingleRequest(BaseModel):
     # Document re-extraction is normally performed by the central batch action.
     reextract_from_document: bool = False
@@ -8194,7 +8273,7 @@ async def _run_reference_reextraction_job(
                 if check is None or refs is None:
                     raise ValueError('Check not found')
                 targets = [(i, dict(ref)) for i, ref in enumerate(refs)
-                           if ref.get('status') in {'error', 'unverified'}]
+                           if not ref.get('review_list') and ref.get('status') in {'error', 'unverified'}]
                 source_numbers = [ref.get('entry_number') or ref.get('index') for ref in refs]
                 progress.update(status='running', total=len(targets), message='Reading the original document…')
                 await db.update_reference_search_operation(operation_id, status='running', progress=progress)
@@ -8251,6 +8330,7 @@ async def _run_reference_reextraction_job(
                                 result = await _verify_single_reference_impl(
                                     check_id, f'uid:{uid}', _VerifySingleRequest(force_all_databases=True),
                                     current_user, source_reference=fresh_reference, cancel_event=cancel_event,
+                                    expected_reference=current,
                                 )
                                 progress['updated'] += 1
                                 await emit(reference=result['reference'], updated_reference_key=f'uid:{uid}')
@@ -8424,7 +8504,8 @@ async def _run_single_reference_verify_job(
 def _reference_search_fingerprint(reference: Dict[str, Any]) -> str:
     fields = {
         key: reference.get(key)
-        for key in (*CITED_REFERENCE_FIELDS, *REFERENCE_SOURCE_FIELDS, "cited_metadata", "id", "index", "raw", "type")
+        for key in (*CITED_REFERENCE_FIELDS, *REFERENCE_SOURCE_FIELDS, "cited_metadata", "id", "index",
+                    "raw", "type", "review_revision")
     }
     return json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -8460,6 +8541,7 @@ async def _run_reference_search_job(
     expected_index: Optional[int], expected_title: Optional[str],
     semantic_scholar_api_key: Optional[str], google_books_api_key: Optional[str],
     paperclip_api_key: Optional[str], cancel_event: threading.Event,
+    expected_reference: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Run one forced-all verification and stream display-safe source events."""
     started = time.perf_counter()
@@ -8509,6 +8591,8 @@ async def _run_reference_search_job(
         if idx is None:
             raise LookupError("Reference not found")
         target = dict(refs[idx])
+        if expected_reference is not None and target != expected_reference:
+            raise RuntimeError("reference_changed")
         cited = citation_verification_input(target)
 
         from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
@@ -8557,11 +8641,18 @@ async def _run_reference_search_job(
         if cancel_event.is_set():
             raise VerificationCancelled("Reference search cancelled")
 
+        if target.get("review_list") and not verified_data and any(
+            finding.get("verification_reason") == "provider_failure" and finding.get("sources_negative") == 0
+            for finding in findings or []
+        ):
+            raise RuntimeError("The databases were unavailable. The reference is still in its review list.")
+
         projection = project_verification_result(
             cited, verified_data, findings, url,
             index=target.get("index"), enrich_enabled=True,
         )
         updated = merge_fresh_verification(target, projection)
+        updated.pop("review_list", None)
 
         saved = await db.replace_check_reference_if_unchanged(
             check_id, target, updated, user_id=owner_id,
@@ -8687,9 +8778,9 @@ async def start_reference_search(
     paperclip_key = await _resolve_paperclip_api_key(body.paperclip_api_key)
     task = asyncio.create_task(_run_queued_reference_search_job(
         operation_id=operation_id, session_id=session_id, check_id=check_id,
-        ref_id=ref_id, reference_key=reference_key, owner_id=owner_id,
+        ref_id=reference_key, reference_key=reference_key, owner_id=owner_id,
         expected_id=body.expected_id, expected_index=body.expected_index,
-        expected_title=body.expected_title,
+        expected_title=body.expected_title, expected_reference=refs[idx],
         semantic_scholar_api_key=ss_key, google_books_api_key=books_key,
         paperclip_api_key=paperclip_key, cancel_event=cancel_event,
     ))
@@ -8957,7 +9048,7 @@ async def verify_single_reference(
 
 
 async def _verify_single_reference_impl(
-    check_id, ref_id, body, current_user, *, source_reference=None, cancel_event=None,
+    check_id, ref_id, body, current_user, *, source_reference=None, cancel_event=None, expected_reference=None,
 ):
     """Shared single-row verification used by card and batch orchestration."""
     user_id = get_user_id_filter(current_user)
@@ -8974,6 +9065,8 @@ async def _verify_single_reference_impl(
     if idx is None:
         raise HTTPException(status_code=404, detail="Reference not found in check")
     original_reference = refs[idx]
+    if expected_reference is not None and original_reference != expected_reference:
+        raise HTTPException(status_code=409, detail="The reference changed before verification started.")
     target = citation_verification_input(original_reference)
     logger.info(
         "Per-ref verify target resolved: route_ref_id=%r idx=%s stored_index=%r title=%r",
@@ -9210,6 +9303,9 @@ async def _verify_single_reference_impl(
         updated["index"] = target.get("index")
         updated["ref_uid"] = target.get("ref_uid")
         updated["from_cache"] = True
+        for field in ("review_list", "review_revision"):
+            if field in target:
+                updated[field] = target[field]
         if updated.get("corrected_reference"):
             updated["corrected_reference"] = safe_correction_candidate(
                 updated["corrected_reference"],

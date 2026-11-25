@@ -910,6 +910,15 @@ export const useHistoryStore = create((set, get) => ({
     })
   },
 
+  updateCheckReferenceLists: (checkId, referenceLists) => {
+    const update = item => item?.id === checkId ? { ...item, reference_lists: referenceLists } : item
+    set(state => {
+      const detailCache = { ...state.detailCache }
+      delete detailCache[checkId]
+      return { history: state.history.map(update), selectedCheck: update(state.selectedCheck), detailCache }
+    })
+  },
+
   deleteCheck: async (id) => {
     if (id === -1) {
       // Drop the placeholder locally

@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import ReferenceCard from '../ReferenceCard/ReferenceCard'
 import { useCheckStore } from '../../stores/useCheckStore'
-import { applyStatusFilter, getEffectiveReferenceStatus } from '../../utils/referenceStatus'
+import { applyStatusFilter, getEffectiveReferenceStatus, getReviewList } from '../../utils/referenceStatus'
 import useReferenceActions from '../../hooks/useReferenceActions'
 import { useStyleStore } from '../../stores/useStyleStore'
 import {
@@ -28,7 +28,9 @@ const computeDerivedStatus = (ref, isCheckComplete = false) => {
 /**
  * List of references being checked
  */
-export default function ReferenceList({ references, isLoading, isCheckComplete = false }) {
+export default function ReferenceList({
+  references, isLoading, isCheckComplete = false, referenceLists = [], activeList = null,
+}) {
   const statusFilter = useCheckStore(s => s.statusFilter)
   const {
     selectedCheckId,
@@ -45,6 +47,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     handleSuggestAlt,
     handleReverify,
     handleReverifyAllDatabases,
+    handleMoveReviewList,
     getReferenceSearchOperation,
     handleCancelReferenceSearch,
     handleEditMetadata,
@@ -56,13 +59,16 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     isReverifying,
     isSuggesting,
     isRemoving,
+    isMoving,
   } = useReferenceActions()
 
   const activeStyle = useStyleStore(s => s.format)
+  const listId = activeList?.id || 'automated'
+  const canMoveReference = selectedCheckId > 0 && isCheckComplete && referenceLists.length > 0
 
   // Memoize all derived data to ensure consistency within a render
   const { sortedReferences, filteredReferences } = useMemo(() => {
-    const sorted = (references || []).slice().sort((a, b) => {
+    const sorted = (references || []).filter(ref => getReviewList(ref) === listId).sort((a, b) => {
       const aIndex = typeof a?.index === 'number' ? a.index : Number.MAX_SAFE_INTEGER
       const bIndex = typeof b?.index === 'number' ? b.index : Number.MAX_SAFE_INTEGER
       return aIndex - bIndex
@@ -94,10 +100,11 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     // Keep the list filter and the Summary chips on the same shared status
     // contract. In particular, a reference verified from a website is part of
     // the verified bucket even though it has a distinct display icon.
-    const filtered = applyStatusFilter(normalized, statusFilter, isCheckComplete)
+    const filtered = listId === 'automated'
+      ? applyStatusFilter(normalized, statusFilter, isCheckComplete) : normalized
 
     return { sortedReferences: sorted, filteredReferences: filtered }
-  }, [references, statusFilter, isCheckComplete, activeStyle])
+  }, [references, statusFilter, isCheckComplete, activeStyle, listId])
 
   if (isLoading) {
     return (
@@ -124,7 +131,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
     )
   }
 
-  if (!references || references.length === 0) {
+  if (!activeList && !references?.length) {
     // Differentiate "still extracting" from "extractor finished and found
     // nothing" — the latter case used to look identical to a working check
     // mid-extraction, which confused users into thinking the tool had hung.
@@ -174,17 +181,17 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
           }}
       >
         <div
-            className="px-4 py-3 border-b flex items-center justify-between relative"
+            className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-2"
             style={{ borderColor: 'var(--color-border)', minHeight: '48px' }}
         >
           <h3
-              className="font-semibold"
+              className="min-w-0 break-words font-semibold"
               style={{ color: 'var(--color-text-primary)' }}
           >
-            References ({sortedReferences.length})
+            {activeList?.name || 'References'} ({sortedReferences.length})
           </h3>
-          <div className="flex items-center gap-3 absolute right-4">
-            {statusFilter.length > 0 && (
+          <div className="flex flex-wrap items-center gap-3">
+            {!activeList && statusFilter.length > 0 && (
                 <span
                     className="text-sm px-2 py-1 rounded"
                     style={{
@@ -196,7 +203,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             </span>
             )}
             {selectedCheckId && <SuggestionStylePicker />}
-            {selectedCheckId && (
+            {selectedCheckId && !activeList && (
                 <button
                     onClick={() => setShowAdd(v => !v)}
                     className="text-xs px-2 py-1 rounded"
@@ -213,7 +220,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
           </div>
         </div>
 
-        {showAdd && (
+        {showAdd && !activeList && (
             <AddReferencePanel
                 newRef={newRef}
                 setNewRef={setNewRef}
@@ -234,13 +241,19 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
             className="divide-y"
             style={{ borderColor: 'var(--color-border)' }}
         >
+          {!filteredReferences.length && (
+            <p className="p-4 text-sm" style={{ color: 'var(--color-text-muted)' }}>
+              {activeList ? 'No references in this list.'
+                : statusFilter.length ? 'No references match the selected filters.' : 'No references in this view.'}
+            </p>
+          )}
           {filteredReferences.map((ref, displayIndex) => (
               <div key={referenceRowIdentity(ref, displayIndex)}>
                 <ReferenceCard
                     reference={ref}
                     index={ref.index ?? displayIndex}
                     displayIndex={displayIndex}
-                    totalRefs={sortedReferences.length}
+                    totalRefs={references?.length || 0}
                     isCheckComplete={isCheckComplete}
                 />
                 {selectedCheckId && (() => {
@@ -254,6 +267,8 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           onRemove={handleRemoveRef}
                           onReverify={handleReverify}
                           onReverifyAllDatabases={handleReverifyAllDatabases}
+                          onMoveReviewList={canMoveReference ? handleMoveReviewList : undefined}
+                          referenceLists={referenceLists}
                           searchOperation={getReferenceSearchOperation(ref, displayIndex)}
                           onCancelReferenceSearch={handleCancelReferenceSearch}
                           onEditMetadata={handleEditMetadata}
@@ -262,6 +277,7 @@ export default function ReferenceList({ references, isLoading, isCheckComplete =
                           reverifyAction={getReverifyAction(ident)}
                           suggestBusy={isSuggesting(ident)}
                           removeBusy={isRemoving(ident)}
+                          moveBusy={isMoving(ident)}
                           globalBusy={!!globalBusy}
                       />
                   )

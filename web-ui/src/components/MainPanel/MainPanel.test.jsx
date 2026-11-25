@@ -1,15 +1,21 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import MainPanel from './MainPanel'
 
-const data = vi.hoisted(() => ({ check: {}, history: {} }))
+const data = vi.hoisted(() => ({ check: {}, history: {}, createList: vi.fn() }))
 vi.mock('../../stores/useCheckStore', () => ({ useCheckStore: (select) => select(data.check) }))
-vi.mock('../../stores/useHistoryStore', () => ({ useHistoryStore: () => data.history }))
+vi.mock('../../stores/useHistoryStore', () => ({
+  useHistoryStore: Object.assign(() => data.history, { getState: () => data.history }),
+}))
+vi.mock('../../utils/api', async load => ({ ...await load(), createReferenceList: data.createList }))
 vi.mock('../../stores/useStyleStore', () => ({ useStyleStore: (select) => select({ format: 'apa', styleOptions: {} }) }))
 vi.mock('./InputSection', () => ({ default: () => null }))
 vi.mock('./StatusSection', () => ({ default: () => <div>Paper status</div> }))
 vi.mock('./StatsSection', () => ({ default: () => <div>Check summary</div> }))
-vi.mock('./ReferenceList', () => ({ default: ({ references }) => <div>Reference list: {references[0]?.title}</div> }))
+vi.mock('./ReferenceList', () => ({
+  default: ({ references, activeList }) => activeList
+    ? <div>Review list: {activeList.name}</div> : <div>Reference list: {references[0]?.title}</div>,
+}))
 vi.mock('./CorrectionsView', () => ({ default: () => <div>Correction details</div> }))
 vi.mock('./OnboardingBanner', () => ({ default: () => null }))
 vi.mock('./FieldGuide', () => ({ default: () => null }))
@@ -79,5 +85,36 @@ describe('paper workflows', () => {
     rerender(<MainPanel />)
     expect(screen.queryByLabelText('Suggestion selection')).not.toBeInTheDocument()
     expect(screen.getByText('Suggestions will be available when reference checking finishes.')).toBeVisible()
+  })
+
+  it('opens saved review lists in the results menu and adds a custom tab for this check', async () => {
+    const further = { id: 'further_checks', name: 'Further Checks' }
+    const missing = { id: 'could_not_find', name: 'Could not Find' }
+    const created = { id: 'custom', name: 'Ask librarian' }
+    data.history.selectedCheck.reference_lists = [further, missing]
+    data.history.selectedCheck.results.push({
+      title: 'Filed citation', id: 'filed-citation', review_list: further.id, status: 'verified',
+    })
+    data.history.updateCheckReferenceLists = vi.fn((_id, lists) => {
+      data.history.selectedCheck.reference_lists = lists
+    })
+    data.createList.mockResolvedValue({ data: { list: created, lists: [further, missing, created] } })
+    render(<MainPanel />)
+
+    const results = within(screen.getByRole('tablist', { name: 'Results view' }))
+    expect(results.getAllByRole('tab').map(el => el.textContent)).toEqual([
+      'References1', 'Corrections0', 'Further Checks1', 'Could not Find0',
+    ])
+    act(() => window.dispatchEvent(new CustomEvent('refchecker:focus-reference', {
+      detail: { refId: 'filed-citation' },
+    })))
+    expect(screen.getByText('Review list: Further Checks')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '+ New list' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'List name' }), { target: { value: 'Ask librarian' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create list' }))
+
+    await waitFor(() => expect(results.getByRole('tab', { name: /Ask librarian/ })).toHaveAttribute('aria-selected', 'true'))
+    expect(data.createList).toHaveBeenCalledWith(12, 'Ask librarian')
+    expect(screen.getByText('Review list: Ask librarian')).toBeVisible()
   })
 })

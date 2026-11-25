@@ -58,9 +58,15 @@ const findReferencePosition = (references, updated, referenceKey) => {
   return indexHits.length === 1 ? indexHits[0][1] : -1
 }
 
-export const patchCompletedReference = (operation, reference) => {
+export const patchCompletedReference = (operation, reference, { reviewMove = false } = {}) => {
   if (!operation?.check_id || !reference) return
-  const findPosition = rows => findReferencePosition(rows, reference, operation.reference_key)
+  const findPosition = rows => {
+    const position = findReferencePosition(rows, reference, operation.reference_key)
+    if (position < 0) return position
+    const current = rows[position]
+    // A search or replay from before a manual move must leave the newer row alone.
+    return reviewMove || current.review_revision === reference.review_revision ? position : -1
+  }
   useHistoryStore.getState().replaceHistoryReference(operation.check_id, reference, findPosition)
   const check = useCheckStore.getState()
   if (check.currentCheckId === operation.check_id) {

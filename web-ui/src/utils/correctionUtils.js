@@ -1,9 +1,10 @@
 import { exportReferenceAsStyle, hasAuthorListMembershipMismatch } from './formatters'
-import { getEffectiveReferenceStatus } from './referenceStatus'
+import { getEffectiveReferenceStatus, getReviewList } from './referenceStatus'
 
 /** Categories used consistently by the Corrections list and its tab count. */
 export function classifyCorrectionReference(ref, isCheckComplete = false) {
   const tags = new Set()
+  if (getReviewList(ref) !== 'automated') return tags
   const status = getEffectiveReferenceStatus(ref, isCheckComplete)
   if (status === 'error') tags.add('error')
   else if (status === 'warning') tags.add('warning')

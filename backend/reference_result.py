@@ -13,6 +13,7 @@ from __future__ import annotations
 from copy import deepcopy
 import logging
 import re
+from uuid import uuid4
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.reference_status import classify_verification_result
@@ -348,3 +349,16 @@ def merge_fresh_verification(
         if key in stored_reference:
             merged[key] = stored_reference[key]
     return merged
+
+
+def mark_reference_unverified(reference: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a citation to Unverified without starting a database search."""
+    projection = project_verification_result(
+        citation_verification_input(reference), None,
+        [{"error_type": "unverified", "error_details": "Marked Unverified without a database search."}],
+        None, index=reference.get("index"), enrich_enabled=False,
+    )
+    updated = merge_fresh_verification(reference, projection)
+    updated.pop("review_list", None)
+    updated["review_revision"] = str(uuid4())
+    return updated

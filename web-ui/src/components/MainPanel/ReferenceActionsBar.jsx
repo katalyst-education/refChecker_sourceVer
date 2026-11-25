@@ -16,6 +16,7 @@ import {
 } from '../../utils/api'
 import ReferenceLinksList from '../ReferenceCard/ReferenceLinksList'
 import { collectCandidateLinks, collectReferenceLinks } from '../../utils/referenceLinks'
+import { getReviewList } from '../../utils/referenceStatus'
 
 const databaseStatusLabel = (status) => ({
   matched: 'Match',
@@ -598,6 +599,8 @@ export function ReferenceRowActions({
                                       onRemove,
                                       onReverify,
                                       onReverifyAllDatabases,
+                                      onMoveReviewList,
+                                      referenceLists = [],
                                       searchOperation = null,
                                       onCancelReferenceSearch,
                                       onEditMetadata,
@@ -609,6 +612,7 @@ export function ReferenceRowActions({
                                       reverifyAction = null,
                                       suggestBusy = false,
                                       removeBusy = false,
+                                      moveBusy = false,
                                       globalBusy = false,
                                     }) {
   const referenceAuthors = Array.isArray(reference?.authors)
@@ -691,6 +695,7 @@ export function ReferenceRowActions({
   })
   const activeSearch = activeOperation && searchOperation?.operation_type === 'search-all'
   const activeVerification = activeOperation && searchOperation?.operation_type !== 'search-all'
+  const reviewList = getReviewList(reference)
   const databaseSearchWaiting = activeSearch && ['queued', 'running'].includes(searchOperation?.status)
   const databaseSources = (() => {
     const sourceMap = searchOperation?.sources || {}
@@ -708,7 +713,7 @@ export function ReferenceRowActions({
       ...Object.values(sourceMap).filter(source => !configuredNames.has(source.database)),
     ]
   })()
-  const disableFor = (busy) => busy || activeOperation || !selectedCheckId || globalBusy || editing
+  const disableFor = (busy) => busy || moveBusy || activeOperation || !selectedCheckId || globalBusy || editing
   const searchingAll = reverifyBusy && reverifyAction === 'all-databases'
   const savingEdit = reverifyBusy && reverifyAction === 'manual-edit'
   const restoringExtracted = reverifyBusy && reverifyAction === 'restore-extracted'
@@ -746,7 +751,7 @@ export function ReferenceRowActions({
     }
   }
   return (
-      <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || activeOperation) || undefined}>
+      <div className="px-4 pb-3 pt-1 text-xs" aria-busy={(reverifyBusy || moveBusy || activeOperation) || undefined}>
         <div className="flex flex-wrap gap-1.5">
           {authIssue && authenticationUrl && (
               <button
@@ -775,10 +780,12 @@ export function ReferenceRowActions({
               onClick={() => activeSearch
                 ? onCancelReferenceSearch?.(searchOperation)
                 : onReverifyAllDatabases?.(reference, displayIndex)}
-              disabled={activeVerification || searchOperation?.status === 'cancelling' || reverifyBusy || !selectedCheckId || globalBusy || editing}
+              disabled={activeVerification || searchOperation?.status === 'cancelling' || reverifyBusy || moveBusy || !selectedCheckId || globalBusy || editing}
               className="px-2.5 py-1 rounded-md font-medium"
               style={styleFor(reverifyBusy)}
-              title={activeSearch ? 'Cancel this database search' : 'Keep the saved citation fields and search every configured database'}
+              title={activeSearch ? 'Cancel this database search'
+                : reviewList === 'automated' ? 'Search every configured database using the saved citation'
+                  : 'Search every configured database and return this reference to References'}
           >
             {searchOperation?.status === 'cancelling'
               ? 'Cancelling…'
@@ -786,6 +793,21 @@ export function ReferenceRowActions({
                 ? 'Cancel search'
                 : searchingAll ? 'Searching all DBs…' : 'Search all DBs'}
           </button>
+          {onMoveReviewList && (
+            <select
+              aria-label="Move reference to list"
+              value=""
+              onChange={event => onMoveReviewList(reference, displayIndex, event.target.value)}
+              disabled={disableFor(reverifyBusy || suggestBusy || removeBusy)}
+              className="px-2.5 py-1 rounded-md font-medium"
+              style={styleFor(moveBusy)}
+            >
+              <option value="" disabled>{moveBusy ? 'Moving…' : 'Move to…'}</option>
+              {referenceLists.filter(list => list.id !== reviewList)
+                .map(list => <option key={list.id} value={list.id}>{list.name}</option>)}
+              {reviewList !== 'automated' && <option value="unverified">Unverified</option>}
+            </select>
+          )}
           <button
               type="button"
               onClick={openEditor}
