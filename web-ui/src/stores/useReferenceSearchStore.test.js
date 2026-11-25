@@ -94,6 +94,26 @@ describe('reference search operation state', () => {
     expect(useCheckStore.getState().status).not.toBe('completed')
   })
 
+  it('replaces old verification fields and invalidates cached details after a search finishes offscreen', () => {
+    const old = { ref_uid: 'row-139', status: 'error', errors: [{ error_type: 'author' }], verified_authors: ['Wrong match'] }
+    const fresh = { ref_uid: 'row-139', status: 'verified', errors: [], warnings: [] }
+    const otherCheck = { id: 18, results: [] }
+    const history = { id: 17, results: [old] }
+    useHistoryStore.setState({
+      history: [history], selectedCheckId: 18, selectedCheck: otherCheck,
+      detailCache: { 17: { check: history, fetchedAt: Date.now() } },
+    })
+    useCheckStore.setState({ currentCheckId: 17, references: [old] })
+    const store = useReferenceSearchStore.getState()
+    store.register({ operation_id: 'op-139', check_id: 17, reference_key: 'uid:row-139', status: 'running' })
+    store.applySnapshot({ operation_id: 'op-139', check_id: 17, reference_key: 'uid:row-139', status: 'completed', reference: fresh })
+
+    expect(useHistoryStore.getState().detailCache[17]).toBeUndefined()
+    expect(useHistoryStore.getState().selectedCheck).toEqual(otherCheck)
+    expect(useHistoryStore.getState().history[0].results[0]).toEqual(fresh)
+    expect(useCheckStore.getState().references[0]).toEqual({ ...fresh, index: 0 })
+  })
+
   it('keeps the final source summaries delivered with completion', () => {
     const store = useReferenceSearchStore.getState()
     store.register({ operation_id: 'op-final', session_id: 's-final', check_id: 17,

@@ -1,7 +1,39 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
+import { applyStatusFilter, buildReferenceSummary } from './referenceStatus'
+import { classifyCorrectionReference } from './correctionUtils'
+import { exportResultsAsJsonl, filterIssuesForStyle } from './formatters'
 import { formatDate, formatAuthors, truncate, formatFileSize, getStatusColors, formatReference, displayReferenceValue, exportReferenceAsBibtex, exportReferenceAsStyle, exportResultsAsMarkdown, normalizeAuthors, isEtAlSentinel, hasEtAlSentinel, plural, countLabel } from './formatters'
 
 describe('formatters', () => {
+  it('keeps a saved author disagreement visible under IEEE with a longer database author list', () => {
+    const authors = ['M. Hassan', 'K. Anuar', 'A. Mohamed']
+    const actual = 'Sta, I., Jlassi, M., Hajji, M., Boujmil, M. F., Jerbi, R., Kandyla, M., Kompitsas, M., Ezzaouia, H.'
+    const error = {
+      error_type: 'author',
+      error_details: `no matching authors:\n       cited:  ${authors.join(', ')}\n       actual: ${actual}`,
+      actual_value: actual,
+    }
+    const saved = { title: 'Structural and optical properties of titanium dioxide films', authors, status: 'error', errors: [error], warnings: [] }
+    const reopened = JSON.parse(JSON.stringify(saved))
+    const row = { ...reopened, errors: filterIssuesForStyle(reopened.errors, reopened, 'ieee') }
+
+    expect(row.errors).toEqual([error])
+    expect(classifyCorrectionReference(row, true).has('error')).toBe(true)
+    expect(applyStatusFilter([row], ['error'], true)).toEqual([row])
+    expect(buildReferenceSummary({ references: [row], isComplete: true }).references.errors).toBe(1)
+    expect(JSON.parse(exportResultsAsJsonl({ references: [row] }))).toMatchObject({
+      status: 'error', error_count: 1, errors: [error.error_details],
+    })
+  })
+
+  it('suppresses a count-only warning when the cited names match the leading authors', () => {
+    const issue = { warning_type: 'author', warning_details: 'Author count mismatch: 1 cited vs 3 correct' }
+    const ref = { authors: ['J. Smith', 'et al.'], verified_authors: ['John Smith', 'Mary Chen', 'S. Ahmed'] }
+
+    expect(filterIssuesForStyle([issue], ref, 'mla')).toEqual([])
+    expect(filterIssuesForStyle([issue], { ...ref, authors: ['M. Chen', 'et al.'] }, 'mla')).toEqual([issue])
+  })
+
   describe('exportResultsAsMarkdown', () => {
     it('marks website-verified references as verified', () => {
       const markdown = exportResultsAsMarkdown({

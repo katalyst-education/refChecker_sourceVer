@@ -60,17 +60,12 @@ const findReferencePosition = (references, updated, referenceKey) => {
 
 export const patchCompletedReference = (operation, reference) => {
   if (!operation?.check_id || !reference) return
-  const history = useHistoryStore.getState()
-  const historyPosition = findReferencePosition(
-    history.selectedCheck?.results, reference, operation.reference_key,
-  )
-  if (history.selectedCheck?.id === operation.check_id && historyPosition >= 0) {
-    history.updateHistoryReference?.(operation.check_id, historyPosition, reference)
-  }
+  const findPosition = rows => findReferencePosition(rows, reference, operation.reference_key)
+  useHistoryStore.getState().replaceHistoryReference(operation.check_id, reference, findPosition)
   const check = useCheckStore.getState()
   if (check.currentCheckId === operation.check_id) {
-    const position = findReferencePosition(check.references, reference, operation.reference_key)
-    if (position >= 0) check.updateReference?.(position, reference)
+    const position = findPosition(check.references)
+    if (position >= 0) check.updateReference(position, reference, { replace: true })
   }
 }
 

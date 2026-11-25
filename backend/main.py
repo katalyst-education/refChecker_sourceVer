@@ -8487,7 +8487,6 @@ async def _run_reference_search_job(
         if idx is None:
             raise LookupError("Reference not found")
         target = dict(refs[idx])
-        original_fingerprint = _reference_search_fingerprint(target)
 
         from refchecker.checkers.enhanced_hybrid_checker import VerificationCancelled
         from refchecker.core.refchecker import ArxivReferenceChecker
@@ -8541,17 +8540,12 @@ async def _run_reference_search_job(
         )
         updated = merge_fresh_verification(target, projection)
 
-        # Re-read immediately before writing. A concurrent edit/removal must not
-        # be overwritten by a result computed for older cited metadata.
-        current_refs = await db.get_check_references(check_id, user_id=owner_id)
-        current_idx = _find_ref_index_precise(
-            current_refs or [], ref_id, expected_id=expected_id,
-            expected_index=expected_index, expected_title=expected_title,
+        saved = await db.replace_check_reference_if_unchanged(
+            check_id, target, updated, user_id=owner_id,
         )
-        if current_idx is None or _reference_search_fingerprint(current_refs[current_idx]) != original_fingerprint:
+        if saved == 'reference_changed':
             raise RuntimeError("reference_changed")
-        current_refs[current_idx] = updated
-        if not await db.replace_check_references(check_id, current_refs, user_id=owner_id):
+        if saved != 'saved':
             raise RuntimeError("Failed to persist verified reference")
         try:
             await db.upsert_verified_reference(updated)

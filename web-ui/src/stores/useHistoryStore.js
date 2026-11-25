@@ -889,6 +889,27 @@ export const useHistoryStore = create((set, get) => ({
     })
   },
 
+  replaceHistoryReference: (checkId, reference, findPosition) => {
+    const replace = item => {
+      if (item?.id !== checkId || !Array.isArray(item.results)) return item
+      const position = findPosition(item.results)
+      if (position < 0) return item
+      const results = item.results.slice()
+      results[position] = reference
+      return { ...item, results }
+    }
+
+    set(state => {
+      const detailCache = { ...state.detailCache }
+      delete detailCache[checkId]
+      return {
+        history: state.history.map(replace),
+        selectedCheck: replace(state.selectedCheck),
+        detailCache,
+      }
+    })
+  },
+
   deleteCheck: async (id) => {
     if (id === -1) {
       // Drop the placeholder locally

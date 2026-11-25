@@ -261,14 +261,14 @@ export const useCheckStore = create((set, get) => ({
     set({ references: mappedRefs })
   },
 
-  updateReference: (index, data) => {
+  updateReference: (index, data, { replace = false } = {}) => {
     logger.debug('CheckStore', `Reference ${index} updated`, data)
     const normalizedStatus = data?.status ? data.status.toLowerCase() : null
     // Extract data fields but preserve the local 0-based index
     const { index: _backendIndex, ...dataWithoutIndex } = data
     set(state => ({
       references: state.references.map((ref, i) =>
-        i === index ? { ...ref, ...dataWithoutIndex, index: i, ...(normalizedStatus ? { status: normalizedStatus } : {}) } : ref
+        i === index ? { ...(replace ? {} : ref), ...dataWithoutIndex, index: i, ...(normalizedStatus ? { status: normalizedStatus } : {}) } : ref
       )
     }))
   },

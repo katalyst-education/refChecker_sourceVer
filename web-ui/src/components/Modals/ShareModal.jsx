@@ -72,10 +72,12 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
   // off-by-one (30/8/82% badge vs 29/9/80% export).
   const styleFormat = useStyleStore((s) => s.format)
   const summary = useMemo(() => {
-    const rawRefs = selectedCheck?.references || checkStore.references || []
+    const savedCheck = selectedCheck?.id === checkId ? selectedCheck : null
+    const currentCheck = checkStore.currentCheckId === checkId ? checkStore : null
+    const rawRefs = savedCheck?.results ?? currentCheck?.references ?? []
     // The share dialog only opens on a finished check, so treat it as complete
     // (respect an explicit status if one is present on the selected check).
-    const rawStatus = (selectedCheck?.status || '').toLowerCase()
+    const rawStatus = (savedCheck?.status || currentCheck?.status || '').toLowerCase()
     const isComplete = rawStatus ? !['in_progress', 'pending', 'checking', 'queued', 'processing', 'started'].includes(rawStatus) : true
     // Style-filter each ref's issues exactly as StatsSection does before counting.
     const refs = (Array.isArray(rawRefs) ? rawRefs : []).map((r) => {
@@ -87,7 +89,7 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
     })
     // Pull whatever aggregate stats the surface already has so progress totals
     // are honoured; reference buckets are recomputed from the refs themselves.
-    const aggregate = selectedCheck || checkStore.stats || {}
+    const aggregate = savedCheck || currentCheck?.stats || {}
     const s = buildReferenceSummary({ stats: aggregate, references: refs, isComplete })
     const stats = {
       total: s.processedRefs || refs.length,
@@ -99,8 +101,8 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
     // `canonical` is the full style-aware buildReferenceSummary result handed to
     // the export so the file shows the SAME counts + citation-health % the user
     // sees in the badge / report card.
-    return { refs, stats, canonical: s }
-  }, [selectedCheck, checkStore.references, checkStore.stats, styleFormat])
+    return { refs, stats, canonical: refs.length ? s : undefined }
+  }, [selectedCheck, checkStore, checkId, styleFormat])
 
   // Section include/exclude checkboxes (the export "what to include" controls).
   const [sections, setSections] = useState({ summary: true, issues: true, references: true })

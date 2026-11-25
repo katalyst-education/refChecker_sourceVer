@@ -55,8 +55,9 @@ const references = [
 beforeEach(() => {
   historyState = {
     selectedCheck: {
+      id: 42,
       status: 'completed',
-      references,
+      results: references,
     },
   }
   styleState = { format: 'ieee' }
@@ -109,7 +110,7 @@ describe('publish paths carry the dialog’s report options', () => {
     await waitFor(() => expect(publishCheck).toHaveBeenCalled())
     const publishSummary = publishCheck.mock.calls[0][1].summary
 
-    fireEvent.click(screen.getByText(/^Download/))
+    fireEvent.click(screen.getByRole('button', { name: /^Download/ }))
     await waitFor(() => expect(exportCheckFile).toHaveBeenCalled())
     const downloadSummary = exportCheckFile.mock.calls[0][1].summary
 

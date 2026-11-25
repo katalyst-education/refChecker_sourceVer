@@ -634,24 +634,20 @@ const _extractCitedActual = (issue, ref) => {
   return { cited, actual }
 }
 
-const _isStyleConformingAuthorCount = (issue, ref, style) => {
-  if (!style) return false
-  const details = String(issue?.error_details || issue?.message || '')
-  const m = details.match(/(\d+)\s*cited\s*vs\.?\s*(\d+)/i)
-  if (m) {
-    return isAuthorCountConsistentWithStyle(parseInt(m[1], 10), parseInt(m[2], 10), style)
-  }
-  const citedCount = Array.isArray(ref?.authors) ? ref.authors.length : 0
-  const actual = issue?.actual_value
-  let actualCount = 0
-  if (Array.isArray(actual)) actualCount = actual.length
-  else if (typeof actual === 'string') {
-    actualCount = actual
-      .split(/,\s*(?:and\s+)?|;\s*|\s+and\s+/)
-      .map(s => s.trim())
-      .filter(Boolean).length
-  } else if (typeof actual === 'number') actualCount = actual
-  return actualCount > 0 && isAuthorCountConsistentWithStyle(citedCount, actualCount, style)
+const _isStyleConformingAuthorCount = (issue, ref, style, type) => {
+  const details = String(issue?.error_details || issue?.warning_details || issue?.message || '')
+  if (type !== 'author_count' && !/^author count mismatch\b/i.test(details.trim())) return false
+
+  const cited = normalizeAuthors(ref?.authors)
+  const actual = normalizeAuthors(ref?.verified_authors || _extractCitedActual(issue, ref).actual)
+  if (!cited.length || cited.length >= actual.length) return false
+  if (!isAuthorCountConsistentWithStyle(cited.length, actual.length, style)) return false
+
+  // Truncation preserves the leading authors and their order.
+  return cited.every((author, index) => {
+    const signatures = _authorSignatureSet(author)
+    return _signatureSetMatchesAny(signatures, [_authorSignatureSet(actual[index])])
+  })
 }
 
 /**
@@ -665,11 +661,8 @@ export function filterIssuesForStyle(issues, ref, style) {
   if (!Array.isArray(issues) || issues.length === 0) return issues || []
   return issues.filter(issue => {
     const errorType = String(issue?.error_type || issue?.warning_type || '').toLowerCase()
-    // Style-specific author-count rule (MLA's et-al cap, etc.) still
-    // wins ahead of the generic cosmetic check because it needs the
-    // style argument; the generic check is style-agnostic.
     if (errorType === 'author' || errorType === 'authors' || errorType === 'author_count') {
-      if (_isStyleConformingAuthorCount(issue, ref, style)) return false
+      return !_isStyleConformingAuthorCount(issue, ref, style, errorType)
     }
     // Style-aware venue abbreviation: when the active style permits
     // NLM-style abbreviated journal titles (Vancouver/AMA/IEEE/etc.)

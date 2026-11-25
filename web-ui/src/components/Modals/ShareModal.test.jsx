@@ -161,8 +161,9 @@ beforeEach(() => {
   checkState.statusFilter = []
   historyState = {
     selectedCheck: {
+      id: 42,
       status: 'completed',
-      references,
+      results: references,
     },
   }
   styleState = { format: 'ieee' }
