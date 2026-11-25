@@ -14,6 +14,88 @@ describe('useHistoryStore', () => {
     vi.resetModules()
   })
 
+  it('keeps the latest check selected when detail responses arrive out of order', async () => {
+    const api = await import('../utils/api')
+    const { useHistoryStore } = await import('./useHistoryStore')
+    let finishFirst
+    api.getCheckDetail.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve }))
+    api.getCheckDetail.mockResolvedValueOnce({ data: { id: 2, status: 'completed', results: [] } })
+    const first = useHistoryStore.getState().selectCheck(1)
+    await useHistoryStore.getState().selectCheck(2)
+    finishFirst({ data: { id: 1, status: 'completed', results: [] } })
+    await first
+    expect(useHistoryStore.getState().selectedCheckId).toBe(2)
+    expect(useHistoryStore.getState().selectedCheck.id).toBe(2)
+  })
+
+  it('ignores an earlier request failure after selecting another check', async () => {
+    const api = await import('../utils/api')
+    const { useHistoryStore } = await import('./useHistoryStore')
+    let failFirst
+    api.getCheckDetail.mockImplementationOnce(() => new Promise((_resolve, reject) => { failFirst = reject }))
+    api.getCheckDetail.mockResolvedValueOnce({ data: { id: 2, status: 'completed', results: [] } })
+    const first = useHistoryStore.getState().selectCheck(1)
+    await useHistoryStore.getState().selectCheck(2)
+    failFirst(new Error('Earlier check failed'))
+    await first
+    expect(useHistoryStore.getState().error).toBeNull()
+    expect(useHistoryStore.getState().selectedCheck.id).toBe(2)
+  })
+
+  it('keeps a background history refresh from replacing a newer paper selection', async () => {
+    const api = await import('../utils/api')
+    const { useHistoryStore } = await import('./useHistoryStore')
+    const completed = { id: 1, status: 'completed', results: [] }
+    useHistoryStore.setState({ selectedCheckId: 1, selectedCheck: { id: 1, status: 'in_progress' } })
+    api.getHistory.mockResolvedValueOnce({ data: [completed] })
+    let finishRefresh
+    api.getCheckDetail.mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve }))
+    const refreshing = useHistoryStore.getState().fetchHistory()
+    await vi.waitFor(() => expect(finishRefresh).toBeTypeOf('function'))
+    api.getCheckDetail.mockResolvedValueOnce({ data: { id: 2, status: 'completed', results: [] } })
+    await useHistoryStore.getState().selectCheck(2)
+    finishRefresh({ data: completed })
+    await refreshing
+    expect(useHistoryStore.getState().selectedCheckId).toBe(2)
+    expect(useHistoryStore.getState().selectedCheck.id).toBe(2)
+  })
+
+  it('keeps the newest detail when returning to a check with an older request pending', async () => {
+    const api = await import('../utils/api')
+    const { useHistoryStore } = await import('./useHistoryStore')
+    let finishOld
+    api.getCheckDetail.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+    api.getCheckDetail.mockResolvedValueOnce({ data: { id: 2, status: 'completed', results: [] } })
+    api.getCheckDetail.mockResolvedValueOnce({ data: { id: 1, status: 'completed',
+      reference_lists: [{ id: 'custom', name: 'Current name' }], results: [],
+    } })
+    const oldRequest = useHistoryStore.getState().selectCheck(1)
+    await useHistoryStore.getState().selectCheck(2)
+    await useHistoryStore.getState().selectCheck(1)
+    finishOld({ data: { id: 1, status: 'completed',
+      reference_lists: [{ id: 'custom', name: 'Old name' }], results: [],
+    } })
+    await oldRequest
+    expect(useHistoryStore.getState().selectedCheck.reference_lists[0].name).toBe('Current name')
+  })
+
+  it('keeps freshly fetched list names after the detail cache is invalidated', async () => {
+    const api = await import('../utils/api')
+    const { useHistoryStore } = await import('./useHistoryStore')
+    useHistoryStore.setState({ history: [{ id: 1, status: 'completed',
+      reference_lists: [{ id: 'custom', name: 'Old name' }],
+      results: [{ index: 0, status: 'verified' }],
+    }] })
+    api.getCheckDetail.mockResolvedValueOnce({ data: { id: 1, status: 'completed',
+      reference_lists: [{ id: 'custom', name: 'Current name' }],
+      results: [{ index: 0, status: 'verified' }],
+    } })
+    await useHistoryStore.getState().selectCheck(1, { force: true })
+    useHistoryStore.setState({ selectedCheck: null, selectedCheckId: null, detailCache: {} })
+    await useHistoryStore.getState().selectCheck(1)
+    expect(useHistoryStore.getState().selectedCheck.reference_lists).toEqual([{ id: 'custom', name: 'Current name' }])
+  })
+
   it('should initialize with empty history', async () => {
     const { useHistoryStore } = await import('./useHistoryStore')
     const { result } = renderHook(() => useHistoryStore())
@@ -36,6 +118,30 @@ describe('useHistoryStore', () => {
     const { result } = renderHook(() => useHistoryStore())
     
     expect(typeof result.current.selectCheck).toBe('function')
+  })
+
+  it.each(['initializeWithPlaceholder', 'fetchHistory'])('restores saved lists on the first selection after %s', async (loadHistory) => {
+    const api = await import('../utils/api')
+    const { useHistoryStore } = await import('./useHistoryStore')
+    const check = {
+      id: 42,
+      status: 'completed',
+      reference_lists: [
+        { id: 'further_checks', name: 'Further Checks' },
+        { id: 'custom-id', name: 'Check print edition' },
+      ],
+      results: [{ index: 1, title: 'Filed reference', status: 'verified', review_list: 'custom-id' }],
+    }
+    api.getHistory.mockResolvedValueOnce({ data: [check] })
+    api.getCheckDetail.mockClear()
+
+    await useHistoryStore.getState()[loadHistory]()
+    await useHistoryStore.getState().selectCheck(42)
+
+    const selected = useHistoryStore.getState().selectedCheck
+    expect(selected.reference_lists).toEqual(check.reference_lists)
+    expect(selected.results[0].review_list).toBe('custom-id')
+    expect(api.getCheckDetail).not.toHaveBeenCalled()
   })
 
   it('should have deleteCheck method', async () => {

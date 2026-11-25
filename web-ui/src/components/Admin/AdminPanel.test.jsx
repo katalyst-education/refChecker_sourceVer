@@ -379,11 +379,23 @@ describe('AdminPanel', () => {
 
     it('offers a manual refresh', async () => {
       render(<AdminPanel open onClose={() => {}} />)
-      await waitFor(() => expect(mocks.getAdminOverview).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.getByLabelText('Refresh admin data')).toBeEnabled())
 
       fireEvent.click(screen.getByLabelText('Refresh admin data'))
 
       await waitFor(() => expect(mocks.getAdminOverview).toHaveBeenCalledTimes(2))
+    })
+
+    it('keeps the selected time window when an earlier load finishes later', async () => {
+      let finishEarlier
+      mocks.getAdminOverview.mockImplementationOnce(() => new Promise(resolve => { finishEarlier = resolve }))
+      mocks.getAdminOverview.mockResolvedValueOnce({ data: { ...overview, totals: { ...overview.totals, checks: 77 } } })
+      render(<AdminPanel open onClose={() => {}} />)
+      fireEvent.change(screen.getByLabelText('Time window'), { target: { value: '7' } })
+      await screen.findByText('77')
+      await act(async () => { finishEarlier({ data: overview }) })
+      expect(screen.getByText('77')).toBeInTheDocument()
+      expect(screen.getByLabelText('Time window')).toHaveValue('7')
     })
   })
 

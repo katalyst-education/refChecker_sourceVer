@@ -267,9 +267,11 @@ export const exportCheckHtml = (checkId) =>
 // makes the exported counts + citation-health byte-identical to the in-app
 // Summary badge / report card (the server otherwise recomputes them and a
 // style-suppressed warning could drift the verified/warning boundary).
-const _exportParams = ({ fmt = 'html', corrections = false, include, summary } = {}) => {
+const _exportParams = ({ fmt = 'html', corrections = false, include, summary, statuses, review_lists } = {}) => {
   const p = new URLSearchParams({ fmt, corrections: corrections ? 'true' : 'false' })
   if (Array.isArray(include) && include.length) p.set('include', include.join(','))
+  if (Array.isArray(statuses)) p.set('statuses', statuses.join(','))
+  if (Array.isArray(review_lists)) p.set('review_lists', review_lists.join(','))
   if (summary && typeof summary === 'object') {
     try { p.set('summary', JSON.stringify(summary)) } catch { /* skip on cycles */ }
   }
@@ -279,8 +281,8 @@ export const exportCheckFile = (checkId, opts = {}) =>
   api.get(`/export/${checkId}/file?${_exportParams(opts)}`, { responseType: 'blob', timeout: 60000 })
 export const exportBatchFile = (batchId, opts = {}) =>
   api.get(`/export/batch/${batchId}/file?${_exportParams(opts)}`, { responseType: 'blob', timeout: 120000 })
-export const publishCheck = (checkId, { adapter = 'github_gist', token = '', public: isPublic = false, include, corrections = false, summary } = {}) =>
-  api.post(`/export/${checkId}/publish`, { adapter, token, public: isPublic, include, corrections, summary }, { timeout: 30000 })
+export const publishCheck = (checkId, { adapter = 'github_gist', token = '', public: isPublic = false, include, corrections = false, summary, statuses, review_lists } = {}) =>
+  api.post(`/export/${checkId}/publish`, { adapter, token, public: isPublic, include, corrections, summary, statuses: statuses?.join(','), review_lists: review_lists?.join(',') }, { timeout: 30000 })
 // Citation health + retraction (real signals).
 export const getCheckHealth = (checkId) => api.get(`/check/${checkId}/health`, { timeout: 15000 })
 export const getCheckRetractions = (checkId) => api.get(`/check/${checkId}/retractions`, { timeout: 45000 })

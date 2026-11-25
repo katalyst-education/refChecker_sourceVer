@@ -1162,7 +1162,7 @@ class Database:
                 "refs_with_errors, refs_with_warnings_only, refs_with_suggestions_only, refs_verified, "
                 "llm_provider, llm_model, "
                 "status, source_type, batch_id, batch_label, "
-                "bibliography_source_kind, original_filename, results_json, "
+                "bibliography_source_kind, original_filename, results_json, reference_lists_json, "
                 "status"
             )
             if user_id is not None:
@@ -1187,6 +1187,9 @@ class Database:
                 history = []
                 for row in rows:
                     item = dict(row)
+                    # Completed checks open directly from history on startup.
+                    # Include their saved lists alongside the reference rows.
+                    item["reference_lists"] = _read_reference_lists(item.pop("reference_lists_json", None))
                     raw_results = item.pop('results_json', None)
                     # v0.7.65: recompute display stats from results_json
                     # so processed_refs / unverified_count reflect the
@@ -3868,7 +3871,7 @@ class Database:
                        refs_with_errors, refs_with_warnings_only, refs_verified,
                       llm_provider, llm_model,
                       status, source_type, batch_id, batch_label,
-                      bibliography_source_kind, original_filename
+                      bibliography_source_kind, original_filename, reference_lists_json
                 FROM check_history
                 WHERE batch_id = ?
             """
@@ -3881,7 +3884,10 @@ class Database:
             query += " ORDER BY timestamp ASC"
             async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+                checks = [dict(row) for row in rows]
+                for check in checks:
+                    check["reference_lists"] = _read_reference_lists(check.pop("reference_lists_json", None))
+                return checks
 
     async def get_batch_summary(self, batch_id: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Get aggregated summary for a batch, optionally filtered by user."""
@@ -3952,7 +3958,7 @@ class Database:
                        refs_with_errors, refs_with_warnings_only, refs_verified,
                       llm_provider, llm_model,
                       status, source_type, batch_id, batch_label, team_id,
-                      bibliography_source_kind, original_filename
+                      bibliography_source_kind, original_filename, reference_lists_json
                 FROM check_history
                 WHERE batch_id = ?
                 """
@@ -3961,7 +3967,10 @@ class Database:
             )
             async with db.execute(query, (batch_id, *access_params)) as cursor:
                 rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+                checks = [dict(row) for row in rows]
+                for check in checks:
+                    check["reference_lists"] = _read_reference_lists(check.pop("reference_lists_json", None))
+                return checks
 
     async def get_batch_summary_accessible(
         self, batch_id: str, user_id: Optional[int], team_ids: Optional[List[int]] = None

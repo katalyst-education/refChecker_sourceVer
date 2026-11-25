@@ -14,6 +14,8 @@ vi.mock('../utils/api', () => ({
 import useReferenceActions from './useReferenceActions'
 import {
   moveReferenceReviewList,
+  addReferenceToCheck,
+  removeReferenceFromCheck,
   startReferenceSearch,
   startReferenceVerification,
   suggestAlternativeReference,
@@ -56,6 +58,57 @@ describe('useReferenceActions re-verification', () => {
       references: [reference],
     })
     vi.stubGlobal('alert', vi.fn())
+  })
+
+  it('restores a rejected removal at its original position in live and saved views', async () => {
+    const second = { ref_uid: 'second', index: 0, title: 'Second', status: 'verified' }
+    const rows = [reference, second]
+    useCheckStore.setState({ references: rows })
+    useHistoryStore.setState({ selectedCheck: { id: 17, results: rows }, history: [{ id: 17, results: rows }] })
+    removeReferenceFromCheck.mockRejectedValueOnce(new Error('Remove rejected'))
+    const { result } = renderHook(() => useReferenceActions())
+    await act(async () => { await result.current.handleRemoveRef(reference, 0) })
+    expect(useCheckStore.getState().references).toEqual(rows)
+    expect(useHistoryStore.getState().selectedCheck.results).toEqual(rows)
+    expect(result.current.removedRefs).toEqual([])
+  })
+
+  it('finishing a removal after navigation keeps the new paper open and its trash empty', async () => {
+    let finish
+    removeReferenceFromCheck.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const { result } = renderHook(() => useReferenceActions())
+    let removing
+    act(() => { removing = result.current.handleRemoveRef(reference, 0) })
+    act(() => { useHistoryStore.setState({ selectedCheckId: 18, selectedCheck: { id: 18, results: [] } }) })
+    await act(async () => { finish({}); await removing })
+    expect(useHistoryStore.getState().selectCheck).not.toHaveBeenCalled()
+    expect(useHistoryStore.getState().selectedCheck.id).toBe(18)
+    expect(result.current.removedRefs).toEqual([])
+    expect(useHistoryStore.getState().history.find(row => row.id === 17).results).toEqual([])
+    expect(useHistoryStore.getState().detailCache[17]).toBeUndefined()
+  })
+
+  it('leaves the active check feed unchanged when removing a reference from another paper', async () => {
+    const liveRows = [{ ...reference, title: 'Other paper citation' }]
+    useCheckStore.setState({ currentCheckId: 99, references: liveRows })
+    removeReferenceFromCheck.mockResolvedValueOnce({})
+    const { result } = renderHook(() => useReferenceActions())
+    await act(async () => { await result.current.handleRemoveRef(reference, 0) })
+    expect(useCheckStore.getState().references).toEqual(liveRows)
+    expect(useHistoryStore.getState().history[0].results).toEqual([])
+  })
+
+  it('keeps an Undo placeholder out of an unrelated active paper', async () => {
+    const liveRows = [{ ...reference, title: 'Unrelated citation' }]
+    useCheckStore.setState({ currentCheckId: 99, references: liveRows })
+    let finish
+    addReferenceToCheck.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const { result } = renderHook(() => useReferenceActions())
+    let restoring
+    act(() => { restoring = result.current.handleRestoreRef({ _stashKey: 'old', title: 'Removed citation', _originalPosition: 0 }) })
+    expect(useCheckStore.getState().references).toEqual(liveRows)
+    await act(async () => { finish({ data: {} }); await restoring })
+    expect(useCheckStore.getState().references).toEqual(liveRows)
   })
 
   it('queues re-verification without waiting for the verifier response', async () => {

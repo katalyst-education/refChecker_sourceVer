@@ -1,6 +1,8 @@
 import asyncio
 import sqlite3
 
+import pytest
+
 from backend.database import (
     Database,
     _compute_reference_buckets_from_results,
@@ -88,4 +90,44 @@ def test_replacing_references_persists_canonical_status_buckets(tmp_path):
         ).fetchone()
 
     assert row == (0, 1, 0, 1, 2)
+
+
+def test_history_restores_saved_lists_and_membership_after_restart(tmp_path):
+    db_path = str(tmp_path / "history.db")
+    db = Database(db_path)
+    _run(db.init_db())
+    check_id = _run(db.create_pending_check("Saved lists", "", "file"))
+    created = _run(db.update_reference_lists(check_id, None, name="Ask author"))
+    list_id = created["list"]["id"]
+    _run(db.update_reference_lists(check_id, None, list_id=list_id, name="Check print edition"))
+    _run(db.update_reference_lists(check_id, None, list_id="could_not_find"))
+    _run(db.replace_check_references(check_id, [
+        {"index": 1, "title": "Filed reference", "status": "verified", "review_list": list_id},
+    ]))
+    _run(db.update_check_status(check_id, "completed"))
+
+    restarted = Database(db_path)
+    _run(restarted.init_db())
+    history = _run(restarted.get_history())
+    detail = _run(restarted.get_check_by_id(check_id))
+    assert history[0]["reference_lists"] == detail["reference_lists"] == [
+        {"id": "further_checks", "name": "Further Checks"},
+        {"id": list_id, "name": "Check print edition"},
+    ]
+    assert history[0]["results"][0]["review_list"] == list_id
+    assert "reference_lists_json" not in history[0]
+
+
+@pytest.mark.parametrize("clear_lists", [False, True])
+def test_history_restores_default_and_explicitly_empty_lists(tmp_path, clear_lists):
+    db_path = str(tmp_path / "history.db")
+    db = Database(db_path)
+    _run(db.init_db())
+    check_id = _run(db.create_pending_check("Saved lists", "", "file"))
+    defaults = _run(db.get_check_by_id(check_id))["reference_lists"]
+    if clear_lists:
+        for item in defaults:
+            _run(db.update_reference_lists(check_id, None, list_id=item["id"]))
+    restarted = Database(db_path)
+    assert _run(restarted.get_history())[0]["reference_lists"] == ([] if clear_lists else defaults)
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { exportCheckFile, exportBatchFile, publishCheck } from '../../utils/api'
 import ShareAnimationCanvas from './ShareAnimationCanvas'
 import { useCheckStore } from '../../stores/useCheckStore'
@@ -24,6 +24,13 @@ const FORMATS = [
   { id: 'docx', label: 'Word', ext: 'docx', hint: 'Editable .docx' },
 ]
 
+const RESULT_TYPES = [
+  { id: 'verified', label: 'Verified' },
+  { id: 'warning', label: 'Warning' },
+  { id: 'error', label: 'Error' },
+  { id: 'unverified', label: 'Unverified' },
+]
+
 /**
  * "Share this document" — multi-format export (HTML / PDF / Markdown / DOCX)
  * with include/exclude section checkboxes and an optional "suggested
@@ -34,6 +41,13 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
   const isBatch = !!batchId
   const checkStore = useCheckStore()
   const selectedCheck = useHistoryStore((s) => s.selectedCheck)
+  const selectedBatch = useHistoryStore((s) => s.selectedBatch)
+  const referenceLists = useMemo(() => {
+    const checks = isBatch
+      ? (selectedBatch?.batch_id === batchId ? selectedBatch.checks || [] : [])
+      : (selectedCheck?.id === checkId ? [selectedCheck] : [])
+    return [...new Map(checks.flatMap((check) => check.reference_lists || []).map((list) => [list.id, list])).values()]
+  }, [isBatch, selectedBatch, batchId, selectedCheck, checkId])
   const [busy, setBusy] = useState(null) // 'download' | 'publish'
   const [fmt, setFmt] = useState('html')
   const [corrections, setCorrections] = useState(false)
@@ -43,6 +57,12 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
   const [shareUrl, setShareUrl] = useState('')
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
+  const [resultTypes, setResultTypes] = useState(() => RESULT_TYPES.map(({ id }) => id))
+  const statuses = resultTypes.length === RESULT_TYPES.length ? undefined : resultTypes
+  const [excludedLists, setExcludedLists] = useState([])
+  const selectedLists = referenceLists.filter((list) => !excludedLists.includes(list.id)).map((list) => list.id)
+  const reviewLists = referenceLists.length ? selectedLists : undefined
+  const selectionEmpty = resultTypes.length === 0 && selectedLists.length === 0
 
   // Walkthrough animation control. R23: the canvas now PLAYS ONCE and FREEZES
   // on its final frame (loop=false is its default), so it must STAY MOUNTED —
@@ -119,7 +139,7 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
     setBusy('download'); setError('')
     const minShow = new Promise((r) => setTimeout(r, 1800))
     try {
-      const opts = { fmt, corrections, include: includeList.length ? includeList : undefined }
+      const opts = { fmt, corrections, include: includeList.length ? includeList : undefined, statuses, review_lists: reviewLists }
       // R48: hand the FE's canonical (style-aware) summary to the single-check
       // export so its counts + citation-health match the badge / report card.
       // Batch exports aggregate many checks server-side, so they keep the
@@ -136,6 +156,15 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
   }
 
   const [shareNote, setShareNote] = useState('')
+  const reportKey = JSON.stringify([checkId, batchId, fmt, sections, corrections, resultTypes, selectedLists, isPublic, summary.canonical])
+  const reportVersion = useRef(0)
+  useEffect(() => {
+    reportVersion.current += 1
+    setShareUrl('')
+    setShareNote('')
+    setCopied(false)
+    setError('')
+  }, [reportKey])
 
   // The publish paths take the SAME report options as the download, so a
   // published link matches what the dialog was configured to produce. Without
@@ -144,27 +173,35 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
     include: includeList.length ? includeList.join(',') : undefined,
     corrections,
     summary: summary.canonical,
+    statuses,
+    review_lists: reviewLists,
   })
 
   const handlePublish = async () => {
+    const version = reportVersion.current
     setBusy('publish'); setError(''); setShareUrl(''); setShareNote('')
     try {
       localStorage.setItem('refchecker.githubToken', token)
       const res = await publishCheck(checkId, { adapter: 'github_gist', token, public: isPublic, ...reportOpts() })
+      if (version !== reportVersion.current) return
       setShareUrl(res.data?.url || '')
     } catch (e) {
+      if (version !== reportVersion.current) return
       setError(e?.response?.data?.detail || e?.message || 'Publish failed')
     } finally { setBusy(null) }
   }
 
   // Quick link: zero-config anonymous host — no domain, no token.
   const handleQuickLink = async () => {
+    const version = reportVersion.current
     setBusy('quicklink'); setError(''); setShareUrl(''); setShareNote('')
     try {
       const res = await publishCheck(checkId, { adapter: 'quick_link', ...reportOpts() })
+      if (version !== reportVersion.current) return
       setShareUrl(res.data?.url || '')
       setShareNote('Anonymous PDF report link — no account or domain needed. Public to anyone with the URL and expires after a while.')
     } catch (e) {
+      if (version !== reportVersion.current) return
       setError(e?.response?.data?.detail || e?.message || 'Quick link failed')
     } finally { setBusy(null) }
   }
@@ -232,6 +269,41 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
             </div>
           </div>
 
+          <fieldset>
+            <legend className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>Results and lists to export</legend>
+            <p className="text-xs mb-2" style={{ color: 'var(--color-text-muted)' }}>Choose any combination of result types and user lists. Selected lists include all their references. Report totals reflect your selection.</p>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+              {RESULT_TYPES.map(({ id, label }) => (
+                <label key={id} className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-text-primary)' }}>
+                  <input type="checkbox" checked={resultTypes.includes(id)}
+                    onChange={() => {
+                      setResultTypes((selected) => selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id])
+                      setShareUrl(''); setShareNote('')
+                    }} />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {referenceLists.length > 0 && (
+              <div className="mt-3">
+                <div className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>User lists</div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                  {referenceLists.map((list) => (
+                    <label key={list.id} className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-text-primary)' }}>
+                      <input type="checkbox" checked={selectedLists.includes(list.id)}
+                        onChange={() => {
+                          setExcludedLists((excluded) => excluded.includes(list.id) ? excluded.filter((id) => id !== list.id) : [...excluded, list.id])
+                          setShareUrl(''); setShareNote('')
+                        }} />
+                      {list.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            {selectionEmpty && <p role="status" className="text-xs mt-2" style={{ color: 'var(--color-text-muted)' }}>Select at least one result type or user list to export.</p>}
+          </fieldset>
+
           {/* Section include/exclude */}
           <div>
             <div className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>Include sections</div>
@@ -261,14 +333,14 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
 
           {/* Export actions */}
           <div className="flex gap-2 flex-wrap">
-            <button type="button" onClick={handleDownload} disabled={busy === 'download' || includeList.length === 0}
+            <button type="button" onClick={handleDownload} disabled={!!busy || includeList.length === 0 || selectionEmpty}
               className="px-3 py-2 rounded-md text-sm font-medium inline-flex items-center gap-1.5"
-              style={{ background: 'var(--color-accent)', color: '#fff', border: 'none', opacity: (busy === 'download' || includeList.length === 0) ? 0.6 : 1 }}>
+              style={{ background: 'var(--color-accent)', color: '#fff', border: 'none', opacity: (busy || includeList.length === 0 || selectionEmpty) ? 0.6 : 1 }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
               {busy === 'download' ? 'Preparing…' : `Download ${FORMATS.find((f) => f.id === fmt)?.label}`}
             </button>
             {!isBatch && (
-              <button type="button" onClick={handleQuickLink} disabled={busy === 'quicklink'}
+              <button type="button" onClick={handleQuickLink} disabled={!!busy || includeList.length === 0 || selectionEmpty}
                 className="px-3 py-2 rounded-md text-sm inline-flex items-center gap-1.5 border"
                 style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-primary)', borderColor: 'var(--color-border)', opacity: busy === 'quicklink' ? 0.6 : 1 }}
                 title="Get an instant anonymous link — no domain or token needed (ephemeral, public)">
@@ -304,7 +376,7 @@ export default function ShareModal({ checkId, batchId, title, onClose }) {
                 <input type="checkbox" checked={isPublic} onChange={(e) => setIsPublic(e.target.checked)} />
                 Public gist (anyone can find it) — otherwise unlisted
               </label>
-              <button type="button" onClick={handlePublish} disabled={!token || busy === 'publish'}
+              <button type="button" onClick={handlePublish} disabled={!token || !!busy || includeList.length === 0 || selectionEmpty}
                 className="px-3 py-1.5 rounded-md text-sm font-medium"
                 style={{ background: 'var(--color-accent)', color: '#fff', border: 'none', opacity: (!token || busy === 'publish') ? 0.6 : 1 }}>
                 {busy === 'publish' ? 'Publishing…' : 'Publish & get link'}

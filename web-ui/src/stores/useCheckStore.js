@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { logger } from '../utils/logger'
 import { countLabel } from '../utils/formatters'
 import { useHistoryStore } from './useHistoryStore'
-import { referenceRowIdentity } from '../utils/referenceIdentity'
+import { referenceMatchesIdentity, referenceRowIdentity } from '../utils/referenceIdentity'
 
 /**
  * Store for current check state management
@@ -280,15 +280,11 @@ export const useCheckStore = create((set, get) => ({
   // HealthBadge after the network roundtrip lands (and only for
   // historical-view checks).
   applyCorrectionInStore: (refId) => {
-    const idStr = String(refId)
     set(state => {
       const list = state.references || []
       let touched = false
       const next = list.map((r, i) => {
-        const matches =
-          String(r?.id ?? '') === idStr ||
-          String(r?.index ?? '') === idStr ||
-          String(i) === idStr
+        const matches = referenceMatchesIdentity(r, i, refId)
         if (!matches) return r
         touched = true
         const corrected = r.corrected_reference || {}
@@ -321,21 +317,18 @@ export const useCheckStore = create((set, get) => ({
   // HealthBadge / list react instantly when the user clicks Restore / Reset
   // (mirrors applyCorrectionInStore in reverse).
   revertCorrectionInStore: (refId) => {
-    const idStr = String(refId)
     set(state => {
       const list = state.references || []
       let touched = false
       const next = list.map((r, i) => {
-        const matches =
-          String(r?.id ?? '') === idStr ||
-          String(r?.index ?? '') === idStr ||
-          String(i) === idStr
+        const matches = referenceMatchesIdentity(r, i, refId)
         if (!matches || !r?._pre_correction) return r
         touched = true
         const snap = r._pre_correction
         const restored = { ...r }
         for (const k of ['title', 'authors', 'year', 'venue', 'doi', 'arxiv_id']) {
           if (snap[k] !== undefined) restored[k] = snap[k]
+          else delete restored[k]
         }
         restored.status = snap.status
         restored.errors = snap.errors || []
@@ -360,6 +353,7 @@ export const useCheckStore = create((set, get) => ({
         const restored = { ...r }
         for (const k of ['title', 'authors', 'year', 'venue', 'doi', 'arxiv_id']) {
           if (snap[k] !== undefined) restored[k] = snap[k]
+          else delete restored[k]
         }
         restored.status = snap.status
         restored.errors = snap.errors || []
@@ -377,14 +371,10 @@ export const useCheckStore = create((set, get) => ({
   // currently-running check, displayRefs comes from this array, not
   // from selectedCheck.results.
   removeReference: (refId) => {
-    const id = String(refId)
     set(state => {
       const before = state.references || []
       const after = before.filter((r, i) => {
-        const matches =
-          String(r?.id ?? '') === id ||
-          String(r?.index ?? '') === id ||
-          String(i) === id
+        const matches = referenceMatchesIdentity(r, i, refId)
         return !matches
       })
       return { references: after }

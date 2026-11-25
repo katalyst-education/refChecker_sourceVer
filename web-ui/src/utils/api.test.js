@@ -27,6 +27,40 @@ vi.mock('axios', () => ({
 
 import * as api from './api'
 
+describe('export status options', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it.each([
+    ['check', () => api.exportCheckFile(42, { statuses: ['warning', 'error'] })],
+    ['batch', () => api.exportBatchFile('batch-1', { statuses: ['warning', 'error'] })],
+  ])('sends status choices in the %s download query', (_name, download) => {
+    download()
+    const query = new URLSearchParams(mocks.apiInstance.get.mock.calls[0][0].split('?')[1])
+    expect(query.get('statuses')).toBe('warning,error')
+  })
+
+  it('sends status choices in the publish request', () => {
+    api.publishCheck(42, { adapter: 'quick_link', statuses: ['error', 'unverified'] })
+    expect(mocks.apiInstance.post).toHaveBeenCalledWith(
+      '/export/42/publish', expect.objectContaining({ statuses: 'error,unverified' }), expect.anything(),
+    )
+  })
+
+  it('preserves list-only and empty-list selections in download queries', () => {
+    api.exportCheckFile(42, { statuses: [], review_lists: ['custom-id'] })
+    api.exportBatchFile('batch-1', { review_lists: [] })
+    const queries = mocks.apiInstance.get.mock.calls.map(([url]) => new URLSearchParams(url.split('?')[1]))
+    expect(queries[0].get('statuses')).toBe('')
+    expect(queries[0].get('review_lists')).toBe('custom-id')
+    expect(queries[1].get('review_lists')).toBe('')
+  })
+
+  it('serializes user lists for published reports', () => {
+    api.publishCheck(42, { statuses: [], review_lists: ['custom-id', 'further_checks'] })
+    expect(mocks.apiInstance.post.mock.calls[0][1]).toMatchObject({ statuses: '', review_lists: 'custom-id,further_checks' })
+  })
+})
+
 describe('batch api helpers', () => {
   beforeEach(() => {
     vi.clearAllMocks()

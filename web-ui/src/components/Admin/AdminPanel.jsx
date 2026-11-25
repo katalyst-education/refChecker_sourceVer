@@ -704,11 +704,13 @@ export default function AdminPanel({ open, onClose }) {
   const [refreshing, setRefreshing] = useState(false)
   const [updatedAt, setUpdatedAt] = useState(null)
   const [error, setError] = useState(null)
+  const loadVersion = useRef(0)
 
   // A refresh that fires while the user is reading must not blank the panel,
   // so only the first load for a given window raises `loading`.
   const load = useCallback(
     async ({ quiet = false } = {}) => {
+      const version = ++loadVersion.current
       if (quiet) setRefreshing(true)
       else setLoading(true)
       setError(null)
@@ -718,15 +720,18 @@ export default function AdminPanel({ open, onClose }) {
           getAdminUsers(days),
           getAdminPapers(days),
         ])
+        if (version !== loadVersion.current) return
         setOverview(ov.data)
         setUsers(us.data)
         setPapers(pp.data)
         setUpdatedAt(Date.now())
       } catch (e) {
-        setError(e?.response?.data?.detail || e.message || 'Failed to load admin data')
+        if (version === loadVersion.current) setError(e?.response?.data?.detail || e.message || 'Failed to load admin data')
       } finally {
-        setLoading(false)
-        setRefreshing(false)
+        if (version === loadVersion.current) {
+          setLoading(false)
+          setRefreshing(false)
+        }
       }
     },
     [days]
@@ -734,6 +739,7 @@ export default function AdminPanel({ open, onClose }) {
 
   useEffect(() => {
     if (open) load()
+    return () => { loadVersion.current += 1 }
   }, [open, load])
 
   // Poll while the panel is open. `loadRef` keeps the interval from being torn

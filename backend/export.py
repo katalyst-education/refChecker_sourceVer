@@ -1505,8 +1505,43 @@ def parse_sections(include: Optional[str]) -> Set[str]:
     return sel or set(ALL_SECTIONS)
 
 
+RESULT_STATUSES = {"verified", "warning", "error", "unverified"}
+
+
+def filter_check_statuses(check: Dict[str, Any], statuses: Optional[str],
+                          review_lists: Optional[str] = None) -> Dict[str, Any]:
+    """Select report rows by effective status, preserving original reference numbers.
+
+    Suggestions and website verification belong to Verified. Error and warning
+    precedence follows the shared report model. Selected user lists are added
+    independently of status. Omitted selections include all references.
+    """
+    if statuses is None and review_lists is None:
+        return check
+    selected = RESULT_STATUSES if statuses is None else {s.strip().lower() for s in statuses.split(",") if s.strip()}
+    selected_lists = set(review_lists.split(",")) if review_lists else set()
+    if selected - RESULT_STATUSES:
+        raise ValueError("Unknown result status")
+    refs = _as_list(check.get("results")) or _as_list(check.get("references"))
+    rows = []
+    for ref in refs:
+        review_list = ref.get("review_list") or "automated"
+        if review_list != "automated":
+            if review_list in selected_lists:
+                rows.append(ref)
+            continue
+        status = _effective_status(ref)
+        if status in {"suggestion", "website_verified"}:
+            status = "verified"
+        if status in selected:
+            rows.append(ref)
+    return {**check, "results": rows, "references": rows}
+
+
 def render_export(check: Dict[str, Any], fmt: str, *, corrections: bool = False,
-                  include: Optional[str] = None, summary: Any = None) -> Tuple[Any, str, str]:
+                  include: Optional[str] = None, summary: Any = None,
+                  statuses: Optional[str] = None,
+                  review_lists: Optional[str] = None) -> Tuple[Any, str, str]:
     """Return (content, media_type, ext) for a single check in the given format.
 
     *summary* (optional) is the FE's canonical ``buildReferenceSummary`` result.
@@ -1514,6 +1549,9 @@ def render_export(check: Dict[str, Any], fmt: str, *, corrections: bool = False,
     in-app Summary badge / report card exactly; when omitted the counts are
     computed server-side from the stored references.
     """
+    check = filter_check_statuses(check, statuses, review_lists)
+    if statuses is not None or review_lists is not None:
+        summary = None  # Recompute totals for the selected references.
     fmt = (fmt or "html").lower()
     sections = parse_sections(include)
     if fmt in ("md", "markdown"):
@@ -1526,7 +1564,10 @@ def render_export(check: Dict[str, Any], fmt: str, *, corrections: bool = False,
 
 
 def render_batch_export(checks: Sequence[Dict[str, Any]], fmt: str, *, corrections: bool = False,
-                        include: Optional[str] = None, label: str = "Batch report") -> Tuple[Any, str, str]:
+                        include: Optional[str] = None, label: str = "Batch report",
+                        statuses: Optional[str] = None,
+                        review_lists: Optional[str] = None) -> Tuple[Any, str, str]:
+    checks = [filter_check_statuses(check, statuses, review_lists) for check in checks]
     fmt = (fmt or "html").lower()
     sections = parse_sections(include)
     if fmt in ("md", "markdown"):

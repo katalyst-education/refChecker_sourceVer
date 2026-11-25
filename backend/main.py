@@ -3237,7 +3237,9 @@ async def get_check_detail(
 async def _render_check_html(check_id: int, current_user: UserInfo, *,
                              include: Optional[str] = None,
                              corrections: bool = False,
-                             summary: Any = None) -> tuple[str, str]:
+                             summary: Any = None,
+                             statuses: Optional[str] = None,
+                             review_lists: Optional[str] = None) -> tuple[str, str]:
     """Resolve a check and render it to standalone HTML. Returns (title, html).
 
     Team-aware read (R26): a member of the team a check is shared with can export
@@ -3247,10 +3249,10 @@ async def _render_check_html(check_id: int, current_user: UserInfo, *,
     The report options are honoured here so a published link matches what the
     share dialog was configured to produce, exactly as the download does."""
     check = await _get_accessible_check_or_404(check_id, current_user)
-    from backend.export import serialize_check_to_html, parse_sections
-    html_str = serialize_check_to_html(
-        check, corrections=corrections,
-        sections=parse_sections(include), summary=summary)
+    from backend.export import render_export
+    html_str, _, _ = render_export(
+        check, "html", corrections=corrections,
+        include=include, summary=summary, statuses=statuses, review_lists=review_lists)
     title = check.get("paper_title") or check.get("custom_label") or f"refchecker-{check_id}"
     return title, html_str
 
@@ -3283,6 +3285,8 @@ class _PublishRequest(BaseModel):
     include: Optional[str] = None
     corrections: bool = False
     summary: Optional[Dict[str, Any]] = None
+    statuses: Optional[str] = None
+    review_lists: Optional[str] = None
 
 
 @app.get("/api/check/{check_id}/health")
@@ -3777,6 +3781,8 @@ def _parse_summary_param(summary: Optional[str]) -> Optional[Dict[str, Any]]:
 async def export_check_file(check_id: int, fmt: str = "html", corrections: bool = False,
                             include: Optional[str] = None, download: bool = True,
                             summary: Optional[str] = None,
+                            statuses: Optional[str] = None,
+                            review_lists: Optional[str] = None,
                             current_user: UserInfo = Depends(require_user)):
     """Multi-format export of one check: html | md | pdf | docx.
 
@@ -3800,7 +3806,7 @@ async def export_check_file(check_id: int, fmt: str = "html", corrections: bool 
         try:
             content, media_type, ext = _export.render_export(
                 check, fmt, corrections=corrections, include=include,
-                summary=canonical_summary)
+                summary=canonical_summary, statuses=statuses, review_lists=review_lists)
         except _export.PdfEngineUnavailableError as e:
             raise HTTPException(status_code=501, detail=str(e))
         title = check.get("paper_title") or check.get("custom_label") or f"refchecker-{check_id}"
@@ -3820,6 +3826,8 @@ async def export_check_file(check_id: int, fmt: str = "html", corrections: bool 
 @app.get("/api/export/batch/{batch_id}/file")
 async def export_batch_file(batch_id: str, fmt: str = "html", corrections: bool = False,
                             include: Optional[str] = None, download: bool = True,
+                            statuses: Optional[str] = None,
+                            review_lists: Optional[str] = None,
                             current_user: UserInfo = Depends(require_user)):
     """Multi-format batch report: one-page overview + each paper separately."""
     try:
@@ -3841,7 +3849,8 @@ async def export_batch_file(batch_id: str, fmt: str = "html", corrections: bool 
         from backend import export as _export
         try:
             content, media_type, ext = _export.render_batch_export(
-                checks, fmt, corrections=corrections, include=include, label=label)
+                checks, fmt, corrections=corrections, include=include, label=label,
+                statuses=statuses, review_lists=review_lists)
         except _export.PdfEngineUnavailableError as e:
             raise HTTPException(status_code=501, detail=str(e))
         headers = {}
@@ -3873,7 +3882,8 @@ async def publish_check(check_id: int, req: _PublishRequest,
     try:
         title, html_str = await _render_check_html(
             check_id, current_user, include=req.include,
-            corrections=req.corrections, summary=req.summary)
+            corrections=req.corrections, summary=req.summary, statuses=req.statuses,
+            review_lists=req.review_lists)
     except HTTPException:
         raise
     except Exception as e:
@@ -3888,17 +3898,13 @@ async def publish_check(check_id: int, req: _PublishRequest,
     # ephemeral + public (surfaced as such in the UI). No credentials involved.
     if req.adapter == "quick_link":
         try:
-            user_id = get_user_id_filter(current_user)
-            check = await db.get_check_by_id(check_id, user_id=user_id)
-            if not check:
-                raise HTTPException(status_code=404, detail="Check not found")
+            check = await _get_accessible_check_or_404(check_id, current_user)
             from backend import export as _export
             try:
-                pdf_bytes = await asyncio.to_thread(
-                    _export.render_check_to_pdf, check,
-                    corrections=req.corrections,
-                    sections=_export.parse_sections(req.include),
-                    summary=req.summary)
+                pdf_bytes, _, _ = await asyncio.to_thread(
+                    _export.render_export, check, "pdf",
+                    corrections=req.corrections, include=req.include,
+                    summary=req.summary, statuses=req.statuses, review_lists=req.review_lists)
             except _export.PdfEngineUnavailableError as e:
                 # No PDF engine in this bundle: quick-link needs a PDF, so tell
                 # the user to use Publish-to-web or download HTML/MD instead.

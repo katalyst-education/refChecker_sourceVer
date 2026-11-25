@@ -10,7 +10,11 @@ const buttonStyle = {
 }
 const buttonClass = 'rounded-md border px-2.5 py-1 text-xs font-medium disabled:opacity-50'
 
-export default function ReferenceListControls({ checkId, activeList, onSelectList }) {
+export default function ReferenceListControls(props) {
+  return <ReferenceListControlsForm key={`${props.checkId}:${props.activeList?.id || 'automated'}`} {...props} />
+}
+
+function ReferenceListControlsForm({ checkId, activeList, onSelectList }) {
   const [action, setAction] = useState(null)
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)

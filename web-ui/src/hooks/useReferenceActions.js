@@ -12,7 +12,7 @@ import { useHistoryStore } from '../stores/useHistoryStore'
 import { useCheckStore } from '../stores/useCheckStore'
 import { useKeyStore } from '../stores/useKeyStore'
 import { patchCompletedReference, referenceSearchKey, useReferenceSearchStore } from '../stores/useReferenceSearchStore'
-import { referenceRowIdentity, toApiReferenceId } from '../utils/referenceIdentity'
+import { referenceMatchesIdentity, referenceRowIdentity, toApiReferenceId } from '../utils/referenceIdentity'
 
 const EMPTY_NEW = { title: '', authors: '', year: '', doi: '', arxiv_id: '' }
 
@@ -98,7 +98,7 @@ export default function useReferenceActions() {
   }, [selectedCheckId])
 
   const reloadCheck = async () => {
-    if (!selectedCheckId) return
+    if (!selectedCheckId || useHistoryStore.getState().selectedCheckId !== selectedCheckId) return
     // Force refetch — the store short-circuits same-id selects, but after an
     // Apply Fix / Re-verify we need the freshly-updated reference list so the
     // HealthBadge + Summary tiles recompute against the new statuses.
@@ -166,8 +166,11 @@ export default function useReferenceActions() {
     // a stable list of removed items.
     // Capture the original 0-based position so Undo can put the ref
     // back exactly where it was, not at the bottom of the list.
-    const storeRefs = useCheckStore.getState().references || []
-    let originalPosition = findReferencePosition(storeRefs, ref, i)
+    const liveCheck = useCheckStore.getState()
+    const storeRefs = liveCheck.currentCheckId === selectedCheckId ? liveCheck.references || [] : []
+    const savedCheck = useHistoryStore.getState().selectedCheck
+    const savedRefs = savedCheck?.id === selectedCheckId ? savedCheck.results || [] : []
+    let originalPosition = findReferencePosition(savedRefs.length ? savedRefs : storeRefs, ref, i)
     if (originalPosition === -1) originalPosition = typeof i === 'number' ? i : 0
     const snapshot = {
       _stashKey: `${ident}-${Date.now()}`,
@@ -184,25 +187,24 @@ export default function useReferenceActions() {
     // not from selectedCheck.results — without this, the row stays
     // visible and the health badge doesn't move until they navigate
     // away and back.
-    const removedFromStore = (useCheckStore.getState().references || []).find(
-        (r, idx) => (
-            String(r?.id ?? '') === ident ||
-            String(r?.index ?? '') === ident ||
-            String(idx) === ident
-        )
-    )
-    useCheckStore.getState().removeReference(ident)
+    const removedFromStore = storeRefs.find((r, idx) => referenceMatchesIdentity(r, idx, ident))
+    const removedFromHistory = savedRefs.find((r, idx) => referenceMatchesIdentity(r, idx, ident))
+    if (liveCheck.currentCheckId === selectedCheckId) liveCheck.removeReference(ident)
     // Also drop it from the historical-view source so the badge/list move
     // immediately when displayRefs reads selectedCheck.results (not checkStore).
     useHistoryStore.getState().optimisticRemoveReference?.(ident)
     try {
       await removeReferenceFromCheck(selectedCheckId, apiRefId)
-      setRemovedRefs(prev => [snapshot, ...prev].slice(0, 20))
+      useHistoryStore.getState().removeHistoryReference(selectedCheckId, ident)
+      if (useHistoryStore.getState().selectedCheckId === selectedCheckId) setRemovedRefs(prev => [snapshot, ...prev].slice(0, 20))
       await reloadCheck()
     } catch (e) {
       // Server rejected the delete — put the ref back so the optimistic
       // remove doesn't strand the UI in a worse state than it started.
-      if (removedFromStore) useCheckStore.getState().restoreReference(removedFromStore)
+      if (removedFromStore && useCheckStore.getState().currentCheckId === selectedCheckId) {
+        useCheckStore.getState().restoreReference(removedFromStore, storeRefs.indexOf(removedFromStore))
+      }
+      if (removedFromHistory) useHistoryStore.getState().restoreHistoryReference(selectedCheckId, removedFromHistory, originalPosition)
       alert(e?.response?.data?.detail || e?.message || 'Remove failed')
     } finally {
       leaveBusy(setRemoveBusy, ident)
@@ -234,7 +236,9 @@ export default function useReferenceActions() {
       suggestions: [{ message: 'Restoring…', error_type: 'manual' }],
     }
     try {
-      useCheckStore.getState().restoreReference(placeholder, snapshot._originalPosition)
+      if (useCheckStore.getState().currentCheckId === selectedCheckId) {
+        useCheckStore.getState().restoreReference(placeholder, snapshot._originalPosition)
+      }
     } catch { /* store may not have action yet */ }
     // Pop from the trash strip right away — user sees the placeholder
     // in the list and the trash entry gone in the same render.
@@ -264,8 +268,10 @@ export default function useReferenceActions() {
       await reloadCheck()
     } catch (e) {
       // Roll back the optimistic restore and put the ref back in the trash.
-      try { useCheckStore.getState().removeReference(optimisticId) } catch { /* */ }
-      setRemovedRefs(prev => [snapshot, ...prev])
+      try {
+        if (useCheckStore.getState().currentCheckId === selectedCheckId) useCheckStore.getState().removeReference(optimisticId)
+      } catch { /* */ }
+      if (useHistoryStore.getState().selectedCheckId === selectedCheckId) setRemovedRefs(prev => [snapshot, ...prev])
       alert(e?.response?.data?.detail || e?.message || 'Restore failed')
     } finally {
       setGlobalBusy(null)

@@ -110,6 +110,26 @@ def test_team_member_opens_shared_batch_200_nonmember_404(auth_db):
     assert exc.value.status_code == 404
 
 
+def test_batch_export_choices_include_current_user_list_names(auth_db):
+    api_main, db = auth_db
+    owner = _run(_create_user(api_main, db, "owner-lists"))
+    member = _run(_create_user(api_main, db, "member-lists"))
+    batch_id, team_id = _run(_seed_shared_batch(db, owner, member_user_id=member.id))
+    checks = _run(db.get_batch_checks(batch_id, user_id=owner.id))
+    assert checks[0]["reference_lists"][0]["name"] == "Further Checks"
+    check_id = checks[0]["id"]
+    created = _run(db.update_reference_lists(check_id, owner.id, name="Ask author"))
+    list_id = created["list"]["id"]
+    _run(db.update_reference_lists(check_id, owner.id, list_id=list_id, name="Check print edition"))
+    for rows in [
+        _run(db.get_batch_checks(batch_id, user_id=owner.id)),
+        _run(db.get_batch_checks_accessible(batch_id, member.id, [team_id])),
+    ]:
+        first = next(row for row in rows if row["id"] == check_id)
+        assert first["reference_lists"][-1] == {"id": list_id, "name": "Check print edition"}
+        assert "reference_lists_json" not in first
+
+
 def test_nonmember_cannot_mutate_shared_batch(auth_db):
     """Team membership grants READ access only — a member can't cancel/delete
     another owner's batch, and a stranger gets 404 on the mutating routes."""
@@ -274,6 +294,43 @@ def test_team_member_exports_and_scores_shared_check(auth_db):
     with pytest.raises(HTTPException) as exc:
         _run(api_main.export_check_html(check_id, True, stranger))
     assert exc.value.status_code == 404
+
+
+def test_team_member_quick_link_uses_shared_access_and_selected_lists(auth_db, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    import httpx
+    import fitz
+
+    api_main, db = auth_db
+    owner = _run(_create_user(api_main, db, "owner-quick"))
+    member = _run(_create_user(api_main, db, "member-quick"))
+    stranger = _run(_create_user(api_main, db, "stranger-quick"))
+    team = _run(db.create_team("Quick link team", owner.id))
+    _run(db.add_team_member(team["id"], member.id))
+    check_id = _run(db.create_pending_check("Shared report", "x", "url", user_id=owner.id))
+    _run(db.set_check_team(check_id, team["id"]))
+    _run(db.replace_check_references(check_id, [
+        {"index": 1, "title": "Selected citation", "status": "verified", "review_list": "further_checks"},
+        {"index": 2, "title": "Excluded citation", "status": "verified"},
+    ]))
+    client = AsyncMock()
+    client.post.return_value = Mock(status_code=200, json=lambda: {"data": {"url": "https://tmpfiles.org/123/report.pdf"}})
+    context = AsyncMock()
+    context.__aenter__.return_value = client
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: context)
+    request = api_main._PublishRequest(adapter="quick_link", statuses="", review_lists="further_checks")
+
+    response = _run(api_main.publish_check(check_id, request, member))
+    assert response["url"] == "https://tmpfiles.org/dl/123/report.pdf"
+    pdf = client.post.call_args.kwargs["files"]["file"][1]
+    with fitz.open(stream=pdf, filetype="pdf") as document:
+        text = " ".join(page.get_text() for page in document)
+    assert "Selected citation" in text
+    assert "Excluded citation" not in text
+    with pytest.raises(HTTPException) as exc:
+        _run(api_main.publish_check(check_id, request, stranger))
+    assert exc.value.status_code == 404
+    assert client.post.await_count == 1
 
 
 def test_db_get_check_by_id_team_scoped(auth_db):
