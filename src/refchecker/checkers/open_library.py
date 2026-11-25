@@ -10,7 +10,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from refchecker.config.settings import get_config
-from refchecker.utils.error_utils import create_author_error, format_year_mismatch
+from refchecker.utils.book_editions import (
+    assess_book_edition, book_edition_status, book_publication_dates, book_volume, edition_label, isbn_digits,
+)
+from refchecker.utils.error_utils import create_author_error
 from refchecker.utils.text_utils import clean_title_for_search, compare_authors, find_best_match
 
 logger = logging.getLogger(__name__)
@@ -131,11 +134,72 @@ class OpenLibraryReferenceChecker:
 
     @staticmethod
     def _isbn_from_reference(reference: Dict[str, Any]) -> Optional[str]:
-        for key in ("isbn", "ISBN"):
-            value = reference.get(key)
-            if value:
-                return str(value).replace("-", "").strip()
-        return None
+        return isbn_digits(reference.get("isbn") or reference.get("ISBN")) or None
+
+    def _search_editions(self, work_key: str, isbn: Optional[str]) -> List[Dict[str, Any]]:
+        """Look up the ISBN directly or consult a bounded page of work editions."""
+        from refchecker.utils.cache_utils import cache_api_response, cached_api_response
+
+        if not re.fullmatch(r"/works/OL\d+W", work_key):
+            return []
+        cache_dir = getattr(self, "cache_dir", None)
+        isbn = isbn_digits(isbn)
+        path = f"/isbn/{isbn}.json" if isbn else f"{work_key}/editions.json"
+        cache_key = f"v2|{work_key}|{isbn or 50}"
+        cached = cached_api_response(cache_dir, "open_library", "editions", cache_key)
+        if cached:
+            return cached
+        try:
+            self._wait_for_slot()
+            response = requests.get(
+                f"{self.base_url}{path}",
+                headers=self.headers, params=None if isbn else {"limit": 50}, timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return []
+            if isbn:
+                works = payload.get("works") or []
+                entries = [payload] if any(
+                    isinstance(item, dict) and item.get("key") == work_key for item in works
+                ) else []
+            else:
+                entries = payload.get("entries") or []
+        except (requests.RequestException, ValueError) as exc:
+            logger.info("Open Library edition lookup incomplete for %s: %s", work_key, exc)
+            return []
+        if entries:
+            cache_api_response(cache_dir, "open_library", "editions", cache_key, entries)
+        return entries
+
+    @staticmethod
+    def _normalise_edition(work: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any]:
+        description = " ".join(str(entry.get(field) or "") for field in ("title", "subtitle", "edition_name"))
+        date = entry.get("publish_date")
+        label = entry.get("edition_name") or edition_label(description)
+        publication_label = "catalogued publication"
+        if re.search(r"\breprint\b", str(label), re.IGNORECASE):
+            publication_label = "reprint"
+        elif re.match(r"\s*(?:copyright\s*|c\s*|\u00a9\s*)\d", str(date), re.IGNORECASE):
+            publication_label = "copyright"
+        dates = book_publication_dates({"book_publication_dates": {publication_label: date}})
+        year = dates.get(publication_label)
+        isbns = (entry.get("isbn_13") or []) + (entry.get("isbn_10") or [])
+        return {
+            **work,
+            "type": "book",
+            "_book_work_level": False,
+            "key": entry.get("key"),
+            "edition": label,
+            "volume": book_volume(description),
+            "publisher": next(iter(entry.get("publishers") or []), None),
+            "isbn": next(iter(isbns), None),
+            "isbn_values": isbns,
+            "book_publication_dates": dates,
+            "year": year,
+            "publication_year": year,
+        }
 
     @staticmethod
     def _normalise_result(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -152,6 +216,10 @@ class OpenLibraryReferenceChecker:
         else:
             normalised["_matching_title"] = main_title
         normalised["authors"] = [{"name": name} for name in result.get("author_name", [])]
+        normalised["type"] = "book"
+        normalised["_book_work_level"] = True
+        # The search response aggregates ISBNs across all of a work's editions.
+        normalised.pop("isbn", None)
         normalised["publication_year"] = result.get("first_publish_year")
         normalised["year"] = result.get("first_publish_year")
         return normalised
@@ -164,6 +232,8 @@ class OpenLibraryReferenceChecker:
         if not title and not isbn:
             return None, [], None
         results = [self._normalise_result(item) for item in self.search_books(title, authors, isbn)]
+        if not results and isbn and title:
+            results = [self._normalise_result(item) for item in self.search_books(title, authors)]
         if not results:
             logger.info(
                 "[OPEN_LIBRARY_TRACE] stage=match_result status=not_found "
@@ -218,13 +288,28 @@ class OpenLibraryReferenceChecker:
             matched, detail = compare_authors(authors, actual_authors)
             if not matched:
                 errors.append(create_author_error(detail, [a["name"] for a in actual_authors]))
-        actual_year = work_data.get("first_publish_year")
-        if year and actual_year:
-            try:
-                different = abs(int(year) - int(actual_year)) > 1
-            except (TypeError, ValueError):
-                different = True
-            if different:
-                errors.append({"warning_type": "year", "warning_details": format_year_mismatch(year, actual_year), "ref_year_correct": actual_year})
+        if book_edition_status(reference, work_data) == "unverified":
+            work_key = work_data.get("key") or ""
+            entries = [
+                self._normalise_edition(work_data, entry)
+                for entry in self._search_editions(work_key, isbn)
+                if isinstance(entry, dict) and re.fullmatch(r"/books/OL\d+M", entry.get("key") or "")
+            ]
+            match = next((entry for entry in entries if book_edition_status(reference, entry) == "matched"), None)
+            if match:
+                work_data = match
+            else:
+                alternatives = []
+                for entry in entries:
+                    description = ", ".join(str(value) for value in (
+                        entry.get("edition"), f"vol. {entry['volume']}" if entry.get("volume") else None,
+                        entry.get("publication_year"),
+                    ) if value)
+                    if description and description not in alternatives:
+                        alternatives.append(description)
+                    if len(alternatives) == 3:
+                        break
+                work_data["book_edition_alternatives"] = alternatives
+        work_data, errors = assess_book_edition(reference, work_data, errors)
         key = work_data.get("key")
         return work_data, errors, f"{self.base_url}{key}" if key else None

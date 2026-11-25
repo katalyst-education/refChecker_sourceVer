@@ -5,6 +5,7 @@ from copy import deepcopy
 import re
 
 from refchecker.utils.citation_urls import citation_links, strip_citation_url_punctuation
+from refchecker.utils.book_editions import edition_label, split_title_edition
 from refchecker.utils.doi_utils import extract_doi_from_url, normalize_doi
 from refchecker.utils.publication_fields import (
     PUBLICATION_FIELDS, parse_publication_tail, publication_tail, publication_value_key,
@@ -20,7 +21,7 @@ from refchecker.utils.text_normalization import (
 
 
 _CITATION_FIELDS = (
-    'title', 'year', 'doi', 'arxiv_id', 'pmid', 'isbn', 'issn', 'edition',
+    'title', 'year', 'doi', 'arxiv_id', 'pmid', 'isbn', 'issn',
 ) + PUBLICATION_FIELDS
 CITED_REFERENCE_FIELDS = _CITATION_FIELDS + ('authors', 'venue', 'journal', 'url', 'cited_url')
 REFERENCE_SOURCE_FIELDS = ('raw_text', 'entry_number', 'extraction_provenance')
@@ -203,7 +204,7 @@ def _reconcile_publication_fields(reference, tail, title):
     provenance = reference['extraction_provenance']
     for field, values in ambiguous.items():
         _review_field(provenance, field, reference.get(field), values)
-    for field in PUBLICATION_FIELDS:
+    for field in (*PUBLICATION_FIELDS, 'isbn'):
         if field not in fields:
             continue
         source = fields[field]
@@ -229,6 +230,29 @@ def _reconcile_publication_fields(reference, tail, title):
         _review_field(provenance, 'venue', current, venue)
 
 
+def recover_cited_book_fields(reference):
+    """Read edition details from source text when replaying a saved citation."""
+    if reference.get('manual_edit'):
+        return
+    title = reference.get('title') or ''
+    base_title, title_edition = split_title_edition(title)
+    provenance = reference.get('extraction_provenance') or {}
+    source = provenance.get('source_text') or reference.get('raw_text') or ''
+    if not title_edition and not edition_label(source) and 'isbn' not in source.casefold():
+        return
+    _, printed_title, tail = _quoted_parts(source)
+    if printed_title and _title_key(printed_title) != _title_key(base_title):
+        return
+    fields, ambiguous = parse_publication_tail(tail or publication_tail(source, base_title))
+    if title_edition and not printed_title:
+        reference['title'] = base_title
+        fields.setdefault('edition', title_edition)
+    if fields.get('edition') or fields.get('isbn'):
+        for field in ('edition', 'isbn', 'volume', 'publisher'):
+            if fields.get(field) and field not in ambiguous and not reference.get(field):
+                reference[field] = fields[field]
+
+
 def reconcile_reference_source(reference, *, layout_text=None):
     """Use explicit citation boundaries to repair fields and surface uncertainty.
 
@@ -241,6 +265,11 @@ def reconcile_reference_source(reference, *, layout_text=None):
     prefix, title, tail = _quoted_parts(raw_text)
     if not title:
         parsed_title = reference.get('title') or ''
+        book_title, edition = split_title_edition(parsed_title)
+        if edition and publication_tail(raw_text, book_title):
+            reference['title'] = book_title
+            record_extraction_change(reference, 'title', parsed_title, book_title, 'bibliography_publication')
+            parsed_title = book_title
         if layout_text and {'url', 'cited_url'}.intersection(provenance.get('review', {})):
             provenance['layout_text'] = layout_text
         _reconcile_citation_urls(reference, raw_text, layout_text or '')

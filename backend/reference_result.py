@@ -109,7 +109,11 @@ def derive_corrected_reference(
             corrected_authors[position] = actual
             changed = True
 
-    return {"authors": corrected_authors} if changed else None
+    correction = {"authors": corrected_authors} if changed else {}
+    for issue in issues:
+        if issue.get("metadata_classification") == "book_edition_date_mismatch" and issue.get("ref_year_correct"):
+            correction["year"] = issue["ref_year_correct"]
+    return correction or None
 
 
 def _format_findings(sanitized: Iterable[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -294,6 +298,7 @@ def project_verification_result(
         "verified_via_website": verified_via_webpage,
         "enrichment": enrichment,
         "publication_year_assessment": verified.get("_publication_year_assessment"),
+        "book_edition_assessment": verified.get("_book_edition_assessment"),
         "corrected_reference": None,
         "citation_contexts": cited.get("citation_contexts") or [],
         "citation_context": cited.get("citation_context"),
@@ -322,7 +327,7 @@ VERIFICATION_DERIVED_FIELDS = frozenset({
     "authoritative_urls", "matched_database", "matched_db", "evidence_reconciliation",
     "verification_basis",
     "supporting_evidence", "verified_via_website", "enrichment",
-    "publication_year_assessment", "corrected_reference",
+    "publication_year_assessment", "book_edition_assessment", "corrected_reference",
     "_raw_errors", "from_cache", "from_fuzzy_cache",
     "verification_evidence", "fuzzy_match_score", "verified_title", "verified_authors", "verified_year",
     "verified_venue", "verified_doi", "verified_arxiv_id", "verified_pmid",

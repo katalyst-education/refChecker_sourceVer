@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from refchecker.utils.book_editions import book_edition_status, book_volume, edition_label, is_book_citation, isbn_key
+
 from refchecker.config.settings import get_config
 from refchecker.utils.error_utils import create_author_error, format_year_mismatch
 from refchecker.utils.text_utils import clean_title_for_search, compare_authors, find_best_match
@@ -133,6 +135,8 @@ class GoogleBooksReferenceChecker:
         if "magazine" in container:
             return "magazines"
         if reference.get("isbn") or reference.get("ISBN"):
+            return "books"
+        if is_book_citation(reference):
             return "books"
         if reference.get("publisher") and not container.strip():
             return "books"
@@ -261,6 +265,12 @@ class GoogleBooksReferenceChecker:
             "canonical_volume_link": info.get("canonicalVolumeLink"),
             "print_type": info.get("printType"),
         }
+        if str(info.get("printType") or "").upper() == "BOOK":
+            description = f"{main_title} {subtitle}"
+            normalised.update(
+                type="book", edition=edition_label(description), volume=book_volume(description),
+                isbn_values=[value for kind, value in isbn_values.items() if kind in {"ISBN_10", "ISBN_13"}],
+            )
         if subtitle and subtitle.casefold() not in main_title.casefold():
             normalised["_matching_title"] = f"{main_title}: {subtitle}".strip(": ")
         else:
@@ -337,11 +347,11 @@ class GoogleBooksReferenceChecker:
 
         exact_isbn = None
         if isbn:
-            cited = isbn.upper()
+            cited = isbn_key(isbn)
             for raw, normalised in zip(raw_results, results):
                 identifiers = (raw.get("volumeInfo") or {}).get("industryIdentifiers") or []
                 if any(
-                    "".join(ch for ch in str(item.get("identifier") or "") if ch.isdigit() or ch.upper() == "X").upper() == cited
+                    cited and isbn_key(item.get("identifier")) == cited
                     for item in identifiers
                     if isinstance(item, dict)
                 ):
@@ -356,9 +366,14 @@ class GoogleBooksReferenceChecker:
                 for item in results
             ]
             cleaned_title = clean_title_for_search(title)
+            edition_results = [
+                item for item in matching_results if book_edition_status(reference, item) == "matched"
+            ]
             work_data, score = find_best_match(
-                matching_results, cleaned_title, cited_year, authors
+                edition_results or matching_results, cleaned_title, cited_year, authors
             )
+            if edition_results and (not work_data or score < SIMILARITY_THRESHOLD):
+                work_data, score = find_best_match(matching_results, cleaned_title, cited_year, authors)
             if not work_data or score < SIMILARITY_THRESHOLD:
                 ranked_candidates = self._build_similarity_rejection_candidates(
                     matching_results, cleaned_title, cited_year, authors

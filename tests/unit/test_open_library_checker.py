@@ -41,14 +41,24 @@ def test_open_library_uses_isbn_query_when_available(mock_get):
     response = Mock()
     response.status_code = 200
     response.json.return_value = {"docs": [BOOK]}
-    mock_get.return_value = response
+    edition = Mock()
+    edition.json.return_value = {
+        "key": "/books/OL1234M",
+        "title": BOOK["title"],
+        "isbn_10": ["0261102214"],
+        "publish_date": "2001",
+        "works": [{"key": BOOK["key"]}],
+    }
+    mock_get.side_effect = [response, edition]
 
     checker = OpenLibraryReferenceChecker(email="maintainer@example.org")
     data, errors, _ = checker.verify_reference({"isbn": "978-0-261-10221-7"})
 
-    assert data["key"] == "/works/OL27448W"
+    assert data["key"] == "/books/OL1234M"
+    assert data["year"] == 2001
     assert errors == []
-    assert mock_get.call_args.kwargs["params"]["isbn"] == "9780261102217"
+    assert mock_get.call_args_list[0].kwargs["params"]["isbn"] == "9780261102217"
+    assert mock_get.call_args_list[1].args[0].endswith("/isbn/9780261102217.json")
 
 
 def test_open_library_rate_setting_cannot_exceed_anonymous_limit(monkeypatch):

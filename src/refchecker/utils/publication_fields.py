@@ -3,8 +3,10 @@
 import re
 from typing import NamedTuple
 
+from refchecker.utils.book_editions import book_volume, edition_key, edition_label, isbn_digits, isbn_key
 
-PUBLICATION_FIELDS = ('volume', 'issue', 'pages', 'article_number', 'publisher', 'series')
+
+PUBLICATION_FIELDS = ('volume', 'issue', 'pages', 'article_number', 'publisher', 'series', 'edition')
 STRUCTURED_CITATION_BASIS = 'structured_citation'
 
 _NUMBER = r'[A-Za-z]?\d+[A-Za-z]?'
@@ -89,11 +91,17 @@ def _locator(value):
 def publication_value_key(field, value):
     """Treat typographic variants of the same printed range as equivalent."""
     value = ' '.join(str(value).split()) if value is not None else ''
+    if field == 'edition':
+        return edition_key(value)
+    if field == 'isbn':
+        return isbn_key(value) or value
     return _locator(value) if field in {'volume', 'issue', 'pages'} else value
 
 
 def parse_publication_tail(tail):
     """Return unambiguous fields and competing values from a delimited citation tail."""
+    isbn_label = re.search(r'(?:^|[\s,;])ISBN(?:-1[03])?\s*:?\s*(?=\d)', tail, re.IGNORECASE)
+    isbn = isbn_digits(tail[isbn_label.end():]) if isbn_label else ''
     tail = ' '.join(_TRAILING_LINK.split(tail, maxsplit=1)[0].split())
     tail = re.sub(r'^\s*[,.;]?\s*(?:In\s*:\s*|In\s+)', '', tail, flags=re.IGNORECASE)
     labeled = list(_LABELED_FIELD.finditer(tail))
@@ -108,6 +116,14 @@ def parse_publication_tail(tail):
 
     fields = {field: next(iter(items)) for field, items in values.items() if len(items) == 1}
     ambiguous = {field: list(items) for field, items in values.items() if len(items) > 1}
+    if isbn:
+        fields['isbn'] = isbn
+    edition = edition_label(tail)
+    if edition:
+        fields['edition'] = edition
+        volume = book_volume(tail)
+        if volume and 'volume' not in ambiguous:
+            fields.setdefault('volume', volume)
     # A numeric locator can be four digits too, so mask locators before finding a year.
     year_text = tail
     matches = sorted(labeled + compact, key=lambda match: match.start())
@@ -118,7 +134,17 @@ def parse_publication_tail(tail):
     if year and 1900 <= int(year[1] or year[2]) <= 2030:
         fields['year'] = int(year[1] or year[2])
 
-    if matches:
+    if edition and year and tail[:tail.index(edition)].strip(' ,;.(') == '':
+        edition_end = tail.index(edition) + len(edition)
+        publication = tail[edition_end:year.end()].strip(' ,;.')
+        publisher = _PLACE_AND_PUBLISHER.fullmatch(publication)
+        if publisher:
+            fields.setdefault('publisher', publisher[1].strip())
+        else:
+            name = tail[edition_end:year.start()].strip(' ,;.')
+            if re.fullmatch(r'[^,:;()\d]+', name) and not book_volume(name):
+                fields.setdefault('publisher', name)
+    elif matches:
         end = min(matches[0].start(), year.start() if year else len(tail))
         venue = tail[:end].strip(' ,;')
         if venue.startswith('.'):

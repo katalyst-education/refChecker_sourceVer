@@ -41,6 +41,7 @@ from backend.reference_result import (
     safe_correction_candidate,
 )
 from refchecker.utils.error_utils import is_author_list_membership_mismatch
+from refchecker.utils.book_editions import is_book_citation
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.utils.extraction_quality import ground_pdf_references
 from refchecker.utils.publication_fields import STRUCTURED_CITATION_BASIS, journal_citation_locator
@@ -3511,11 +3512,14 @@ class ProgressRefChecker:
                 from .database import db as _db
                 cached = await _db.lookup_verified_reference(reference)
                 locator = journal_citation_locator(reference)
-                if not locator and not (cached and isinstance(cached.get("result"), dict) and cached["result"]):
+                if not locator and not is_book_citation(reference) and not (
+                    cached and isinstance(cached.get("result"), dict) and cached["result"]
+                ):
                     fuzzy = await _db.find_verified_by_fuzzy(reference)
                     if (
                         fuzzy and isinstance(fuzzy.get("result"), dict) and fuzzy["result"]
                         and fuzzy["result"].get("verification_basis") != STRUCTURED_CITATION_BASIS
+                        and not fuzzy["result"].get("book_edition_assessment")
                     ):
                         cached = fuzzy
                         logger.debug(

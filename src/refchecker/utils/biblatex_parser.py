@@ -13,6 +13,7 @@ import logging
 from typing import List, Dict, Any
 from refchecker.utils.citation_urls import strip_citation_url_punctuation
 from refchecker.utils.publication_fields import PUBLICATION_FIELDS, parse_publication_tail, publication_tail
+from refchecker.utils.book_editions import EDITION_LABEL
 from refchecker.utils.text_normalization import normalize_wrapped_hyphens
 
 logger = logging.getLogger(__name__)
@@ -326,6 +327,12 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         title = clean_title(book_style_match.group(2).strip())
         journal = book_style_match.group(3).strip()
         year = int(book_style_match.group(4))
+    elif edition_book := re.match(
+        rf'^([^"\u201c\u201d]+),\s+([^,"\u201c\u201d]+?),\s*(?={EDITION_LABEL})',
+        content, re.IGNORECASE,
+    ):
+        book_style_authors_text = edition_book[1].strip()
+        title = clean_title(edition_book[2].strip())
     quoted_title = None
     
     # Pattern matching for different biblatex formats:
@@ -604,7 +611,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         'bibtex_type': 'biblatex',
         'raw_text': f"[{entry_num}] {raw_content}",
         'entry_number': int(entry_num),
-        **{field: publication[field] for field in PUBLICATION_FIELDS if field in publication},
+        **{field: publication[field] for field in (*PUBLICATION_FIELDS, 'isbn') if field in publication},
     }
     
     return reference

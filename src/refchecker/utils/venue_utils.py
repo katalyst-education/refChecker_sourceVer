@@ -91,6 +91,7 @@ def resolve_publication_type(
         ('citation.bibtex_type', reference.get('bibtex_type'), 'high'),
         ('citation.publication_type', reference.get('publication_type'), 'medium'),
         ('citation.media_type', reference.get('media_type'), 'medium'),
+        ('citation.type', reference.get('type'), 'medium'),
     ]
     for source, values, confidence in evidence:
         for value in _iter_type_values(values):

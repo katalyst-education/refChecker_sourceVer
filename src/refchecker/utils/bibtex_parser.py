@@ -406,7 +406,7 @@ def parse_bibtex_references(bibliography_text: str) -> List[Dict[str, Any]]:
             reference['publisher'] = fields.get('publisher', '')
             reference['isbn'] = fields.get('isbn', '')
 
-        publication = {key: fields.get(key) for key in ('volume', 'publisher', 'pages', 'series')}
+        publication = {key: fields.get(key) for key in ('volume', 'publisher', 'pages', 'series', 'edition', 'isbn')}
         publication['issue'] = (reference.get('number') if entry_type == 'article' else None) or fields.get('issue')
         publication['article_number'] = fields.get('eid') or fields.get('articlenumber')
         reference.update({key: value for key, value in publication.items() if value})

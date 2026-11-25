@@ -19,6 +19,7 @@ from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
 from refchecker.utils.arxiv_utils import get_bibtex_content
+from refchecker.utils.book_editions import book_edition_identity, is_book_citation
 from refchecker.utils.doi_utils import extract_doi_from_url, normalize_doi
 from refchecker.utils.publication_fields import journal_citation_locator
 from refchecker.utils.reference_metadata import cited_metadata_snapshot
@@ -92,7 +93,8 @@ def _normalize_cache_key(reference: Dict[str, Any]) -> Optional[tuple]:
         doi = reference.get('doi') or extract_doi_from_url(reference.get('url') or reference.get('cited_url') or '')
         cited_authors = tuple(name.casefold() for name in cited_metadata_snapshot(reference)['authors'])
         journal_identity = (locator, normalize_doi(doi or ''), cited_authors)
-    return (title, first_author_last, year, journal_identity)
+    edition_identity = book_edition_identity(reference) if is_book_citation(reference) else None
+    return (title, first_author_last, year, journal_identity, edition_identity)
 
 
 class BulkVerificationCache:

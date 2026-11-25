@@ -17,6 +17,8 @@ from xml.etree import ElementTree
 
 import requests
 
+from refchecker.utils.book_editions import book_edition_status
+
 from refchecker.config.settings import get_config
 from refchecker.utils.error_utils import create_author_error, format_year_mismatch
 from refchecker.utils.text_utils import (
@@ -261,6 +263,8 @@ class DnbSruReferenceChecker:
                 + cls._subfields(record, "260", "b")
             ),
             "venue": _first(cls._subfields(record, "773", "t")),
+            "edition": _first(cls._subfields(record, "250", "a")),
+            "volume": _first(cls._subfields(record, "245", "n")),
             "isbn": _first(cls._subfields(record, "020", "a")),
             "issn": _first(cls._subfields(record, "022", "a")),
             "doi": _first(dois),
@@ -302,7 +306,7 @@ class DnbSruReferenceChecker:
         from refchecker.utils.cache_utils import cache_api_response, cached_api_response
 
         limit = min(max(int(limit), 1), 100)
-        cache_key = f"v1|{self.catalog}|{query}|{limit}"
+        cache_key = f"v2|{self.catalog}|{query}|{limit}"
         cached = cached_api_response(
             getattr(self, "cache_dir", None), self.catalog, "sru_search", cache_key
         )
@@ -417,6 +421,11 @@ class DnbSruReferenceChecker:
             matched, score = find_best_match(
                 records, cleaned_title, year, authors
             )
+            editions = [record for record in records if book_edition_status(reference, record) == "matched"]
+            if editions:
+                edition_match, edition_score = find_best_match(editions, cleaned_title, year, authors)
+                if edition_match and edition_score >= SIMILARITY_THRESHOLD:
+                    matched, score = edition_match, edition_score
             tib_identifier_match = self.catalog == "tib" and matched_query.startswith(
                 ("pica.ppn=", "pica.isb=", "pica.iss=", "pica.num=")
             )

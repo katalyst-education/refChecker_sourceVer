@@ -43,8 +43,9 @@ History:
         findings survive the database search fallback.
    11 - inspect access screens before trusting redirected HTML or PDF responses.
    12 - verify structured journal locators during Crossref search fallback.
+   13 - compare the cited book edition and its publication dates.
 """
 
-VERIFICATION_LOGIC_VERSION = 12
+VERIFICATION_LOGIC_VERSION = 13
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

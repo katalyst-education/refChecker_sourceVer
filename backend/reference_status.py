@@ -79,7 +79,7 @@ def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
         # its dedicated info section. Other legacy info entries retain the
         # existing suggestion behavior.
         is_metadata_info = is_info and e_type in {
-            'publication_year_discrepancy', 'metadata_conflict',
+            'publication_year_discrepancy', 'metadata_conflict', 'book_publication_dates',
         }
         is_warning = 'warning_type' in err
         # Backfill actual_value from the typed correction fields: "missing"

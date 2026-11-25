@@ -718,6 +718,9 @@ function getCorrectedReferenceData(ref) {
 
   // Check errors and warnings for 'actual' values
   const allIssues = [...(ref.errors || []), ...(ref.warnings || [])]
+  const editionUnverified = ref.book_edition_assessment?.status === 'unverified'
+  const edition = displayReferenceValue(ref.cited_metadata?.edition ?? ref.edition)
+  const isbn = displayReferenceValue(ref.cited_metadata?.isbn ?? ref.isbn)
 
   // A doi-type error/warning that names a DOI is the verifier's correction
   // and MUST win over whatever (possibly wrong) DOI the citation carried.
@@ -747,13 +750,17 @@ function getCorrectedReferenceData(ref) {
     authors: candidate.authors || (hasAuthorListMembershipMismatch(ref) ? ref.cited_metadata?.authors ?? ref.authors : ref.authors),
     year: displayReferenceValue(decodeReferenceText(candidate.year || ref.year)),
     venue: displayReferenceValue(decodeReferenceText(candidate.venue || ref.venue)),
+    edition,
+    isbn,
+    volume: edition || isbn ? displayReferenceValue(ref.cited_metadata?.volume ?? ref.volume) : '',
+    publisher: edition || isbn ? displayReferenceValue(ref.cited_metadata?.publisher ?? ref.publisher) : '',
     doi: decodeReferenceText(candidate.doi)
       || _doiIssueValue
-      || ref.doi || (doiFromUrls ? doiFromUrls.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : null),
+      || ref.doi || (!editionUnverified && doiFromUrls ? doiFromUrls.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : null),
     arxivId: decodeReferenceText(candidate.arxiv_id)
       || ref.arxiv_id || (arxivFromUrls ? arxivFromUrls.replace(/^https?:\/\/arxiv\.org\/abs\//i, '') : null),
     citedUrl: ref.cited_url || null,
-    url: ref.authoritative_urls?.[0]?.url || ref.cited_url,
+    url: (!editionUnverified && ref.authoritative_urls?.[0]?.url) || ref.cited_url,
   }
   
   for (const issue of allIssues) {
@@ -1191,7 +1198,9 @@ export function exportReferenceAsBibtex(ref, index = 0) {
   // Determine entry type
   const venue = (corrected.venue || '').toLowerCase()
   let entryType = 'article'
-  if (venue.includes('conference') || venue.includes('proceedings') || venue.includes('workshop')) {
+  if (corrected.edition || corrected.isbn) {
+    entryType = 'book'
+  } else if (venue.includes('conference') || venue.includes('proceedings') || venue.includes('workshop')) {
     entryType = 'inproceedings'
   } else if (venue.includes('arxiv') || corrected.arxivUrl || ref.cited_url?.includes('arxiv')) {
     entryType = 'misc'
@@ -1213,6 +1222,11 @@ export function exportReferenceAsBibtex(ref, index = 0) {
   // Year
   if (corrected.year) {
     lines.push(`  year = {${corrected.year}},`)
+  }
+  if (entryType === 'book') {
+    for (const field of ['edition', 'volume', 'publisher', 'isbn']) {
+      if (corrected[field]) lines.push(`  ${field} = {${escapeBibtex(corrected[field])}},`)
+    }
   }
   
   // Venue
@@ -1370,6 +1384,9 @@ export function exportReferenceAsPlainText(ref) {
   if (corrected.title) {
     parts.push(corrected.title)
   }
+  if (corrected.edition) parts.push(corrected.edition.replace(/\.$/, ''))
+  if (corrected.volume) parts.push(`vol. ${corrected.volume}`)
+  if (corrected.publisher && corrected.publisher !== corrected.venue) parts.push(corrected.publisher)
   
   // Venue
   if (corrected.venue) {
@@ -1629,9 +1646,12 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
   const opts = { ...(CITATION_STYLE_DEFAULTS[style] || {}), ...(options || {}) }
   const rawUrl = _preferredCitationUrl(corrected)
   const url = opts.include_url === false ? '' : rawUrl
-  const venue = corrected.venue || ''
+  const venue = corrected.publisher || corrected.venue || ''
   const title = corrected.title || ''
   const year = corrected.year || ''
+  const edition = corrected.edition
+  const volume = corrected.volume && `vol. ${corrected.volume}`
+  const bookDetails = [edition, volume].filter(Boolean).join(', ')
   const cap = (formatted) => _applyAuthorCap(formatted, corrected.authors, opts.max_authors, opts.et_al_threshold)
 
   switch (style) {
@@ -1646,6 +1666,7 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
       if (authors) parts.push(`${authors}${authors.endsWith('.') ? '' : '.'}`)
       if (year) parts.push(`(${year}).`)
       if (title) parts.push(`${title}${title.endsWith('.') ? '' : '.'}`)
+      if (bookDetails) parts.push(`(${bookDetails}).`)
       if (venue) parts.push(`${venue}.`)
       if (url) parts.push(url)
       return parts.join(' ')
@@ -1656,7 +1677,7 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
       const parts = []
       if (authors) parts.push(`${authors}.`)
       if (title) parts.push(`"${title}."`)
-      const tail = [venue, year].filter(Boolean).join(', ')
+      const tail = [bookDetails, venue, year].filter(Boolean).join(', ')
       if (tail) parts.push(`${tail}.`)
       if (url) parts.push(url)
       return parts.join(' ')
@@ -1668,6 +1689,7 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
       if (authors) parts.push(`${authors}.`)
       if (year) parts.push(`${year}.`)
       if (title) parts.push(`"${title}."`)
+      if (bookDetails) parts.push(bookDetails.replace(/\.?$/, '.'))
       if (venue) parts.push(`${venue}.`)
       if (url) parts.push(url)
       return parts.join(' ')
@@ -1678,7 +1700,7 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
       const parts = []
       if (authors) parts.push(`${authors},`)
       if (title) parts.push(`"${title},"`)
-      const tail = [venue, year].filter(Boolean).join(', ')
+      const tail = [bookDetails, venue, year].filter(Boolean).join(', ')
       if (tail) parts.push(`${tail}.`)
       if (url) parts.push(`[Online]. Available: ${url}`)
       return parts.join(' ')
@@ -1689,6 +1711,7 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
       const parts = []
       if (authors) parts.push(`${authors}.`)
       if (title) parts.push(`${title}.`)
+      if (bookDetails) parts.push(bookDetails.replace(/\.?$/, '.'))
       if (venue) parts.push(`${venue}.`)
       if (year) parts.push(`${year}.`)
       if (url) parts.push(`Available from: ${url}`)
@@ -1698,7 +1721,7 @@ export function exportReferenceAsStyle(ref, style, index = 0, options = null) {
       // \bibitem{key} F. M. Last, "Title," Venue, Year.
       const key = (ref.bibtex_key || `ref${index + 1}`).replace(/[^A-Za-z0-9_-]/g, '')
       const authors = cap(_formatAuthorsIEEE(corrected.authors))
-      const tail = [venue, year].filter(Boolean).join(', ')
+      const tail = [bookDetails, venue, year].filter(Boolean).join(', ')
       const body = [authors && `${authors},`, title && `"${title},"`, tail && `${tail}.`, url].filter(Boolean).join(' ')
       return `\\bibitem{${key}} ${body}`
     }

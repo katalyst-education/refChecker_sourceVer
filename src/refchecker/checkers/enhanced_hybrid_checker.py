@@ -38,8 +38,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib import import_module
 from typing import Callable, Dict, List, Tuple, Optional, Any
 
+from refchecker.utils.book_editions import assess_book_edition, is_book_citation, isbn_key
 from refchecker.utils.database_config import DATABASE_LABELS, DATABASE_LOOKUP_ORDER
 from refchecker.utils.reference_fixups import fixup_reference_fields
+from refchecker.utils.reference_metadata import recover_cited_book_fields
 
 logger = logging.getLogger(__name__)
 
@@ -705,11 +707,17 @@ class EnhancedHybridReferenceChecker:
                 0 if self._is_data_complete(data or {}, reference) else 1,
                 1 if self._has_doi_mismatch(issues) else 0,
                 1 if self._has_major_author_discrepancy(issues) else 0,
+                self._book_edition_rank(data),
                 author_issues,
                 non_unverified_issues,
             )
 
         return candidate if _score(candidate) < _score(current) else current
+
+    @staticmethod
+    def _book_edition_rank(data: Optional[Dict[str, Any]]) -> int:
+        status = ((data or {}).get('_book_edition_assessment') or {}).get('status')
+        return {'matched': 0, 'unverified': 2}.get(status, 1)
 
     @staticmethod
     def _finding_kind(finding: Dict[str, Any]) -> str:
@@ -749,7 +757,7 @@ class EnhancedHybridReferenceChecker:
                     break
             return text.rstrip('.,;)')
         if kind == 'isbn':
-            return ''.join(char for char in text if char.isdigit() or char == 'x')
+            return isbn_key(text)
         if kind == 'arxiv':
             text = text.removeprefix('arxiv:')
             if 'arxiv.org/' in text:
@@ -1006,6 +1014,8 @@ class EnhancedHybridReferenceChecker:
         findings: List[Dict[str, Any]],
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """Rebuild the year verdict from every accepted same-work record."""
+        if selected_data.get('_book_edition_assessment'):
+            return selected_data, findings
         import re
 
         def year_value(value: Any) -> Optional[int]:
@@ -1142,7 +1152,7 @@ class EnhancedHybridReferenceChecker:
                 'same_work': 0, 'same_work_different_version': 1, 'uncertain': 2,
             }.get(item['identity']['status'], 3)
             return (
-                identity_rank, author_issues, hard_issues, warning_issues, missing,
+                identity_rank, author_issues, self._book_edition_rank(data), hard_issues, warning_issues, missing,
                 source_priority.get(item['source'], 50),
             )
 
@@ -1440,6 +1450,8 @@ class EnhancedHybridReferenceChecker:
                         candidate=self._database_trace_summary(verified_data, url),
                     )
                     return None, [], None, False, 'not_found', ''
+                if isinstance(verified_data, dict):
+                    verified_data, errors = assess_book_edition(reference, verified_data, errors)
                 verified_data = self._annotate_match_source(verified_data, api_name, api_instance)
                 verification_basis = (
                     verified_data.get('_verification_basis')
@@ -2172,6 +2184,7 @@ class EnhancedHybridReferenceChecker:
                 cited_doi
                 and cited_doi == candidate_doi
                 and not self._has_doi_mismatch(errors)
+                and self._book_edition_rank(verified_data) < 2
             )
 
         def is_decisive_title_author_match(
@@ -2185,6 +2198,8 @@ class EnhancedHybridReferenceChecker:
                 and identity['title_similarity'] >= 0.8
                 and identity.get('author_overlap') is True
                 and not identity.get('conflicting_identifiers')
+                and self._book_edition_rank(verified_data) < 2
+                and (not is_book_citation(reference) or self._book_edition_rank(verified_data) == 0)
             )
 
         # An exact DOI is decisive on its own. For references without that
@@ -2344,7 +2359,13 @@ class EnhancedHybridReferenceChecker:
                 and reconciled[0] is not None
                 and self._is_data_complete(reconciled[0], reference)
             ):
-                return reconciled, {}
+                if (
+                    self._book_edition_rank(reconciled[0]) < 2
+                    or not getattr(self, 'google_books', None)
+                    or not self._is_google_books_reference(reference, reconciled)
+                ):
+                    return reconciled, {}
+                best_result = reconciled
 
         arxiv_title_result = self._try_arxiv_title_search(reference, attempted_apis)
         if arxiv_title_result is not None:
@@ -2421,8 +2442,11 @@ class EnhancedHybridReferenceChecker:
                 result = (verified_data, errors, url)
                 successful_evidence.append(self._database_evidence('springer_nature', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
-                if not force_all_databases and self._is_data_complete(verified_data, reference):
-                    return result, {}
+                if (
+                    not force_all_databases and self._is_data_complete(verified_data, reference)
+                    and self._book_edition_rank(best_result[0]) < 2
+                ):
+                    return best_result, {}
             elif failure_type not in ('none', 'not_found'):
                 logger.info(
                     "SPRINGER_NATURE_API_TRACE event=fallback_result outcome=%s title=%r",
@@ -2484,7 +2508,7 @@ class EnhancedHybridReferenceChecker:
                 successful_evidence.append(self._database_evidence('google_books', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
                 if not force_all_databases and self._is_data_complete(verified_data, reference):
-                    return result, {}
+                    return best_result, {}
             elif failure_type not in ('none', 'not_found'):
                 logger.info(
                     "GOOGLE_BOOKS_API_TRACE event=fallback_result outcome=%s title=%r",
@@ -2527,6 +2551,8 @@ class EnhancedHybridReferenceChecker:
             reconciled = self._reconcile_database_evidence(reference, successful_evidence)
             if reconciled is not None:
                 return reconciled, {}
+        if best_result and self._book_edition_rank(best_result[0]) == 2:
+            return best_result, {}
         return None, incomplete
 
     def _try_arxiv_title_search(self, reference, attempted_apis):
@@ -2893,7 +2919,9 @@ class EnhancedHybridReferenceChecker:
         # source, keep the reference verified and surface the disagreement as an
         # informational item instead of a warning/error.  This lives here (the
         # shared verifier entry point) so CLI, bulk, and WebUI remain identical.
-        if errors and verified_data is not None:
+        if isinstance(verified_data, dict) and not verified_data.get('_book_edition_assessment'):
+            verified_data, errors = assess_book_edition(reference, verified_data, errors or [])
+        if errors and verified_data is not None and not verified_data.get('_book_edition_assessment'):
             try:
                 from refchecker.utils.publication_years import reconcile_publication_year
                 verified_data, errors = reconcile_publication_year(
@@ -2904,6 +2932,17 @@ class EnhancedHybridReferenceChecker:
                 # outage must never break or erase the primary verification.
                 logger.debug("Publication-year reconciliation skipped: %s", exc)
 
+        if self._book_edition_rank(verified_data) == 2:
+            # The work-level record remains useful as evidence. Edition metadata
+            # from that record cannot be offered as replacements for cited values.
+            verified_data = dict(verified_data)
+            for field in ('year', 'publication_year', 'doi', 'DOI', 'isbn', 'ISBN'):
+                verified_data.pop(field, None)
+            if isinstance(verified_data.get('externalIds'), dict):
+                verified_data['externalIds'] = {
+                    key: value for key, value in verified_data['externalIds'].items()
+                    if key.casefold() not in {'doi', 'isbn'}
+                }
         return verified_data, errors or [], url
 
     def verify_reference(
@@ -2920,6 +2959,7 @@ class EnhancedHybridReferenceChecker:
         # Repair field swaps before comparisons. This shared entry point is
         # used by CLI, WebUI, and bulk paths, and the fixup is idempotent.
         fixup_reference_fields(reference)
+        recover_cited_book_fields(reference)
 
         # Configuration tracing is diagnostic only.  Keep it from preventing
         # the verification entry point from reaching its core logic when a
@@ -3145,7 +3185,7 @@ class EnhancedHybridReferenceChecker:
                 )
                 if success:
                     local_result = (verified_data, errors, url)
-                    if force_all_databases:
+                    if force_all_databases or self._book_edition_rank(verified_data) == 2:
                         forced_evidence.append(self._database_evidence(local_key, local_result))
                     # A title match may identify the right work but expose only
                     # its arXiv DOI.  Keep searching configured local databases
@@ -3175,6 +3215,8 @@ class EnhancedHybridReferenceChecker:
                             local_result,
                             reference,
                         )
+                        continue
+                    if self._book_edition_rank(verified_data) == 2:
                         continue
                     return verified_data, errors, url
                 if failure_type not in ('none', 'not_found'):

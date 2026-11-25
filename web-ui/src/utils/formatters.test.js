@@ -252,6 +252,33 @@ describe('formatters', () => {
   })
 
   describe('exportReferenceAsBibtex — corrected values', () => {
+    it('keeps cited book details and treats a work-level lookup as review evidence', () => {
+      const ref = {
+        title: 'Crystal Structures',
+        authors: ['R. W. G. Wyckoff'],
+        year: 1963,
+        cited_metadata: {
+          title: 'Crystal Structures', authors: ['R. W. G. Wyckoff'], year: 1963,
+          edition: '2nd ed.', volume: '1', publisher: 'Interscience Publishers',
+        },
+        book_edition_assessment: { status: 'unverified', first_publish_year: 1948 },
+        warnings: [{
+          error_type: 'edition_unverified',
+          error_details: 'Edition unverified. The work was first published in 1948.',
+        }],
+        authoritative_urls: [{ type: 'other', url: 'https://openlibrary.org/works/OL6806991W' }],
+      }
+      const ieee = exportReferenceAsStyle(ref, 'ieee')
+      expect(ieee).toContain('2nd ed., vol. 1, Interscience Publishers, 1963.')
+      expect(ieee).not.toContain('1948')
+      expect(ieee).not.toContain('openlibrary.org')
+      expect(hasActionableCorrection(ref, 'ieee')).toBe(false)
+      const bibtex = exportReferenceAsBibtex(ref)
+      expect(bibtex).toMatch(/^@book/)
+      expect(bibtex).toContain('edition = {2nd ed.}')
+      expect(bibtex).toContain('year = {1963}')
+    })
+
     it('previews the same matched candidate that apply_correction will store', () => {
       const ref = {
         title: 'Original cited title',

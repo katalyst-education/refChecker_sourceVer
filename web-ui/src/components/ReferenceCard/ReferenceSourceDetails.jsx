@@ -21,6 +21,8 @@ const repairReasons = {
 }
 
 const publicationLabels = {
+  edition: 'Edition',
+  isbn: 'ISBN',
   volume: 'Volume',
   issue: 'Issue',
   pages: 'Pages',
