@@ -289,6 +289,8 @@ class TestRawUrlVerification(unittest.TestCase):
         self.assertEqual(errors, [{
             'error_type': 'unverified',
             'error_details': 'paper not verified; cited URL could not be accessed',
+            'verification_reason': 'url_access_failed',
+            'http_status': 403,
         }])
         self.assertEqual(url, reference['url'])
     

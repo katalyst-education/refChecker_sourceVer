@@ -105,6 +105,9 @@ def sanitize_errors(errors: Optional[List[Dict[str, Any]]]) -> List[Dict[str, An
             _san['source_years'] = err.get('source_years')
         if err.get('metadata_classification'):
             _san['metadata_classification'] = err.get('metadata_classification')
+        for field in ('verification_reason', 'http_status', 'sources_checked', 'sources_negative'):
+            if field in err:
+                _san[field] = err[field]
         if err.get('requires_user_confirmation'):
             _san['requires_user_confirmation'] = True
         if err.get('requires_authentication'):

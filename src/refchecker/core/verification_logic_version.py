@@ -39,8 +39,10 @@ History:
     7 - authentication interstitials are reported as access-required instead
         of being compared with cited title/author metadata, and authenticated
         browser retries use the same shared webpage verifier.
+    8 - inaccessible scholarly URLs are unverified and authentication
+        findings survive the database search fallback.
 """
 
-VERIFICATION_LOGIC_VERSION = 7
+VERIFICATION_LOGIC_VERSION = 8
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

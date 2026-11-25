@@ -3,7 +3,7 @@ import threading
 
 import requests
 import pytest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from refchecker.checkers.enhanced_hybrid_checker import (
     EnhancedHybridReferenceChecker,
@@ -427,6 +427,7 @@ def test_unverified_reason_includes_negative_and_failed_checkers(_mock_sleep):
     )
     assert errors[0]['sources_checked'] == 2
     assert errors[0]['sources_negative'] == 1
+    assert errors[0]['verification_reason'] == 'provider_failure'
 
 
 @patch('refchecker.checkers.enhanced_hybrid_checker.time.sleep', return_value=None)
@@ -463,6 +464,72 @@ def test_google_books_retry_retains_force_all_context_and_reports_failure(_mock_
     assert errors[0]['error_details'] == (
         'All available checkers failed: Google Books: 503 Service Unavailable'
     )
+
+
+@pytest.mark.parametrize(('http_status', 'failure_type', 'progress_status'), [
+    (None, 'api_failure', 'failed'),
+    (404, 'api_failure', 'failed'),
+    (429, 'throttled', 'rate_limited'),
+])
+def test_connector_failure_progress_distinguishes_http_rate_limits(http_status, failure_type, progress_status):
+    checker = _build_checker()
+    connector = Mock()
+    connector.database_label = 'DBLP'
+    connector.verify_reference.return_value = (
+        None, [{'error_type': 'api_failure', 'error_details': 'DBLP API request failed',
+                'http_status': http_status}], None,
+    )
+
+    with patch.object(checker, '_emit_database_event') as progress:
+        *_, failure, detail = checker._try_api('dblp', connector, {'title': 'Example article'})
+
+    assert failure == failure_type
+    assert detail == ('DBLP API request failed' if http_status is None else f'DBLP API request failed (HTTP {http_status})')
+    assert progress.call_args.kwargs['status'] == progress_status
+
+
+@pytest.mark.parametrize(('http_status', 'html', 'expected_status', 'reason', 'counts'), [
+    (403, '', 'unverified', 'url_access_failed', (0, 0, 0)),
+    (200, '<title>Please log in to DSpace</title>', 'warning', 'authentication_required', (0, 1, 0)),
+    (200, '<title>A completely unrelated work</title>', 'error', None, (1, 0, 0)),
+])
+def test_cited_page_fallback_preserves_access_and_content_outcomes(
+    monkeypatch, http_status, html, expected_status, reason, counts,
+):
+    from backend.reference_result import project_verification_result
+    from refchecker.checkers.webpage_checker import WebPageChecker
+    from refchecker.core.issue_policy import count_raw_errors
+
+    reference = {
+        'title': 'Photovoltaic measurements in thin films',
+        'venue': 'Journal of Materials Research',
+        'cited_url': 'https://www.researchgate.net/publication/1234',
+    }
+    response = requests.Response()
+    response.status_code = http_status
+    response.url = reference['cited_url']
+    response._content = html.encode()
+    monkeypatch.setattr(WebPageChecker, '_respectful_request', lambda *_: response)
+    checker = _build_checker()
+    checker.crossref = None
+
+    data, findings, url = checker.verify_reference(reference)
+    result = project_verification_result(reference, data, findings, url, enrich_enabled=False)
+
+    assert data is None
+    assert count_raw_errors(findings) == counts
+    assert result['status'] == expected_status
+    if reason == 'url_access_failed':
+        assert result['errors'][0]['verification_reason'] == reason
+        assert result['errors'][0]['http_status'] == 403
+        assert result['errors'][0]['sources_negative'] == 1
+        assert result['authoritative_urls'] == []
+    elif reason == 'authentication_required':
+        assert result['warnings'][0]['verification_reason'] == reason
+        assert result['warnings'][0]['authentication_url'] == reference['cited_url']
+        assert result['authoritative_urls'] == []
+    else:
+        assert any(finding['error_type'] == 'url' for finding in result['errors'])
 
 
 def test_force_all_databases_does_not_skip_url_reference():

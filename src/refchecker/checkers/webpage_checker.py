@@ -24,7 +24,7 @@ def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '')
 
     URLs and hostnames are deliberately not treated as evidence: some services
     keep login-shaped permalinks after authentication. Detection instead needs
-    multiple signals from the returned page itself.
+    explicit sign-in titles or corroborating signals from the returned page.
     """
     title = ''
     if soup.title and soup.title.get_text(strip=True):
@@ -46,6 +46,8 @@ def detect_authentication_interstitial(soup: BeautifulSoup, final_url: str = '')
     # password form or visible sign-in controls. These page titles are an
     # explicit authentication protocol signal, independent of the host.
     if 'shibboleth' in title or re.search(r'\bauthentication\b', title):
+        return 'The source requires an authenticated browser session.'
+    if re.fullmatch(r'please (?:log in|sign in)(?: to [^.!?]+)?[.!]?', title):
         return 'The source requires an authenticated browser session.'
 
     if has_password and (has_auth_title or has_auth_content):
@@ -269,6 +271,28 @@ class WebPageChecker:
             logger.debug(f"Request failed for {url}: {type(e).__name__}: {e}")
             return None
     
+    @staticmethod
+    def _url_access_failure(details, status_code=None):
+        finding = {
+            'error_type': 'unverified',
+            'error_details': details,
+            'verification_reason': 'url_access_failed',
+        }
+        if status_code is not None:
+            finding['http_status'] = status_code
+        return finding
+
+    @staticmethod
+    def _authentication_finding(reason, web_url):
+        return {
+            'warning_type': 'authentication',
+            'warning_details': f'Authentication required: {reason}',
+            'verification_reason': 'authentication_required',
+            'requires_authentication': True,
+            'authentication_domain': (urlparse(web_url).hostname or '').lower(),
+            'authentication_url': web_url,
+        }
+
     def verify_reference(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """
         Verify a web page reference
@@ -293,16 +317,18 @@ class WebPageChecker:
         # Fetch the web page
         response = self._respectful_request(web_url)
         if response is None:
-            return None, [{"error_type": "unverified", "error_details": "Could not fetch web page"}], web_url
+            return None, [self._url_access_failure('Could not fetch web page')], web_url
         
         if response.status_code == 404:
             return None, [{"error_type": "unverified", "error_details": "Web page not found (404)"}], web_url
         elif response.status_code == 403:
+            if self.is_scholarly_source_url(web_url):
+                return None, [self._url_access_failure('Access blocked by site (403)', 403)], web_url
             # For 403, assume the resource exists but blocks automated access
             # This is common for PDFs and some corporate sites
             return self._handle_blocked_resource(reference, web_url)
         elif response.status_code != 200:
-            return None, [{"error_type": "unverified", "error_details": f"HTTP error {response.status_code}"}], web_url
+            return None, [self._url_access_failure(f'HTTP error {response.status_code}', response.status_code)], web_url
         
         try:
             # Handle PDF content differently
@@ -315,14 +341,7 @@ class WebPageChecker:
 
             authentication_reason = detect_authentication_interstitial(soup, response.url)
             if authentication_reason:
-                domain = (urlparse(web_url).hostname or '').lower()
-                return None, [{
-                    'warning_type': 'authentication',
-                    'warning_details': f'Authentication required: {authentication_reason}',
-                    'requires_authentication': True,
-                    'authentication_domain': domain,
-                    'authentication_url': web_url,
-                }], web_url
+                return None, [self._authentication_finding(authentication_reason, web_url)], web_url
             
             # Extract page metadata
             page_title = self._extract_page_title(soup)
@@ -1003,15 +1022,16 @@ class WebPageChecker:
         
         # Make request to check if page exists
         response = self._respectful_request(web_url)
+        access_details = 'paper not verified; cited URL could not be accessed'
         if response is None:
-            return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
+            return None, [self._url_access_failure(access_details)], web_url
         
         if response.status_code == 404:
             return None, [{"error_type": "unverified", "error_details": "non-existent web page"}], web_url
         elif response.status_code == 403:
             # A blocked scholarly landing page cannot confirm the cited work.
             if self.is_scholarly_source_url(web_url):
-                return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
+                return None, [self._url_access_failure(access_details, response.status_code)], web_url
             # For blocked resources, we can't check content but assume page exists
             venue_field = reference.get('journal') or reference.get('venue') or reference.get('booktitle')
             if not venue_field or self._is_web_content_venue(venue_field, web_url):
@@ -1030,9 +1050,9 @@ class WebPageChecker:
                 }
                 return verified_data, [], web_url
             else:
-                return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
+                return None, [self._url_access_failure(access_details, response.status_code)], web_url
         elif response.status_code != 200:
-            return None, [{"error_type": "unverified", "error_details": "paper not verified; cited URL could not be accessed"}], web_url
+            return None, [self._url_access_failure(access_details, response.status_code)], web_url
         
         try:
             # Parse HTML content to search for title
@@ -1062,13 +1082,7 @@ class WebPageChecker:
 
             authentication_reason = detect_authentication_interstitial(soup, response.url)
             if authentication_reason:
-                return None, [{
-                    'warning_type': 'authentication',
-                    'warning_details': f'Authentication required: {authentication_reason}',
-                    'requires_authentication': True,
-                    'authentication_domain': (urlparse(web_url).hostname or '').lower(),
-                    'authentication_url': web_url,
-                }], web_url
+                return None, [self._authentication_finding(authentication_reason, web_url)], web_url
             
             # Extract page content for searching
             page_title = self._extract_page_title(soup)
@@ -1166,7 +1180,7 @@ class WebPageChecker:
             
         except Exception as e:
             logger.error(f"Error checking raw URL {web_url}: {e}")
-            return None, [{"error_type": "unverified", "error_details": "paper not found and URL doesn't reference it"}], web_url
+            return None, [self._url_access_failure('Could not process the cited web page')], web_url
 
     def _is_web_content_venue(self, venue: str, url: str) -> bool:
         """

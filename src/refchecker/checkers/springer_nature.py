@@ -497,10 +497,13 @@ class SpringerNatureReferenceChecker:
                 "Springer Nature API request failed (%s)",
                 type(exc).__name__,
             )
-            return None, [{
+            finding = {
                 "error_type": "api_failure",
                 "error_details": "Springer Nature API was unavailable",
-            }], None
+            }
+            if exc.response is not None:
+                finding["http_status"] = exc.response.status_code
+            return None, [finding], None
 
         candidates = [self._normalise_record(record) for record in records]
         cited_doi = self._clean_doi(reference.get("doi") or reference.get("DOI"))

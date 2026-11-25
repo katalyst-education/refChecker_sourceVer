@@ -114,6 +114,9 @@ def _format_findings(sanitized: Iterable[Dict[str, Any]]) -> tuple[List[Dict[str
         ):
             if err.get(key):
                 err_obj[key] = err[key]
+        for key in ('verification_reason', 'http_status', 'sources_checked', 'sources_negative'):
+            if key in err:
+                err_obj[key] = err[key]
 
         if err.get("is_info"):
             formatted_infos.append({
@@ -181,8 +184,11 @@ def project_verification_result(
     verified_via_webpage = (
         status == "verified" and url_references_paper
     ) or bool((verified_data or {}).get("web_metadata"))
+    access_prevented_verification = not verified_data and any(
+        entry.get('requires_authentication') for entry in sanitized
+    )
     authoritative_urls = build_authoritative_urls(
-        cited, verified_data, verified_url, status=status,
+        cited, verified_data, None if access_prevented_verification else verified_url, status=status,
         verified_via_webpage=verified_via_webpage,
     )
     enrichment = _build_enrichment(cited, verified_data, enabled=enrich_enabled)

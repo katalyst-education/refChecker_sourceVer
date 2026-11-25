@@ -116,9 +116,12 @@ class DBLPReferenceChecker:
 
         try:
             hits = self._search(search_title)
-        except requests.exceptions.RequestException:
-            return None, [{'error_type': 'api_failure',
-                           'error_details': 'DBLP API request failed'}], None
+        except requests.exceptions.RequestException as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            finding = {'error_type': 'api_failure', 'error_details': 'DBLP API request failed'}
+            if status is not None:
+                finding['http_status'] = status
+            return None, [finding], None
 
         if not hits:
             logger.debug(f'DBLP: no results for "{search_title}"')

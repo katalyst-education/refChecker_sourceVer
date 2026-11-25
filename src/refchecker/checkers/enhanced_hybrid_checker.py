@@ -1267,6 +1267,8 @@ class EnhancedHybridReferenceChecker:
             return f'Non-existent web page: {web_url}'
         if 'could not be accessed' in subreason:
             return f'Cited URL could not be accessed to confirm the reference: {web_url}'
+        if 'Could not process the cited web page' in subreason:
+            return f'Could not process the cited web page: {web_url}'
         if 'URL references paper' in subreason:
             return f'Paper not verified but URL references paper: {web_url}'
         return f'Cited URL does not reference this paper: {web_url}'
@@ -1308,7 +1310,7 @@ class EnhancedHybridReferenceChecker:
         
         Returns:
             Tuple of (verified_data, errors, url, success, failure_type, failure_detail)
-            failure_type can be: 'none', 'not_found', 'throttled', 'timeout', 'other'
+            failure_type includes 'not_found', 'api_failure', 'throttled' and 'timeout'.
         """
         if not api_instance:
             return None, [], None, False, 'none', ''
@@ -1352,7 +1354,14 @@ class EnhancedHybridReferenceChecker:
             if api_failure_errors:
                 # This is a retryable API failure, not a verification result
                 self._update_api_stats(api_name, False, duration)
-                api_failure_detail = api_failure_errors[0].get('error_details', 'temporary API failure')
+                failure = api_failure_errors[0]
+                status_code = failure.get('http_status')
+                failure_type = 'throttled' if status_code == 429 else 'api_failure'
+                if failure_type == 'throttled':
+                    self.api_stats[api_name]['throttled'] += 1
+                api_failure_detail = failure.get('error_details', 'temporary API failure')
+                if status_code is not None:
+                    api_failure_detail = f'{api_failure_detail} (HTTP {status_code})'
                 logger.info(
                     "[DATABASE_TRACE] stage=result database=%s status=api_failure "
                     "duration_ms=%d detail=%r",
@@ -1361,14 +1370,15 @@ class EnhancedHybridReferenceChecker:
                 logger.debug(f"Enhanced Hybrid: {api_name} API failed in {duration:.2f}s: {api_failure_detail}")
                 self._emit_database_event(
                     database=api_name, label=self._format_api_name(api_name),
-                    status='rate_limited', attempt=2 if is_retry else 1,
+                    status='rate_limited' if failure_type == 'throttled' else 'failed',
+                    attempt=2 if is_retry else 1,
                     duration_ms=round(duration * 1000),
                 )
-                return None, [], None, False, 'throttled', self._format_failure_detail(
+                return None, [], None, False, failure_type, self._format_failure_detail(
                     api_name,
-                    'throttled',
+                    failure_type,
                     api_failure_detail,
-                )  # Treat API failures as throttling for retry logic
+                )
             
             # Consider it successful if we found data or verification errors (i.e., we could verify something)
             success = verified_data is not None or len(errors) > 0
@@ -1486,13 +1496,17 @@ class EnhancedHybridReferenceChecker:
             
             # Check if it's a rate limiting or server error that should be retried
             error_str = str(e).lower()
-            status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') and e.response else None
+            status_code = e.response.status_code if e.response is not None else None
             
-            if (status_code == 429) or "429" in str(e) or "rate limit" in error_str:
+            if status_code == 429 or (status_code is None and ("429" in error_str or "rate limit" in error_str)):
                 failure_type = 'throttled'
                 self.api_stats[api_name]['throttled'] += 1
                 logger.debug(f"Enhanced Hybrid: {api_name} rate limited in {duration:.2f}s: {e}")
-            elif (status_code and status_code >= 500) or "500" in str(e) or "502" in str(e) or "503" in str(e) or "server error" in error_str or "service unavailable" in error_str:
+            elif (status_code is not None and status_code >= 500) or (
+                status_code is None and any(marker in error_str for marker in (
+                    '500', '502', '503', 'server error', 'service unavailable',
+                ))
+            ):
                 failure_type = 'server_error'
                 logger.debug(f"Enhanced Hybrid: {api_name} server error in {duration:.2f}s: {e}")
             else:
@@ -3203,7 +3217,7 @@ class EnhancedHybridReferenceChecker:
             # Sort failed APIs to prioritize Semantic Scholar retries
             retryable_failures = [
                 api for api in failed_apis
-                if api.get('failure_type') in ('throttled', 'timeout', 'server_error') and api.get('active', True)
+                if api.get('failure_type') in ('api_failure', 'throttled', 'timeout', 'server_error') and api.get('active', True)
             ]
             semantic_scholar_retries = [api for api in retryable_failures if api['name'] == 'semantic_scholar']
             other_retries = [api for api in retryable_failures if api['name'] != 'semantic_scholar']
@@ -3297,6 +3311,13 @@ class EnhancedHybridReferenceChecker:
         failure_reason = self._build_unverified_error_details(attempted_apis, active_failures)
         sources_checked = len(attempted_apis)
         sources_negative = len([api_name for api_name in attempted_apis if api_name not in failed_api_names])
+        search_finding = {
+            'error_type': 'unverified',
+            'error_details': failure_reason,
+            'verification_reason': 'provider_failure' if active_failures else 'no_match',
+            'sources_checked': sources_checked,
+            'sources_negative': sources_negative,
+        }
         
         if failed_count > 0:
             logger.debug(f"Enhanced Hybrid: Verification ended with {failed_count} active checker failures after {sources_checked} attempts")
@@ -3315,41 +3336,31 @@ class EnhancedHybridReferenceChecker:
                 if wp_data:
                     logger.debug(f"Enhanced Hybrid: Web page verification succeeded for {web_url}")
                     return wp_data, wp_errors, wp_url
-                else:
-                    logger.debug(f"Enhanced Hybrid: Web page verification did not confirm reference")
-                    # Build error list: include both a URL-specific error and the
-                    # underlying unverified error so the user sees *why* it failed.
-                    errors_out = []
-                    if wp_errors:
-                        subreason = wp_errors[0].get('error_details', '')
-                        errors_out.append({
-                            'error_type': 'unverified',
-                            'error_details': failure_reason,
-                            'sources_checked': sources_checked,
-                            'sources_negative': sources_negative,
-                        })
-                        url_msg = self._url_failure_message(subreason, web_url)
-                        errors_out.append({
-                            'error_type': 'url' if 'URL references paper' not in subreason else 'unverified',
-                            'error_details': url_msg,
-                        })
-                    else:
-                        errors_out.append({
-                            'error_type': 'unverified',
-                            'error_details': failure_reason,
-                            'sources_checked': sources_checked,
-                            'sources_negative': sources_negative,
-                        })
-                    return None, errors_out, wp_url
+                if not wp_errors:
+                    return None, [search_finding], wp_url
+                web_finding = wp_errors[0]
+                if web_finding.get('requires_authentication'):
+                    return None, wp_errors, wp_url
+                if web_finding.get('verification_reason') == 'url_access_failed':
+                    details = self._url_failure_message(web_finding['error_details'], web_url)
+                    if web_finding.get('http_status') is not None:
+                        details += f" (HTTP {web_finding['http_status']})"
+                    return None, [{
+                        **search_finding,
+                        **web_finding,
+                        'error_details': f'{details}. {failure_reason}',
+                    }], wp_url
+                subreason = web_finding.get('error_details', '')
+                return None, [search_finding, {
+                    'error_type': 'unverified' if 'URL references paper' in subreason else 'url',
+                    'error_details': self._url_failure_message(subreason, web_url),
+                }], wp_url
+            except VerificationCancelled:
+                raise
             except Exception as exc:
                 logger.debug(f"Enhanced Hybrid: Web page verification failed: {exc}")
 
-        return None, [{
-            'error_type': 'unverified',
-            'error_details': failure_reason,
-            'sources_checked': sources_checked,
-            'sources_negative': sources_negative,
-        }], None
+        return None, [search_finding], None
     
     def _try_openreview_search(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str], bool, str, str]:
         """
