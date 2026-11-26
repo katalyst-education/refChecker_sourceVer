@@ -40,7 +40,7 @@ from typing import Callable, Dict, List, Tuple, Optional, Any
 
 from refchecker.utils.book_editions import assess_book_edition, is_book_citation, isbn_key
 from refchecker.utils.database_config import DATABASE_LABELS, DATABASE_LOOKUP_ORDER
-from refchecker.utils.doi_utils import is_valid_doi_format, normalize_doi
+from refchecker.utils.doi_utils import doi_request_path, extract_cited_doi, normalize_doi
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.utils.reference_metadata import recover_cited_book_fields
 
@@ -330,6 +330,8 @@ class EnhancedHybridReferenceChecker:
         
         # Google Scholar removed - using more reliable APIs only
 
+        self.datacite = self._initialize_checker('datacite', 'DataCiteChecker', 'DataCite API')
+
         # Propagate cache_dir to all sub-checkers for API response caching
         self.cache_dir = cache_dir
         all_local_checkers = [checker for _, _, checker in self.local_db_checkers]
@@ -348,6 +350,7 @@ class EnhancedHybridReferenceChecker:
             'arxiv_citation': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'semantic_scholar': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'openalex': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
+            'datacite': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'crossref': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'springer_nature': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
             'open_library': {'success': 0, 'failure': 0, 'avg_time': 0, 'throttled': 0},
@@ -381,6 +384,7 @@ class EnhancedHybridReferenceChecker:
             'arxiv_citation': threading.Semaphore(2),   # ArXiv has 3s rate gap
             'semantic_scholar': threading.Semaphore(3),  # moderate parallelism
             'crossref': threading.Semaphore(3),
+            'datacite': threading.Semaphore(2),
             'springer_nature': threading.Semaphore(1),
             'openalex': threading.Semaphore(3),
             'open_library': threading.Semaphore(1),
@@ -478,6 +482,7 @@ class EnhancedHybridReferenceChecker:
             'semantic_scholar': 'Semantic Scholar',
             'openalex': 'OpenAlex',
             'crossref': 'CrossRef',
+            'datacite': 'DataCite',
             'springer_nature': 'Springer Nature',
             'open_library': 'Open Library',
             'econbiz': 'EconBiz',
@@ -633,7 +638,7 @@ class EnhancedHybridReferenceChecker:
         for name in (
             'semantic_scholar', 'crossref', 'openalex', 'open_library', 'econbiz',
             'dnb', 'tib', 'zdb', 'dblp', 'acl_anthology', 'openreview',
-            'paperclip', 'springer_nature', 'google_books',
+            'paperclip', 'springer_nature', 'google_books', 'datacite',
         ):
             if getattr(self, name, None) is not None:
                 names.append(name)
@@ -1607,21 +1612,11 @@ class EnhancedHybridReferenceChecker:
                 sem.release()
     
     @staticmethod
-    def _cited_doi(reference: Dict[str, Any]) -> Optional[str]:
-        for field in ('doi', 'DOI', 'url', 'cited_url'):
-            value = reference.get(field)
-            if isinstance(value, str):
-                doi = normalize_doi(value.lower())
-                if is_valid_doi_format(doi):
-                    return doi
-        return None
-
-    @staticmethod
     def _is_publication_doi(doi: Optional[str]) -> bool:
         return bool(doi and not doi.startswith('10.48550/arxiv.'))
 
     def _is_exact_crossref_publication(self, reference: Dict[str, Any], item: Dict[str, Any]) -> bool:
-        doi = self._cited_doi(reference)
+        doi = extract_cited_doi(reference)
         data = item['data']
         if (
             item['source'] != 'crossref'
@@ -2861,7 +2856,7 @@ class EnhancedHybridReferenceChecker:
         """
         # An ancillary ArXiv link can still be checked independently below,
         # but its metadata must not replace a cited publication version.
-        allow_arxiv_replacement = not self._is_publication_doi(self._cited_doi(reference))
+        allow_arxiv_replacement = not self._is_publication_doi(extract_cited_doi(reference))
 
         # 1. ArXiv re-verify when the DB matched the wrong paper
         if errors and verified_data is not None and allow_arxiv_replacement:
@@ -3118,7 +3113,7 @@ class EnhancedHybridReferenceChecker:
         local_doi_mismatch_result = None
         forced_best_result = None
         forced_evidence: List[Dict[str, Any]] = []
-        cited_doi = self._cited_doi(reference)
+        cited_doi = extract_cited_doi(reference)
         if cited_doi and cited_doi != reference.get('doi'):
             reference = dict(reference, doi=cited_doi)
         # An ancillary preprint URL does not turn a publication DOI into an
@@ -3369,6 +3364,22 @@ class EnhancedHybridReferenceChecker:
             logger.debug("Enhanced Hybrid: No complete data found, using incomplete data as fallback")
             return best_incomplete
         
+        # DOI-only registry fallback, after existing local, locator and remote
+        # evidence has had priority in both normal and search-all modes.
+        doi_path = doi_request_path(cited_doi)
+        if doi_path and getattr(self, 'datacite', None) is not None:
+            self._append_attempted_api(attempted_apis, 'datacite')
+            data, errors, url, success, failure_type, failure_detail = self._try_api(
+                'datacite', self.datacite, reference,
+            )
+            if success:
+                return data, errors, url
+            if failure_type not in ('none', 'not_found'):
+                failed_apis.append({
+                    'name': 'datacite', 'failure_type': failure_type,
+                    'failure_detail': failure_detail,
+                })
+
         # If all APIs failed, return unverified with source tracking metadata
         active_failures = [api for api in failed_apis if api.get('active', True)]
         failed_count = len(active_failures)
@@ -3391,6 +3402,7 @@ class EnhancedHybridReferenceChecker:
             logger.debug("Enhanced Hybrid: All available APIs failed to verify reference")
         
         # PHASE 4: If the reference has a URL, try web page verification as final fallback.
+        # Only use cited URLs here; a bare DOI is not a web crawl target.
         # This handles non-academic references (websites, datasets, tools) whose
         # cited URL is valid and contains the reference title.
         web_url = reference.get('cited_url') or reference.get('url', '')
