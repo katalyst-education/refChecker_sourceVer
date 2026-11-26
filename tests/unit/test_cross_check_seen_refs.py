@@ -83,6 +83,53 @@ class TestAuthorNormalization:
 
 
 class TestCrossCheckWarnings:
+    @pytest.mark.parametrize('cached_is_preprint', [False, True])
+    @pytest.mark.parametrize('arxiv_doi', [None, '10.48550/arXiv.1512.03385'])
+    @pytest.mark.parametrize('author_conflict', [False, True])
+    def test_marked_versions_only_suppress_version_diffs(
+        self, db, cached_is_preprint, arxiv_doi, author_conflict,
+    ):
+        published = {
+            'title': MENG_TITLE, 'authors': MENG_AUTHORS,
+            'year': 2016, 'venue': 'CVPR', 'doi': '10.1109/cvpr.2016.90',
+            'status': 'verified',
+        }
+        preprint = dict(published, year=2015, venue='arXiv', doi=arxiv_doi,
+                        arxiv_id=None if arxiv_doi else '1512.03385')
+        cached, cited = (preprint, published) if cached_is_preprint else (published, preprint)
+        if author_conflict:
+            cited = dict(cited, authors=['J. Smith'])
+        _run(db.upsert_verified_reference(cached))
+
+        discrepancies = _run(db.cross_check_seen_refs(cited))
+        assert [d['field'] for entry in discrepancies for d in entry['diffs']] == (
+            ['authors'] if author_conflict else []
+        )
+
+    @pytest.mark.parametrize('cached_is_preprint', [False, True])
+    def test_cited_snapshot_distinguishes_versions_with_same_identity(self, db, cached_is_preprint):
+        published = {
+            'title': MENG_TITLE, 'authors': MENG_AUTHORS, 'year': 2016,
+            'venue': 'CVPR', 'doi': '10.1109/cvpr.2016.90', 'status': 'verified',
+        }
+        preprint = dict(
+            published, year=2015, venue='arXiv', authors=['J. Smith'],
+            # Both results carry the publication DOI; only the citation tells
+            # us which version the preprint entry actually cited.
+            cited_metadata={'title': MENG_TITLE, 'year': 2015, 'arxiv_id': '1512.03385'},
+        )
+        cached, cited = (preprint, published) if cached_is_preprint else (published, preprint)
+        assert _run(db.upsert_verified_reference(cached)) == Database.reference_identity_key(cited)
+
+        discrepancies = _run(db.cross_check_seen_refs(cited))
+        assert [d['field'] for entry in discrepancies for d in entry['diffs']] == ['authors']
+
+    def test_unmarked_reference_still_warns_against_publication(self, db):
+        _seed(db, venue='CVPR')
+        cited = dict(title=MENG_TITLE, authors=MENG_AUTHORS, year=2021, venue='preprint')
+        discrepancies = _run(db.cross_check_seen_refs(cited))
+        assert {d['field'] for entry in discrepancies for d in entry['diffs']} == {'year', 'venue'}
+
     def test_same_first_author_does_not_warn(self, db):
         """Regression: JSON quoting made every cached author list look wrong.
 

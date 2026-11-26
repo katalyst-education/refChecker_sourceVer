@@ -60,6 +60,7 @@ import aiosqlite
 from . import admin_insights
 from .database import (
     ReferenceSearchLimitReached,
+    cached_result_is_current,
     db,
     ensure_reference_uids,
     get_data_dir,
@@ -10080,7 +10081,7 @@ async def _cites_refs_papers_impl(req: _SimilarPapersRequest) -> Dict[str, Any]:
     # verified_status) on each row so the existing SimilarPapersPanel chips
     # render true "verified / ? unconfirmed" state instead of always-null.
     # Reuses the same cache-lookup + active-verify discipline as the similar
-    # path (db.lookup_verified_reference -> checker.verify_reference), bounded
+    # path (db.lookup_reference_identity -> checker.verify_reference), bounded
     # by a semaphore. Real-data-gated: a candidate that can't be confirmed is
     # marked unverified, never synthesized as verified.
     await _verify_candidates_in_place(candidates)
@@ -10173,8 +10174,8 @@ async def _verify_candidates_in_place(candidates: list) -> None:
     similar path's ``_enrich``:
 
       1. Look the candidate up in the global identity cache
-         (``db.lookup_verified_reference``). A hit sets ``pre_verified`` /
-         ``was_verified`` and carries the cached status + ``times_seen``.
+         (``db.lookup_reference_identity``) for ``times_seen``. A current
+         row also supplies the prior status for this work.
       2. On a cache miss, actively verify via ``checker.verify_reference`` —
          bounded by a semaphore so we never fan out unboundedly — and mark
          ``verified`` only when a real database record is matched. No match
@@ -10199,15 +10200,15 @@ async def _verify_candidates_in_place(candidates: list) -> None:
         }
         cached = None
         try:
-            cached = await db.lookup_verified_reference(probe)
+            cached = await db.lookup_reference_identity(probe)
         except Exception:
             cached = None
 
-        if cached:
+        row["times_seen"] = (cached or {}).get("times_seen") or 0
+        if cached and cached_result_is_current(cached):
             row["pre_verified"] = True
             row["was_verified"] = True
             row["verified_status"] = (cached or {}).get("status") or "verified"
-            row["times_seen"] = (cached or {}).get("times_seen") or 0
             return
 
         # Cache miss: actively verify if we have any identifier or title.
@@ -10732,12 +10733,12 @@ async def _find_similar_papers_impl(req: _SimilarPapersRequest, current_user: Us
         }
         cached = None
         try:
-            cached = await db.lookup_verified_reference(probe)
+            cached = await db.lookup_reference_identity(probe)
         except Exception:
             cached = None
 
-        verification_status = (cached or {}).get("status") if cached else None
-        pre_verified = bool(cached)
+        pre_verified = bool(cached and cached_result_is_current(cached))
+        verification_status = cached.get("status") if pre_verified else None
         was_verified = pre_verified
 
         # Cache miss: actively verify if we have any identifier or title
@@ -11190,13 +11191,13 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
             "year": it.get("year"),
         }
         try:
-            cached = await db.lookup_verified_reference(probe)
+            cached = await db.lookup_reference_identity(probe)
         except Exception:
             cached = None
-        if cached:
+        it["times_seen"] = (cached or {}).get("times_seen") or 0
+        if cached and cached_result_is_current(cached):
             it["verified_status"] = cached.get("status") or "unknown"
             it["pre_verified"] = True
-            it["times_seen"] = cached.get("times_seen") or 0
         else:
             has_paper_id = bool(it.get("paperId"))
             has_external_id = bool(it.get("doi") or it.get("arxiv_id"))
@@ -11214,7 +11215,6 @@ async def expand_paper(req: _ExpandRequest, current_user: UserInfo = Depends(req
             else:
                 it["verified_status"] = "unknown"
             it["pre_verified"] = False
-            it["times_seen"] = 0
 
     return {"paper_id": pid, "items": items}
 
@@ -11643,7 +11643,7 @@ async def add_seen_reference(req: _AddSeenReferenceRequest,
         ident = await db.upsert_verified_reference(ref, check_id=req.check_id, paper_title=req.paper_title)
         if not ident:
             return {"added": False, "times_seen": 0, "reason": "no identity key"}
-        row = await db.lookup_verified_reference(ref)
+        row = await db.lookup_reference_identity(ref)
         return {"added": True, "times_seen": (row or {}).get("times_seen") or 1}
     except HTTPException:
         raise

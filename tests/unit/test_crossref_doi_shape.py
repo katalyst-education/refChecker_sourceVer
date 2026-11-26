@@ -94,3 +94,38 @@ class TestDoiLookupShape:
         corrected = {'title': verified['title']}
         assert corrected['title'] == 'Toward unique identifiers'
         assert '[' not in str(corrected['title'])
+
+
+@pytest.mark.parametrize(('cited_year', 'warns'), [
+    (2015, True),  # preprint
+    (2016, False),  # online
+    (2017, False),  # print
+    (2018, True),  # DOI registration, one year from print
+    (2019, False),  # published
+    (2020, False),  # issued
+])
+def test_exact_doi_uses_recorded_publication_years(cited_year, warns):
+    checker = CrossRefReferenceChecker()
+    work = dict(RAW_MESSAGE, **{
+        'published-print': {'date-parts': [[2017]]},
+        'published-online': {'date-parts': [[2016]]},
+        'published': {'date-parts': [[2019]]},
+        'issued': {'date-parts': [[2020]]},
+        'created': {'date-parts': [[2018]]},
+    })
+    with patch.object(checker, 'get_work_by_doi', return_value=_normalize_crossref_work(work)):
+        _, errors, _ = checker.verify_reference({'doi': RAW_MESSAGE['DOI'], 'year': cited_year})
+
+    year_warnings = [error for error in errors if error.get('warning_type') == 'year']
+    assert bool(year_warnings) is warns
+    if warns:
+        assert year_warnings[0]['ref_year_correct'] == 2017
+
+
+def test_exact_doi_falls_back_to_created_without_publication_dates():
+    checker = CrossRefReferenceChecker()
+    work = dict(RAW_MESSAGE, issued={'date-parts': [[]]}, created={'date-parts': [[2018]]})
+    with patch.object(checker, 'get_work_by_doi', return_value=_normalize_crossref_work(work)):
+        _, errors, _ = checker.verify_reference({'doi': RAW_MESSAGE['DOI'], 'year': 2014})
+
+    assert [issue['ref_year_correct'] for issue in errors if issue.get('warning_type') == 'year'] == [2018]

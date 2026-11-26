@@ -40,6 +40,7 @@ from typing import Callable, Dict, List, Tuple, Optional, Any
 
 from refchecker.utils.book_editions import assess_book_edition, is_book_citation, isbn_key
 from refchecker.utils.database_config import DATABASE_LABELS, DATABASE_LOOKUP_ORDER
+from refchecker.utils.doi_utils import is_valid_doi_format, normalize_doi
 from refchecker.utils.reference_fixups import fixup_reference_fields
 from refchecker.utils.reference_metadata import recover_cited_book_fields
 
@@ -1169,8 +1170,15 @@ class EnhancedHybridReferenceChecker:
                 and llm_decision.get('confidence', 0.0) >= 0.8
             )
 
+        # Aggregate indexes may attach a preprint year to the publication DOI.
+        # Search-all still collects their evidence, but a complete Crossref
+        # publication record controls the selected version and its year verdict.
+        publication = next((
+            item for item in accepted
+            if self._is_exact_crossref_publication(reference, item)
+        ), None)
         selection_pool = confirming if (confirming and decisive_consensus) else accepted
-        selected = min(selection_pool, key=rank)
+        selected = publication or min(selection_pool, key=rank)
         data = dict(selected.get('data') or {})
         findings = list(selected.get('findings') or [])
 
@@ -1186,9 +1194,10 @@ class EnhancedHybridReferenceChecker:
                     candidate=self._database_trace_summary(item.get('data'), item.get('url')),
                 )
 
-        data, findings = self._reconcile_year_evidence(
-            reference, accepted, data, findings,
-        )
+        if publication is None:
+            data, findings = self._reconcile_year_evidence(
+                reference, accepted, data, findings,
+            )
 
         conflict_labels = list(dict.fromkeys(item['label'] for item in conflicting))
         support_labels = list(dict.fromkeys(item['label'] for item in confirming))
@@ -1597,6 +1606,42 @@ class EnhancedHybridReferenceChecker:
             if sem is not None:
                 sem.release()
     
+    @staticmethod
+    def _cited_doi(reference: Dict[str, Any]) -> Optional[str]:
+        for field in ('doi', 'DOI', 'url', 'cited_url'):
+            value = reference.get(field)
+            if isinstance(value, str):
+                doi = normalize_doi(value.lower())
+                if is_valid_doi_format(doi):
+                    return doi
+        return None
+
+    @staticmethod
+    def _is_publication_doi(doi: Optional[str]) -> bool:
+        return bool(doi and not doi.startswith('10.48550/arxiv.'))
+
+    def _is_exact_crossref_publication(self, reference: Dict[str, Any], item: Dict[str, Any]) -> bool:
+        doi = self._cited_doi(reference)
+        data = item['data']
+        if (
+            item['source'] != 'crossref'
+            or not self._is_publication_doi(doi)
+            or doi != self._candidate_identifiers(data).get('doi')
+            or self._has_doi_mismatch(item['findings'])
+            or not self._is_data_complete(data, reference)
+            or is_book_citation(reference)
+            or self._book_edition_rank(data) == 2
+        ):
+            return False
+
+        from .crossref import _PUBLICATION_DATE_FIELDS
+
+        # Crossref's DOI registration date ('created') is not a publication year.
+        return any(
+            isinstance(dates, dict) and (parts := dates.get('date-parts')) and parts[0] and parts[0][0]
+            for dates in (data.get(field) for field in _PUBLICATION_DATE_FIELDS)
+        )
+
     def _should_try_doi_apis_first(self, reference: Dict[str, Any]) -> bool:
         """
         Determine if we should prioritize DOI-based APIs (CrossRef) for this reference
@@ -1666,91 +1711,21 @@ class EnhancedHybridReferenceChecker:
         
         return True
     
+    @staticmethod
     def _merge_arxiv_with_semantic_scholar(
-        self,
         arxiv_data: Dict[str, Any],
-        arxiv_errors: List[Dict[str, Any]],
-        arxiv_url: str,
         ss_data: Dict[str, Any],
-        ss_errors: List[Dict[str, Any]],
-        ss_url: str,
-        reference: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        """
-        Merge ArXiv verification results with Semantic Scholar data.
-        
-        ArXiv is authoritative for title/author/year, but Semantic Scholar
-        provides venue information and additional URLs (DOI, S2 page).
-        
-        Args:
-            arxiv_data: Verified data from ArXiv
-            arxiv_errors: Errors/warnings from ArXiv verification
-            arxiv_url: ArXiv URL
-            ss_data: Data from Semantic Scholar
-            ss_errors: Errors from Semantic Scholar (used for venue checking)
-            ss_url: Semantic Scholar URL
-            reference: Original reference
-            
-        Returns:
-            Tuple of (merged_data, merged_errors)
-        """
-        merged_data = dict(arxiv_data) if arxiv_data else {}
-        merged_errors = list(arxiv_errors) if arxiv_errors else []
-        
-        if not ss_data:
-            return merged_data, merged_errors
-        
-        # Add Semantic Scholar URL to external IDs
-        if 'externalIds' not in merged_data:
-            merged_data['externalIds'] = {}
-        
-        ss_external_ids = ss_data.get('externalIds', {})
-        
-        # Add S2 paper ID
+        ss_url: Optional[str],
+    ) -> Dict[str, Any]:
+        """Add an index link without replacing the cited preprint's metadata."""
+        merged_data = dict(arxiv_data)
+        external_ids = dict(arxiv_data.get('externalIds') or {})
         if ss_data.get('paperId'):
-            merged_data['externalIds']['S2PaperId'] = ss_data['paperId']
-        
-        # Add DOI if available from Semantic Scholar
-        if ss_external_ids.get('DOI') and not merged_data['externalIds'].get('DOI'):
-            merged_data['externalIds']['DOI'] = ss_external_ids['DOI']
-        
-        # Store Semantic Scholar URL
-        merged_data['_semantic_scholar_url'] = ss_url
-        
-        # Check for venue mismatch - if paper was published at a venue but citation only says arXiv
-        ss_venue = self._coerce_text(ss_data.get('venue', ''))
-        cited_venue = self._coerce_text(
-            reference.get('venue', reference.get('journal', ''))
-        ).strip().lower()
-        
-        # Normalize ArXiv venue names
-        is_cited_as_arxiv = (
-            not cited_venue or 
-            cited_venue in ['arxiv', 'arxiv preprint', 'arxiv.org', 'preprint']
-        )
-        
-        # Check if Semantic Scholar shows a real publication venue
-        if ss_venue and is_cited_as_arxiv:
-            # Ignore generic/empty venues
-            ss_venue_lower = ss_venue.lower().strip()
-            is_real_venue = (
-                ss_venue_lower and 
-                ss_venue_lower not in ['arxiv', 'arxiv.org', 'preprint', ''] and
-                not ss_venue_lower.startswith('arxiv')
-            )
-            
-            if is_real_venue:
-                # This paper was published at a venue but is only cited as arXiv
-                logger.debug(f"Enhanced Hybrid: Paper published at '{ss_venue}' but cited as arXiv")
-                merged_errors.append({
-                    'warning_type': 'venue',
-                    'warning_details': f"Paper was published at venue but cited as arXiv preprint:\n       cited:  arXiv\n       actual: {ss_venue}",
-                    'ref_venue_correct': ss_venue
-                })
-                # Also add the venue to merged data
-                merged_data['venue'] = ss_venue
-        
-        return merged_data, merged_errors
+            external_ids['S2PaperId'] = ss_data['paperId']
+        merged_data['externalIds'] = external_ids
+        if ss_url:
+            merged_data['_semantic_scholar_url'] = ss_url
+        return merged_data
 
     def _is_wrong_paper_match(self, reference, verified_data, errors, api_name):
         """Detect when a checker matched the WRONG paper.
@@ -2034,9 +2009,8 @@ class EnhancedHybridReferenceChecker:
     def _verify_arxiv_parallel(self, reference, failed_apis, attempted_apis):
         """Run ArXiv citation + Semantic Scholar API in parallel for ArXiv refs.
         
-        Called after local DB was tried and either failed or had discrepancies.
-        ArXiv BibTeX is the authoritative source for authors/title.
-        S2 API provides venue metadata for merging.
+        ArXiv BibTeX is authoritative for the cited preprint's metadata.
+        Semantic Scholar can supply a related index link.
         
         Returns result tuple or None if both failed.
         """
@@ -2081,21 +2055,12 @@ class EnhancedHybridReferenceChecker:
                         'active': True,
                     })
         
-        # Merge results
-        if arxiv_result and ss_result:
-            ss_data, ss_errors, ss_url = ss_result
-            if ss_data:
-                ss_venue = self.semantic_scholar.get_venue_from_paper_data(ss_data)
-                if ss_venue and 'arxiv' in ss_venue.lower():
-                    logger.debug("Enhanced Hybrid: Semantic Scholar only found ArXiv venue, skipping merge")
-                    return arxiv_result
+        if arxiv_result and ss_result and arxiv_result[0] and ss_result[0]:
             arxiv_data, arxiv_errors, arxiv_url = arxiv_result
-            merged_data, merged_errors = self._merge_arxiv_with_semantic_scholar(
-                arxiv_data, arxiv_errors, arxiv_url,
-                ss_data, ss_errors, ss_url,
-                reference)
-            return merged_data, merged_errors, arxiv_url
-        
+            ss_data, _, ss_url = ss_result
+            merged_data = self._merge_arxiv_with_semantic_scholar(arxiv_data, ss_data, ss_url)
+            return merged_data, arxiv_errors, arxiv_url
+
         if arxiv_result:
             return arxiv_result
         if ss_result:
@@ -2157,6 +2122,7 @@ class EnhancedHybridReferenceChecker:
         skip_ss: bool = False,
         force_all_databases: bool = False,
         seed_evidence: Optional[List[Dict[str, Any]]] = None,
+        local_fallback: Optional[Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[str]]] = None,
     ):
         """Query the general-purpose remote metadata sources in parallel.
         
@@ -2218,7 +2184,11 @@ class EnhancedHybridReferenceChecker:
                 result = (verified_data, errors, url)
                 successful_evidence.append(self._database_evidence('crossref', result))
                 best_result = self._pick_preferred_result(best_result, result, reference)
-                if not force_all_databases and is_exact_doi_match(verified_data, errors):
+                if (
+                    not force_all_databases
+                    and is_exact_doi_match(verified_data, errors)
+                    and self._is_data_complete(verified_data, reference)
+                ):
                     logger.info(
                         "[DATABASE_TRACE] stage=early_doi_match title=%r source=crossref",
                         reference.get('title'),
@@ -2236,6 +2206,12 @@ class EnhancedHybridReferenceChecker:
                     'active': True,
                 })
         
+        # A configured aggregate index can pair a preprint year with a
+        # publication DOI. If CrossRef could not confirm the publication
+        # version, keep the otherwise acceptable local match.
+        if local_fallback is not None:
+            return local_fallback, {}
+
         if self.semantic_scholar and skip_ss:
             logger.info(
                 "Skipping Semantic Scholar lookup due to local-S2 authoritative miss for title=%r doi=%r",
@@ -2883,14 +2859,18 @@ class EnhancedHybridReferenceChecker:
         Called at the end of verify_reference() so CLI, WebUI, and bulk
         all get identical results.
         """
+        # An ancillary ArXiv link can still be checked independently below,
+        # but its metadata must not replace a cited publication version.
+        allow_arxiv_replacement = not self._is_publication_doi(self._cited_doi(reference))
+
         # 1. ArXiv re-verify when the DB matched the wrong paper
-        if errors and verified_data is not None:
+        if errors and verified_data is not None and allow_arxiv_replacement:
             re_result = self._try_arxiv_re_verify(errors, verified_data, reference)
             if re_result is not None:
                 errors, url, verified_data = re_result
 
         # 2. Convert ArXiv version-only metadata differences to warnings.
-        if errors and verified_data is not None:
+        if errors and verified_data is not None and allow_arxiv_replacement:
             verified_data, errors, url = self._apply_arxiv_version_warnings(
                 verified_data, errors, url, reference,
             )
@@ -2921,7 +2901,12 @@ class EnhancedHybridReferenceChecker:
         # shared verifier entry point) so CLI, bulk, and WebUI remain identical.
         if isinstance(verified_data, dict) and not verified_data.get('_book_edition_assessment'):
             verified_data, errors = assess_book_edition(reference, verified_data, errors or [])
-        if errors and verified_data is not None and not verified_data.get('_book_edition_assessment'):
+        if (
+            errors and verified_data is not None
+            and not verified_data.get('_book_edition_assessment')
+            # Aggregate sources may index a different version under this DOI.
+            and not any(issue.get('_exact_doi_publication_year') for issue in errors)
+        ):
             try:
                 from refchecker.utils.publication_years import reconcile_publication_year
                 verified_data, errors = reconcile_publication_year(
@@ -3133,7 +3118,16 @@ class EnhancedHybridReferenceChecker:
         local_doi_mismatch_result = None
         forced_best_result = None
         forced_evidence: List[Dict[str, Any]] = []
-        is_arxiv = self.arxiv_citation and self.arxiv_citation.is_arxiv_reference(reference)
+        cited_doi = self._cited_doi(reference)
+        if cited_doi and cited_doi != reference.get('doi'):
+            reference = dict(reference, doi=cited_doi)
+        # An ancillary preprint URL does not turn a publication DOI into an
+        # ArXiv citation. With an ArXiv DOI or no DOI, keep existing detection.
+        is_arxiv = (
+            not self._is_publication_doi(cited_doi)
+            and self.arxiv_citation
+            and self.arxiv_citation.is_arxiv_reference(reference)
+        )
         
         # ── PHASE 1: Parallel API calls ──
         
@@ -3175,6 +3169,7 @@ class EnhancedHybridReferenceChecker:
                         'active': True,
                     })
         else:
+            local_fallback = None
             # Non-ArXiv: try local DB first (instant), then parallel remote APIs
             for local_key, _, local_checker in self._iter_local_db_checkers():
                 self._append_attempted_api(attempted_apis, local_key)
@@ -3218,6 +3213,12 @@ class EnhancedHybridReferenceChecker:
                         continue
                     if self._book_edition_rank(verified_data) == 2:
                         continue
+                    if (
+                        cited_doi and self.crossref and local_key != 'local_crossref'
+                        and not is_book_citation(reference)
+                    ):
+                        local_fallback = local_result
+                        break
                     return verified_data, errors, url
                 if failure_type not in ('none', 'not_found'):
                     failed_apis.append({
@@ -3242,6 +3243,7 @@ class EnhancedHybridReferenceChecker:
                 skip_ss=(db_not_found and not force_all_databases),
                 force_all_databases=force_all_databases,
                 seed_evidence=forced_evidence,
+                local_fallback=local_fallback,
             )
             if result is not None:
                 if force_all_databases:

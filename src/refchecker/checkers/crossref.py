@@ -30,7 +30,7 @@ import logging
 import re
 from typing import Dict, List, Tuple, Optional, Any, Union
 from urllib.parse import quote_plus
-from refchecker.utils.doi_utils import extract_doi_from_url
+from refchecker.utils.doi_utils import compare_dois, extract_doi_from_url, validate_doi_resolves
 from refchecker.utils.text_utils import (
     clean_title_basic, clean_title_for_search, compare_authors, compare_titles_with_latex_cleaning,
     find_best_match, is_name_match, normalize_author_name, normalize_text, titles_match_with_typo_tolerance,
@@ -74,6 +74,7 @@ def _normalize_crossref_work(work: Optional[Dict[str, Any]]) -> Optional[Dict[st
 config = get_config()
 SIMILARITY_THRESHOLD = config["text_processing"]["similarity_threshold"]
 _STRUCTURED_TITLE_THRESHOLD = 0.65
+_PUBLICATION_DATE_FIELDS = ('published-print', 'published-online', 'published', 'issued')
 _LOCATOR_SELECT = ",short-container-title,volume,issue,page,article-number"
 
 class CrossRefReferenceChecker:
@@ -555,7 +556,7 @@ class CrossRefReferenceChecker:
         """
         if not work_data:
             return None
-        for key in ('published-print', 'published-online', 'published', 'issued', 'created'):
+        for key in (*_PUBLICATION_DATE_FIELDS, 'created'):
             year = self.extract_year_from_published(work_data.get(key))
             if year:
                 return year
@@ -769,48 +770,47 @@ class CrossRefReferenceChecker:
             })
         
         # Verify authors
+        crossref_authors = work_data.get('author') or []
+        correct_author_names = self._crossref_author_names(crossref_authors)
         if authors:
-            crossref_authors = work_data.get('author', [])
             authors_match, author_error = self.compare_authors(authors, crossref_authors)
             
             if not authors_match:
-                # Extract correct author names for error reporting
-                correct_author_names = []
-                for author in crossref_authors:
-                    if 'name' in author:
-                        correct_author_names.append(author['name'])
-                    elif 'given' in author and 'family' in author:
-                        full_name = f"{author['given']} {author['family']}"
-                        correct_author_names.append(full_name)
-                    elif 'family' in author:
-                        correct_author_names.append(author['family'])
-                
                 from refchecker.utils.error_utils import create_author_error
                 errors.append(create_author_error(author_error, correct_author_names))
         
-        # Verify year — prefer print pub date over CrossRef record-
-        # creation date so we don't flag bogus year mismatches against
-        # the DOI registration year.
+        work_doi = work_data.get('DOI')
+        exact_doi_match = bool(doi and work_doi and compare_dois(doi, work_doi))
         work_year = self.extract_best_publication_year(work_data)
         if year and work_year and year != work_year:
+            publication_years = {
+                self.extract_year_from_published(work_data.get(key))
+                for key in _PUBLICATION_DATE_FIELDS
+            } - {None}
+            exact_publication_years = exact_doi_match and bool(publication_years)
             try:
-                year_gap = abs(int(year) - int(work_year))
+                cited_year = int(year)
+                if exact_publication_years:
+                    year_mismatch = cited_year not in publication_years
+                else:
+                    # Without authoritative dates for this DOI, retain the
+                    # existing one-year tolerance.
+                    year_mismatch = abs(cited_year - int(work_year)) > 1
             except (TypeError, ValueError):
-                year_gap = None
-            # Suppress trivial 1-year gaps (online-ahead-of-print, epub vs print)
-            if year_gap is None or year_gap > 1:
-                errors.append({
+                year_mismatch = True
+            if year_mismatch:
+                issue = {
                     'warning_type': 'year',
                     'warning_details': format_year_mismatch(year, work_year),
-                    'ref_year_correct': work_year
-                })
-        
+                    'ref_year_correct': work_year,
+                }
+                if exact_publication_years:
+                    issue['_exact_doi_publication_year'] = True
+                errors.append(issue)
+
         # Verify DOI
-        work_doi = work_data.get('DOI')
         if doi and work_doi:
-            # Compare DOIs using the proper comparison function
-            from refchecker.utils.doi_utils import compare_dois, validate_doi_resolves
-            if not compare_dois(doi, work_doi):
+            if not exact_doi_match:
                 logger.warning(
                     "[DOI_TRACE] stage=crossref_compare result=mismatch cited_doi=%r actual_doi=%r",
                     doi,
@@ -840,6 +840,7 @@ class CrossRefReferenceChecker:
         # Extract URL from work data
         work_url = self.extract_url_from_work(work_data)
         
+        work_data = dict(work_data, year=work_year, authors=[{'name': name} for name in correct_author_names])
         return work_data, errors, work_url
 
 if __name__ == "__main__":

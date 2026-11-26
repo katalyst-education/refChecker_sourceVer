@@ -20,6 +20,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
@@ -76,6 +78,112 @@ class TestCachedResultIsCurrent:
 
 
 class TestCacheReplay:
+    @pytest.mark.parametrize('lookup', ['lookup_verified_reference', 'find_verified_by_fuzzy'])
+    @pytest.mark.parametrize('input_year,snapshot_year,result_year,hit', [
+        (2025, 2026, 2026, False),
+        (2026, 2025, 2026, False),
+        (2025, 2025, 2026, False),
+        (2026, None, 2026, False),
+        (' 2026 ', 2026, 2026, True),
+    ])
+    def test_replay_checks_all_three_years(
+        self, tmp_path, lookup, input_year, snapshot_year, result_year, hit,
+    ):
+        async def run():
+            db = Database(str(tmp_path / 'years.db'))
+            await db.init_db()
+            cited = {
+                'title': 'A technical report about publication versions',
+                'authors': ['A. Author'], 'doi': '10.1234/test', 'year': input_year,
+            }
+            snapshot = dict(cited, year=snapshot_year) if snapshot_year else {'title': cited['title']}
+            await db.upsert_verified_reference(dict(
+                cited, year=result_year, cited_metadata=snapshot, status='verified',
+            ))
+            assert (await getattr(db, lookup)(cited) is not None) is hit
+
+        _run(run())
+
+    def test_fuzzy_rejects_other_dois_and_preprint_publication_pairs(self, tmp_path):
+        async def run():
+            db = Database(str(tmp_path / 'versions.db'))
+            await db.init_db()
+            published = {
+                'title': 'A technical report about publication versions',
+                'authors': ['A. Author'], 'doi': '10.1234/test', 'year': 2026,
+            }
+            await db.upsert_verified_reference(dict(published, status='verified'))
+            for variant in (
+                dict(published, doi='10.1234/other'),
+                dict(published, doi=None, arxiv_id='2601.01234'),
+            ):
+                assert await db.find_verified_by_fuzzy(variant) is None
+
+        _run(run())
+
+    @pytest.mark.parametrize('input_ids,hit', [
+        ({'cited_url': 'https://doi.org/10.1234/two'}, False),
+        ({'cited_url': 'https://doi.org/10.1234/ONE?source=citation'}, True),
+        ({'url': 'https://doi.org/10.1234/two'}, False),
+        ({'cited_url': 'https://example.org/article', 'url': 'https://doi.org/10.1234/one'}, True),
+        ({'cited_url': 'https://doi.org/10.1234/two', 'url': 'https://doi.org/10.1234/one'}, False),
+        ({'doi': '10.1234/one', 'cited_url': 'https://doi.org/10.1234/two'}, True),
+        ({'DOI': '10.1234/two', 'cited_url': 'https://doi.org/10.1234/one'}, False),
+    ])
+    @pytest.mark.parametrize('cached_ids', [
+        {'doi': '10.1234/one'},
+        {'authoritative_urls': [{'url': 'https://doi.org/10.1234/one'}]},
+        {'cited_url': 'https://doi.org/10.1234/one'},
+    ], ids=['doi', 'identity-doi', 'resolver-url'])
+    def test_fuzzy_compares_dois_from_resolver_urls(self, tmp_path, input_ids, hit, cached_ids):
+        async def run():
+            db = Database(str(tmp_path / 'resolver-doi.db'))
+            await db.init_db()
+            citation = {
+                'title': 'A technical report about publication versions',
+                'authors': ['A. Author'], 'year': 2026,
+            }
+            identity = await db.upsert_verified_reference(dict(citation, **cached_ids, status='verified'))
+            match = await db.find_verified_by_fuzzy(dict(citation, **input_ids))
+            if hit:
+                assert match is not None
+                assert match['identity_key'] == identity
+            else:
+                assert match is None
+
+        _run(run())
+
+    def test_fuzzy_ranks_only_replayable_candidates(self, tmp_path):
+        async def run():
+            db = Database(str(tmp_path / 'candidates.db'))
+            await db.init_db()
+            cited = {
+                'title': 'A technical report about publication versions',
+                'authors': ['A. Author'], 'year': 2026,
+            }
+            await db.upsert_verified_reference(dict(
+                cited, doi='10.1234/invalid', status='verified',
+                cited_metadata=dict(cited, year=2025),
+            ))
+            await db.upsert_verified_reference(dict(
+                cited, doi='10.1234/valid', status='warning', cited_metadata=cited,
+            ))
+            assert (await db.find_verified_by_fuzzy(cited))['doi'] == '10.1234/valid'
+
+        _run(run())
+
+    def test_identity_lookup_preserves_seen_count_after_replay_miss(self, tmp_path):
+        async def run():
+            db = Database(str(tmp_path / 'identity.db'))
+            await db.init_db()
+            await db.upsert_verified_reference(dict(KIMI))
+            await db.upsert_verified_reference(dict(KIMI))
+            changed = dict(KIMI, year=2025)
+            assert await db.lookup_verified_reference(changed) is None
+            assert (await db.lookup_reference_identity(changed))['times_seen'] == 2
+
+        _run(run())
+
     def test_stale_entry_is_not_replayed_but_is_still_listed(self):
         tmp = tempfile.mktemp(suffix='.db')
 
