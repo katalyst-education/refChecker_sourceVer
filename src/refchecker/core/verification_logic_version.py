@@ -46,8 +46,9 @@ History:
    13 - compare the cited book edition and its publication dates.
    14 - preserve cited publication/preprint versions and guard cached verdicts.
    15 - accept years confirmed by the arXiv submission history.
+   18 - report a known arXiv copy as preprint evidence when the publication DOI is unverified.
 """
 
-VERIFICATION_LOGIC_VERSION = 15
+VERIFICATION_LOGIC_VERSION = 18
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

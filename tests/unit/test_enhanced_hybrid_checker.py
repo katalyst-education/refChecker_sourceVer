@@ -1300,3 +1300,92 @@ def test_publication_doi_takes_priority_over_ancillary_arxiv_url(doi_field, arxi
     assert data['_matched_checker'] == 'crossref'
     assert data['year'] == 2016
     assert [issue['ref_year_correct'] for issue in issues if issue.get('warning_type') == 'year'] == [2016]
+
+
+@pytest.mark.parametrize('force_all_databases', [False, True])
+@pytest.mark.parametrize('publication_status', [
+    'missing', 'timeout', 'exact', 'retry_exact', 'retry_with_candidate', 'other_doi',
+    'arxiv_failure', 'web_copy', 'disabled',
+])
+def test_known_arxiv_copy_is_only_preprint_evidence(force_all_databases, publication_status):
+    from refchecker.checkers.arxiv_citation import ArXivCitationChecker
+    from refchecker.checkers.crossref import CrossRefReferenceChecker
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker._cross_verify_secondary = Mock()
+    checker._wait_or_cancel = Mock()
+    checker.crossref = CrossRefReferenceChecker()
+    arxiv = ArXivCitationChecker()
+    checker.arxiv_citation = arxiv if publication_status != 'disabled' else None
+    title = 'Deep Residual Learning for Image Recognition'
+    doi = '10.1109/cvpr.2016.90'
+    arxiv_url = 'https://arxiv.org/abs/1512.03385'
+    arxiv_doi = '10.48550/arXiv.1512.03385'
+    reference = {'title': title, 'authors': ['Kaiming He'], 'year': 2016,
+                 'url': f'https://doi.org/{doi}', 'cited_url': arxiv_url}
+    work = {
+        'DOI': doi, 'title': title, 'author': [{'given': 'Kaiming', 'family': 'He'}],
+        'issued': {'date-parts': [[2016]]}, 'URL': reference['url'],
+    }
+    bibtex = f"""@misc{{he2015, title={{{title}}}, author={{Kaiming He}},
+                     year={{2015}}, eprint={{1512.03385}}, doi={{{arxiv_doi}}}}}"""
+    if publication_status == 'retry_with_candidate':
+        checker.semantic_scholar = Mock(spec=['verify_reference'])
+        checker.semantic_scholar.verify_reference.return_value = (
+            {'title': title, 'authors': [{'name': 'Kaiming He'}], 'year': 2016}, [], 'https://example.org/paper',
+        )
+    if publication_status == 'other_doi':
+        reference['arxiv_id'] = '1512.03385'  # same work, different DOI/version
+        checker.crossref.verify_reference = Mock(return_value=(
+            dict(work, DOI='10.1000/other', year=2016, authors=[{'name': 'Kaiming He'}],
+                 externalIds={'ArXiv': '1512.03385'}),
+            [{'warning_type': 'doi', 'warning_details': 'DOI mismatch'}], 'https://doi.org/10.1000/other',
+        ))
+    with (
+        patch.object(checker.crossref, 'get_work_by_doi', return_value=work if publication_status == 'exact' else None) as lookup,
+        patch.object(checker.crossref, 'search_works', return_value=[]),
+        patch.object(checker.crossref, 'search_works_bibliographic', return_value=[]),
+        patch.object(arxiv, 'fetch_bibtex',
+                     return_value=None if publication_status in {'arxiv_failure', 'web_copy'} else bibtex) as fetch,
+        patch.object(arxiv, '_get_latest_version_number', return_value=None),
+        patch.object(arxiv, '_get_version_years', return_value=set()),
+        patch.object(WebPageChecker, 'verify_raw_url_for_unverified_reference', return_value=(None, [], arxiv_url)) as webpage,
+        patch('refchecker.utils.publication_years.reconcile_publication_year', side_effect=lambda ref, data, issues: (data, issues)) as reconcile,
+    ):
+        if publication_status == 'timeout':
+            lookup.side_effect = requests.exceptions.Timeout('Crossref timed out')
+        elif publication_status in {'retry_exact', 'retry_with_candidate'}:
+            lookup.side_effect = [requests.exceptions.Timeout('Crossref timed out'), work]
+        elif publication_status == 'web_copy':
+            webpage.return_value = ({'title': title, 'year': 2016, '_source': 'Web Page'}, [], arxiv_url)
+        data, issues, url = checker.verify_reference(reference, force_all_databases=force_all_databases)
+
+    if publication_status in {'exact', 'retry_exact', 'retry_with_candidate'}:
+        assert lookup.call_count == (1 if publication_status == 'exact' else 2)
+        fetch.assert_not_called()
+        assert data['_matched_checker'] == 'crossref'
+        assert data['year'] == 2016
+        assert issues == []
+    elif publication_status in {'arxiv_failure', 'web_copy', 'disabled'}:
+        webpage.assert_called_once()
+        assert data is None
+        assert issues[0]['error_type'] == 'unverified'
+        if publication_status in {'arxiv_failure', 'web_copy'}:
+            fetch.assert_called_once_with('1512.03385')
+            assert issues[0]['verification_reason'] == 'provider_failure'
+        else:
+            fetch.assert_not_called()
+            assert issues[0]['verification_reason'] == 'no_match'
+    else:
+        fetch.assert_called_once_with('1512.03385')
+        webpage.assert_not_called()
+        reconcile.assert_not_called()
+        checker._cross_verify_secondary.assert_not_called()
+        assert url == arxiv_url
+        assert data['_matched_checker'] == 'arxiv_citation'
+        assert data['externalIds']['DOI'] == arxiv_doi
+        assert data['year'] == 2015
+        assert [issue['error_type'] for issue in issues] == ['unverified']
+        assert doi in issues[0]['error_details'] and 'preprint' in issues[0]['error_details'].lower()
+        assert not any('ref_year_correct' in issue or 'ref_doi_correct' in issue for issue in issues)
