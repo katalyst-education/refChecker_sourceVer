@@ -46,8 +46,10 @@ History:
    13 - compare the cited book edition and its publication dates.
    14 - preserve cited publication/preprint versions and guard cached verdicts.
    15 - accept years confirmed by the arXiv submission history.
+   17 - preserve bare numeric BibTeX fields; explicit cited years must not
+        disappear or be replaced by an inferred preprint year.
 """
 
-VERIFICATION_LOGIC_VERSION = 15
+VERIFICATION_LOGIC_VERSION = 17
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]
