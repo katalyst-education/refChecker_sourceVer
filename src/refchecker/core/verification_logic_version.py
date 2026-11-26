@@ -46,8 +46,9 @@ History:
    13 - compare the cited book edition and its publication dates.
    14 - preserve cited publication/preprint versions and guard cached verdicts.
    15 - accept years confirmed by the arXiv submission history.
+   16 - verify DataCite DOIs and recognize Unicode author-list ellipses.
 """
 
-VERIFICATION_LOGIC_VERSION = 15
+VERIFICATION_LOGIC_VERSION = 16
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]
