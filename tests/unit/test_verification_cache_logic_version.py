@@ -70,6 +70,10 @@ class TestCachedResultIsCurrent:
     def test_older_version_is_stale(self):
         assert not cached_result_is_current({'logic_version': VERIFICATION_LOGIC_VERSION - 1})
 
+    def test_pre_arxiv_revision_year_verdict_is_stale(self):
+        # Version 14 could warn about a year confirmed by the arXiv history.
+        assert not cached_result_is_current({'logic_version': 14})
+
     def test_current_version_is_fresh(self):
         assert cached_result_is_current({'logic_version': VERIFICATION_LOGIC_VERSION})
 
