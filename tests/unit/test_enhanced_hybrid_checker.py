@@ -1306,6 +1306,8 @@ def test_publication_doi_takes_priority_over_ancillary_arxiv_url(doi_field, arxi
 @pytest.mark.parametrize('publication_status', [
     'missing', 'timeout', 'exact', 'retry_exact', 'retry_with_candidate', 'other_doi',
     'arxiv_failure', 'web_copy', 'disabled',
+    'datacite_exact', 'datacite_candidate', 'datacite_local', 'datacite_retry', 'datacite_mixed_year',
+    'datacite_miss', 'datacite_failure', 'datacite_and_arxiv_failure',
 ])
 def test_known_arxiv_copy_is_only_preprint_evidence(force_all_databases, publication_status):
     from refchecker.checkers.arxiv_citation import ArXivCitationChecker
@@ -1319,7 +1321,8 @@ def test_known_arxiv_copy_is_only_preprint_evidence(force_all_databases, publica
     arxiv = ArXivCitationChecker()
     checker.arxiv_citation = arxiv if publication_status != 'disabled' else None
     title = 'Deep Residual Learning for Image Recognition'
-    doi = '10.1109/cvpr.2016.90'
+    uses_datacite = publication_status.startswith('datacite_')
+    doi = '10.5281/zenodo.123' if uses_datacite else '10.1109/cvpr.2016.90'
     arxiv_url = 'https://arxiv.org/abs/1512.03385'
     arxiv_doi = '10.48550/arXiv.1512.03385'
     reference = {'title': title, 'authors': ['Kaiming He'], 'year': 2016,
@@ -1330,6 +1333,31 @@ def test_known_arxiv_copy_is_only_preprint_evidence(force_all_databases, publica
     }
     bibtex = f"""@misc{{he2015, title={{{title}}}, author={{Kaiming He}},
                      year={{2015}}, eprint={{1512.03385}}, doi={{{arxiv_doi}}}}}"""
+    datacite_lookup = None
+    if uses_datacite:
+        from refchecker.checkers.datacite import DataCiteChecker
+        checker.datacite = DataCiteChecker()
+        datacite_lookup = Mock(return_value={
+            'titles': [{'title': title}], 'creators': [{'name': 'Kaiming He'}],
+            'publicationYear': 2016, 'url': 'https://example.org/publication',
+        })
+        checker.datacite.get_work_by_doi = datacite_lookup
+        if publication_status == 'datacite_miss':
+            datacite_lookup.return_value = None
+        elif publication_status in {'datacite_failure', 'datacite_and_arxiv_failure'}:
+            datacite_lookup.side_effect = requests.Timeout('DataCite timed out')
+        candidate = ({'title': title, 'authors': [{'name': 'Kaiming He'}], 'year': 2016},
+                     [], 'https://example.org/paper')
+        if publication_status == 'datacite_local':
+            checker.local_db = Mock(database_label='Semantic Scholar')
+            checker.local_db.verify_reference.return_value = candidate
+        elif publication_status in {'datacite_candidate', 'datacite_retry', 'datacite_mixed_year'}:
+            if publication_status == 'datacite_mixed_year':
+                candidate[0].update(doi=doi, year=2015)  # Aggregate record combining both versions.
+            checker.semantic_scholar = Mock(spec=['verify_reference'])
+            checker.semantic_scholar.verify_reference.return_value = candidate
+            if publication_status == 'datacite_retry':
+                checker.semantic_scholar.verify_reference.side_effect = [requests.Timeout(), candidate]
     if publication_status == 'retry_with_candidate':
         checker.semantic_scholar = Mock(spec=['verify_reference'])
         checker.semantic_scholar.verify_reference.return_value = (
@@ -1359,21 +1387,41 @@ def test_known_arxiv_copy_is_only_preprint_evidence(force_all_databases, publica
             lookup.side_effect = [requests.exceptions.Timeout('Crossref timed out'), work]
         elif publication_status == 'web_copy':
             webpage.return_value = ({'title': title, 'year': 2016, '_source': 'Web Page'}, [], arxiv_url)
+        if datacite_lookup is not None:
+            def fetch_preprint(arxiv_id):
+                datacite_lookup.assert_called_once_with(doi)
+                return None if publication_status == 'datacite_and_arxiv_failure' else bibtex
+            fetch.side_effect = fetch_preprint
+        if publication_status == 'datacite_local':
+            checker.crossref = None  # Local match must not bypass DataCite without Crossref.
         data, issues, url = checker.verify_reference(reference, force_all_databases=force_all_databases)
 
+    if datacite_lookup is not None:
+        datacite_lookup.assert_called_once_with(doi)
+    if publication_status in {'datacite_exact', 'datacite_candidate', 'datacite_local',
+                              'datacite_retry', 'datacite_mixed_year'}:
+        fetch.assert_not_called()
+        assert (data['_matched_checker'], data['doi'], data['year'], url) == (
+            'datacite', doi, 2016, 'https://example.org/publication',
+        )
+        assert issues == []
+        return
     if publication_status in {'exact', 'retry_exact', 'retry_with_candidate'}:
         assert lookup.call_count == (1 if publication_status == 'exact' else 2)
         fetch.assert_not_called()
         assert data['_matched_checker'] == 'crossref'
         assert data['year'] == 2016
         assert issues == []
-    elif publication_status in {'arxiv_failure', 'web_copy', 'disabled'}:
+    elif publication_status in {'arxiv_failure', 'web_copy', 'disabled', 'datacite_and_arxiv_failure'}:
         webpage.assert_called_once()
         assert data is None
         assert issues[0]['error_type'] == 'unverified'
-        if publication_status in {'arxiv_failure', 'web_copy'}:
+        if publication_status != 'disabled':
             fetch.assert_called_once_with('1512.03385')
             assert issues[0]['verification_reason'] == 'provider_failure'
+            if publication_status == 'datacite_and_arxiv_failure':
+                assert 'DataCite' in issues[0]['error_details']
+                assert 'ArXiv' in issues[0]['error_details']
         else:
             fetch.assert_not_called()
             assert issues[0]['verification_reason'] == 'no_match'
@@ -1389,3 +1437,143 @@ def test_known_arxiv_copy_is_only_preprint_evidence(force_all_databases, publica
         assert [issue['error_type'] for issue in issues] == ['unverified']
         assert doi in issues[0]['error_details'] and 'preprint' in issues[0]['error_details'].lower()
         assert not any('ref_year_correct' in issue or 'ref_doi_correct' in issue for issue in issues)
+
+
+@pytest.mark.parametrize('media', ['html', 'pdf'])
+@pytest.mark.parametrize('arxiv_redirect', [False, True])
+def test_web_redirect_does_not_verify_publication_with_arxiv_copy(monkeypatch, media, arxiv_redirect):
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker.crossref = None
+    checker._cross_verify_secondary = Mock()
+    title = 'An example publication'
+    url = 'https://doi.org/10.1000/publisher'
+    response = requests.Response()
+    response.status_code = 200
+    response.url = url if not arxiv_redirect else (
+        'https://arxiv.org/abs/1512.03385' if media == 'html' else 'https://arxiv.org/pdf/1512.03385'
+    )
+    response.headers['Content-Type'] = 'text/html' if media == 'html' else 'application/pdf'
+    response._content = f'<html><title>{title}</title><body>{title}</body></html>'.encode() if media == 'html' else b'%PDF-1.7'
+    fetch = Mock(return_value=response)
+    monkeypatch.setattr(WebPageChecker, '_respectful_request', fetch)
+    data, issues, checked_url = checker.verify_reference({'title': title, 'url': url})
+
+    fetch.assert_called_once_with(url)
+    assert checked_url == url
+    if arxiv_redirect:
+        assert data is None
+        assert issues[0]['error_type'] == 'unverified'
+    else:
+        assert data is not None
+        assert issues == []
+
+
+@pytest.mark.parametrize('force_all_databases', [False, True])
+def test_datacite_is_a_doi_gated_fallback(force_all_databases):
+    checker = _build_checker()
+    checker.crossref = NoMatchChecker()
+    data = {'title': 'Archived dataset', 'doi': '10.5281/zenodo.123', 'authors': ['Ada Author']}
+    url = 'https://zenodo.org/records/123'
+    checker.datacite = Mock(database_label='DataCite')
+    checker.datacite.verify_reference.return_value = (data, [], url)
+    reference = {'title': data['title'], 'DOI': ' DOI:10.5281/ZENODO.123 '}
+
+    verified, errors, verified_url = checker.verify_reference(reference, force_all_databases)
+
+    assert verified['_matched_database'] == 'DataCite'
+    assert verified['_matched_checker'] == 'datacite'
+    assert errors == []
+    assert verified_url == url
+    assert checker.datacite.verify_reference.call_args.args[0]['doi'] == data['doi']
+    checker.datacite.reset_mock()
+    _, errors, _ = checker.verify_reference({'title': 'No DOI'}, force_all_databases)
+    checker.datacite.verify_reference.assert_not_called()
+    assert errors[0]['sources_negative'] == 2
+
+
+@pytest.mark.parametrize('total_outage', [False, True])
+def test_doi_only_preserves_provider_failure_without_web_verification(monkeypatch, total_outage):
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    if total_outage:
+        checker.semantic_scholar = TimeoutChecker()
+    checker.crossref = None
+    checker.datacite = TimeoutChecker()
+    monkeypatch.setattr(checker, '_wait_or_cancel', Mock())
+    web_check = Mock(side_effect=AssertionError('no cited URL to verify'))
+    monkeypatch.setattr(WebPageChecker, 'verify_raw_url_for_unverified_reference', web_check)
+    reference = {'title': 'Archived dataset', 'doi': '10.5281/data'}
+
+    data, errors, url = checker.verify_reference(reference)
+
+    assert data is None
+    assert url is None
+    web_check.assert_not_called()
+    assert reference == {'title': 'Archived dataset', 'doi': '10.5281/data'}
+    assert len(errors) == 1
+    finding = errors[0]
+    assert finding['verification_reason'] == 'provider_failure'
+    assert 'DataCite' in finding['error_details']
+    assert finding['sources_checked'] == 2
+    assert finding['sources_negative'] == (0 if total_outage else 1)
+    if total_outage:
+        assert finding['error_details'].startswith('All available checkers failed:')
+
+
+@pytest.mark.parametrize('status,body,reason', [
+    (404, b'', 'no_match'),
+    (429, b'', 'provider_failure'),
+    (503, b'', 'provider_failure'),
+    (200, b'not JSON', 'provider_failure'),
+    (200, b'{}', 'provider_failure'),
+])
+def test_datacite_http_and_json_failure_reporting(monkeypatch, status, body, reason):
+    from refchecker.checkers.datacite import DataCiteChecker
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker.crossref = None
+    checker.datacite = DataCiteChecker()
+    response = requests.Response()
+    response.status_code = status
+    response._content = body
+    get = Mock(return_value=response)
+    monkeypatch.setattr(checker.datacite.session, 'get', get)
+    web_check = Mock(side_effect=AssertionError('no cited URL to verify'))
+    monkeypatch.setattr(WebPageChecker, 'verify_raw_url_for_unverified_reference', web_check)
+
+    data, errors, url = checker.verify_reference({'title': 'Archived dataset', 'doi': '10.5281/data'})
+
+    assert data is None
+    assert url is None
+    assert len(errors) == 1
+    assert errors[0]['verification_reason'] == reason
+    assert errors[0]['sources_checked'] == 2
+    assert errors[0]['sources_negative'] == (2 if status == 404 else 1)
+    get.assert_called_once_with(
+        'https://api.datacite.org/dois/10.5281/data',
+        timeout=checker.datacite.timeout, allow_redirects=False,
+    )
+    web_check.assert_not_called()
+
+
+def test_datacite_cannot_displace_a_successful_local_lookup(monkeypatch):
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker.local_db = Mock(database_label='Semantic Scholar')
+    checker.datacite = Mock()
+    request = Mock()
+    monkeypatch.setattr(WebPageChecker, 'verify_raw_url_for_unverified_reference', request)
+    reference = {'title': 'Archived dataset', 'authors': ['Ada Author'], 'year': 2024, 'doi': '10.5281/data'}
+    checker.local_db.verify_reference.return_value = (dict(reference), [], 'https://example.org/dataset')
+
+    data, errors, _ = checker.verify_reference(reference)
+
+    assert data['_matched_checker'] == 'local_s2'
+    assert errors == []
+    checker.datacite.verify_reference.assert_not_called()
+    request.assert_not_called()

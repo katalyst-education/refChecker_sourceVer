@@ -46,6 +46,9 @@ History:
    13 - compare the cited book edition and its publication dates.
    14 - preserve cited publication/preprint versions and guard cached verdicts.
    15 - accept years confirmed by the arXiv submission history.
+   16 - verify DataCite DOIs and recognize Unicode author-list ellipses.
+   17 - preserve bare numeric BibTeX fields; explicit cited years must not
+        disappear or be replaced by an inferred preprint year.
    18 - report a known arXiv copy as preprint evidence when the publication DOI is unverified.
 """
 

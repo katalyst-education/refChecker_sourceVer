@@ -78,6 +78,27 @@ def test_projection_keeps_source_and_cited_metadata_when_display_uses_verified_d
     assert result["extraction_provenance"]["pdf_page"] == 5
 
 
+def test_preprint_fallback_does_not_replace_publication_identity_from_doi_url():
+    publication_doi = "10.1109/cvpr.2016.90"
+    arxiv_url = "https://arxiv.org/abs/1512.03385"
+    reference = dict(_reference(), url=f"https://doi.org/{publication_doi}", cited_url=arxiv_url)
+    reference.pop("doi")
+    evidence = {
+        "title": reference["title"], "year": 2015, "url": arxiv_url,
+        "_verification_basis": "arxiv_preprint_fallback",
+        "externalIds": {"DOI": "10.48550/arxiv.1512.03385", "ArXiv": "1512.03385"},
+    }
+    result = project_verification_result(reference, evidence, [{
+        "error_type": "unverified", "error_details": "Only the preprint was checked",
+    }], arxiv_url, enrich_enabled=True)
+
+    assert result["status"] == "unverified"
+    assert result["doi"] == publication_doi
+    assert not result["arxiv_id"]
+    assert "verified_year" not in result
+    assert result["supporting_evidence"]["url"] == arxiv_url
+
+
 def test_resolved_catalogue_metadata_conflict_is_informational():
     result = project_verification_result(
         _reference(), _verified(), [{

@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from backend.reference_status import classify_verification_result
 from backend.reference_urls import build_authoritative_urls
+from refchecker.utils.doi_utils import extract_cited_doi
 from refchecker.utils.error_utils import is_author_list_membership_mismatch
 from refchecker.utils.reference_metadata import CITED_REFERENCE_FIELDS, REFERENCE_SOURCE_FIELDS
 from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
@@ -243,7 +244,9 @@ def project_verification_result(
         cited, verified_data, None if access_prevented_verification else verified_url, status=status,
         verified_via_webpage=verified_via_webpage,
     )
-    enrichment = _build_enrichment(cited, verified_data, enabled=enrich_enabled)
+    verified = verified_data if isinstance(verified_data, dict) else {}
+    is_preprint_evidence = verified.get("_verification_basis") == "arxiv_preprint_fallback"
+    enrichment = _build_enrichment(cited, verified_data, enabled=enrich_enabled and not is_preprint_evidence)
 
     display_authors = None
     try:
@@ -254,14 +257,16 @@ def project_verification_result(
     except Exception as exc:
         logger.debug("author recovery failed: %s", exc)
 
-    verified = verified_data if isinstance(verified_data, dict) else {}
-    external_ids = verified.get("externalIds") or {}
-    cited_doi = cited.get("doi") or cited.get("verified_doi") or ""
+    external_ids = {} if is_preprint_evidence else verified.get("externalIds") or {}
+    cited_doi = extract_cited_doi(cited) or cited.get("doi") or (
+        "" if is_preprint_evidence else cited.get("verified_doi") or ""
+    )
+    identity_data = {} if is_preprint_evidence else verified
     cited_arxiv = cited.get("arxiv_id") or cited.get("verified_arxiv_id") or ""
     cited_pmid = cited.get("pmid") or cited.get("verified_pmid") or ""
-    doi = str(cited_doi).strip().lower() or str(external_ids.get("DOI") or verified.get("doi") or "").strip().lower()
-    arxiv_id = str(cited_arxiv).strip().lower() or str(external_ids.get("ArXiv") or verified.get("arxiv_id") or "").strip().lower()
-    pmid = str(cited_pmid).strip() or str(external_ids.get("PubMed") or verified.get("pmid") or "").strip()
+    doi = str(cited_doi).strip().lower() or str(external_ids.get("DOI") or identity_data.get("doi") or "").strip().lower()
+    arxiv_id = str(cited_arxiv).strip().lower() or str(external_ids.get("ArXiv") or identity_data.get("arxiv_id") or "").strip().lower()
+    pmid = str(cited_pmid).strip() or str(external_ids.get("PubMed") or identity_data.get("pmid") or "").strip()
 
     result: Dict[str, Any] = {
         **project_cited_evidence(cited),
@@ -305,15 +310,23 @@ def project_verification_result(
         "citation_context": cited.get("citation_context"),
         "citation_count": cited.get("citation_count") or 0,
     }
+    if is_preprint_evidence:
+        result["supporting_evidence"] = {
+            "source": verified.get("_matched_database") or "ArXiv",
+            "url": verified_url,
+            "title": verified.get("title"),
+            "id": (verified.get("externalIds") or {}).get("ArXiv"),
+        }
+
     for source_key, destination_key in (
         ("title", "verified_title"), ("authors", "verified_authors"),
         ("year", "verified_year"), ("venue", "verified_venue"),
         ("doi", "verified_doi"), ("arxiv_id", "verified_arxiv_id"),
     ):
-        if verified.get(source_key):
-            result[destination_key] = verified[source_key]
+        if identity_data.get(source_key):
+            result[destination_key] = identity_data[source_key]
 
-    candidate = derive_corrected_reference(cited, findings, verified)
+    candidate = None if is_preprint_evidence else derive_corrected_reference(cited, findings, verified)
     if candidate:
         result["corrected_reference"] = candidate
 
