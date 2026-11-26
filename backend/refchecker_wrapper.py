@@ -3505,7 +3505,7 @@ class ProgressRefChecker:
             # Two layers: strict identity match first (DOI / arXiv /
             # normalized title+year keyed), then a v0.7.48 fuzzy match
             # that catches re-cited papers with minor formatting drift
-            # (typo in title, year off by one, comma/period in authors)
+            # (typo in title, comma/period in authors; the year must match)
             # — drops LLM + Crossref + S2 traffic on batches that cite
             # the same seminal papers across many documents.
             try:

@@ -44,8 +44,9 @@ History:
    11 - inspect access screens before trusting redirected HTML or PDF responses.
    12 - verify structured journal locators during Crossref search fallback.
    13 - compare the cited book edition and its publication dates.
+   14 - preserve cited publication/preprint versions and guard cached verdicts.
 """
 
-VERIFICATION_LOGIC_VERSION = 13
+VERIFICATION_LOGIC_VERSION = 14
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

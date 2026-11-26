@@ -1115,3 +1115,188 @@ def test_complete_local_db_miss_skips_semantic_scholar():
     checker.verify_reference({"title": "Some uningested paper", "authors": []})
 
     assert recorder.calls == 0
+
+
+@pytest.mark.parametrize('doi_field', ['doi', 'url', 'cited_url'])
+@pytest.mark.parametrize('crossref_status', ['match', 'incomplete', 'miss', 'disabled'])
+def test_publication_doi_precedes_local_merged_preprint(doi_field, crossref_status):
+    from refchecker.checkers.crossref import CrossRefReferenceChecker
+
+    checker = _build_checker()
+    checker._cross_verify_secondary = Mock()
+    doi = '10.1109/cvpr.2016.90'
+    title = 'Deep Residual Learning for Image Recognition'
+    doi_url = f'https://doi.org/{doi}'
+    local = Mock(spec=['verify_reference'])
+    local.verify_reference.return_value = ({
+        'title': title, 'authors': [{'name': 'Kaiming He'}], 'year': 2015,
+        'venue': 'IEEE Conference on Computer Vision and Pattern Recognition',
+        'externalIds': {'DOI': doi, 'ArXiv': '1512.03385'},
+    }, [], doi_url)
+    checker.local_db_checkers = [('local_s2', 'Semantic Scholar', local)]
+    crossref = CrossRefReferenceChecker()
+    crossref_work = {
+        'DOI': doi, 'title': title, 'author': [{'given': 'Kaiming', 'family': 'He'}],
+        'issued': {'date-parts': [[2016]]}, 'URL': doi_url,
+    }
+    if crossref_status == 'incomplete':
+        crossref_work.pop('author')
+    checker.crossref = None if crossref_status == 'disabled' else crossref
+    reference = {'title': title, 'authors': ['Kaiming He'], 'year': 2015,
+                 doi_field: doi if doi_field == 'doi' else doi_url}
+
+    work = crossref_work if crossref_status in ('match', 'incomplete') else None
+    with (
+        patch.object(crossref, 'get_work_by_doi', return_value=work) as lookup,
+        patch.object(crossref, 'search_works', return_value=[]),
+        patch.object(crossref, 'search_works_bibliographic', return_value=[]),
+        patch('refchecker.utils.publication_years.reconcile_publication_year') as reconcile,
+    ):
+        data, errors, _ = checker.verify_reference(reference)
+
+    if crossref_status == 'disabled':
+        lookup.assert_not_called()
+    else:
+        lookup.assert_called_once_with(doi)
+    reconcile.assert_not_called()
+    assert data['_matched_checker'] == ('crossref' if crossref_status == 'match' else 'local_s2')
+    assert [issue['ref_year_correct'] for issue in errors if issue.get('warning_type') == 'year'] == (
+        [2016] if crossref_status == 'match' else []
+    )
+
+
+@pytest.mark.parametrize('arxiv_doi, locator', [
+    ('10.48550/arXiv.1512.03385', 'doi'), ('10.48550/arXiv.1512.03385', 'url'), (None, 'url'),
+])
+def test_explicit_arxiv_enrichment_preserves_version_metadata(arxiv_doi, locator):
+    from refchecker.checkers.arxiv_citation import ArXivCitationChecker
+
+    checker = _build_checker()
+    checker._cross_verify_secondary = Mock()
+    title = 'Deep Residual Learning for Image Recognition'
+    arxiv_url = 'https://arxiv.org/abs/1512.03385'
+    authors = [{'name': 'Kaiming He'}]
+    arxiv_ids = {'ArXiv': '1512.03385'}
+    if arxiv_doi:
+        arxiv_ids['DOI'] = arxiv_doi
+    arxiv = ArXivCitationChecker()
+    arxiv.verify_reference = Mock(return_value=({
+        'title': title, 'authors': authors, 'year': 2015, 'venue': 'arXiv', 'externalIds': arxiv_ids,
+    }, [], arxiv_url))
+    checker.arxiv_citation = arxiv
+    s2_url = 'https://www.semanticscholar.org/paper/s2-id'
+    s2 = Mock(spec=['verify_reference', 'get_venue_from_paper_data'])
+    publication_venue = 'IEEE Conference on Computer Vision and Pattern Recognition'
+    s2.get_venue_from_paper_data.return_value = publication_venue
+    s2.verify_reference.return_value = ({
+        'title': title, 'authors': authors, 'year': 2016, 'venue': publication_venue,
+        'paperId': 's2-id', 'externalIds': {'DOI': '10.1109/cvpr.2016.90'},
+    }, [], s2_url)
+    checker.semantic_scholar = s2
+
+    data, errors, url = checker.verify_reference({
+        'title': title, 'authors': ['Kaiming He'], 'venue': 'arXiv', 'year': 2015,
+        locator: arxiv_doi if locator == 'doi' else arxiv_url,
+    })
+
+    arxiv.verify_reference.assert_called_once()
+    assert url == arxiv_url
+    assert data['year'] == 2015
+    assert data['venue'] == 'arXiv'
+    assert data['externalIds'].get('DOI') == arxiv_doi
+    if locator == 'doi':
+        assert 'S2PaperId' not in data['externalIds']  # conflicting publication DOI
+    else:
+        assert data['externalIds']['S2PaperId'] == 's2-id'
+        assert data['_semantic_scholar_url'] == s2_url
+    assert 'S2PaperId' not in arxiv_ids
+    assert errors == []
+
+
+@pytest.mark.parametrize('cited_year, expected_warnings', [(2015, [2016]), (2016, []), (2017, [])])
+def test_search_all_keeps_exact_publication_doi_year(cited_year, expected_warnings):
+    from refchecker.checkers.crossref import CrossRefReferenceChecker
+
+    checker = _build_checker()
+    checker._cross_verify_secondary = Mock()
+    doi = '10.1109/cvpr.2016.90'
+    url = f'https://doi.org/{doi}'
+    title = 'Deep Residual Learning for Image Recognition'
+    preprint_year = 2016 if cited_year == 2017 else 2015
+    local = Mock(spec=['verify_reference'])
+    local.verify_reference.return_value = ({
+        'title': title, 'authors': [{'name': 'Kaiming He'}], 'year': preprint_year,
+        'externalIds': {'DOI': doi, 'ArXiv': '1512.03385'},
+    }, [], url)
+    checker.local_db_checkers = [('local_s2', 'Semantic Scholar', local)]
+    checker.semantic_scholar = Mock(spec=['verify_reference'])
+    checker.semantic_scholar.verify_reference.return_value = (None, [], None)
+    checker.google_books = Mock(spec=['verify_reference'])
+    checker.google_books.verify_reference.return_value = (None, [], None)
+    checker.crossref = CrossRefReferenceChecker()
+    work = {
+        'DOI': doi, 'title': title, 'author': [{'given': 'Kaiming', 'family': 'He'}],
+        'published-print': {'date-parts': [[2016]]}, 'published-online': {'date-parts': [[2017]]},
+        'URL': url,
+    }
+    reference = {'title': title, 'authors': ['Kaiming He'], 'year': cited_year, 'doi': doi}
+
+    with (
+        patch.object(checker.crossref, 'get_work_by_doi', return_value=work) as lookup,
+        patch('refchecker.utils.publication_years.reconcile_publication_year') as reconcile,
+    ):
+        data, issues, result_url = checker.verify_reference(reference, force_all_databases=True)
+
+    lookup.assert_called_once_with(doi)
+    local.verify_reference.assert_called_once()
+    checker.semantic_scholar.verify_reference.assert_called_once()
+    checker.google_books.verify_reference.assert_called_once()
+    reconcile.assert_not_called()
+    assert result_url == url
+    assert data['_matched_checker'] == 'crossref'
+    assert data['year'] == 2016
+    assert [issue['ref_year_correct'] for issue in issues if issue.get('warning_type') == 'year'] == expected_warnings
+    assert all(issue.get('info_type') != 'publication_year_discrepancy' for issue in issues)
+
+
+@pytest.mark.parametrize('force_all_databases', [False, True])
+@pytest.mark.parametrize('doi_field, arxiv_field', [('doi', 'url'), ('cited_url', 'url'), ('url', 'cited_url')])
+def test_publication_doi_takes_priority_over_ancillary_arxiv_url(doi_field, arxiv_field, force_all_databases):
+    from refchecker.checkers.arxiv_citation import ArXivCitationChecker
+    from refchecker.checkers.crossref import CrossRefReferenceChecker
+
+    checker = _build_checker()
+    checker._cross_verify_secondary = Mock()
+    doi = '10.1109/cvpr.2016.90'
+    doi_url = f'https://doi.org/{doi}'
+    arxiv_url = 'https://arxiv.org/abs/1512.03385'
+    title = 'Deep Residual Learning for Image Recognition'
+    checker.crossref = CrossRefReferenceChecker()
+    checker.arxiv_citation = ArXivCitationChecker()
+    work = {
+        'DOI': doi, 'title': title, 'author': [{'given': 'Kaiming', 'family': 'He'}],
+        'issued': {'date-parts': [[2016]]}, 'URL': doi_url,
+    }
+    # ArXiv version reporting must not replace the publication during shared postprocessing either.
+    arxiv_result = ({
+        'title': title, 'authors': [{'name': 'Kaiming He'}], 'year': 2015,
+        'externalIds': {'ArXiv': '1512.03385'},
+    }, [{'warning_type': 'year (version update)'}], arxiv_url)
+    reference = {
+        'title': title, 'authors': ['Kaiming He'], 'year': 2015,
+        doi_field: doi if doi_field == 'doi' else doi_url, arxiv_field: arxiv_url,
+    }
+    assert checker.arxiv_citation.is_arxiv_reference(reference)
+
+    with (
+        patch.object(checker.crossref, 'get_work_by_doi', return_value=work) as lookup,
+        patch.object(checker.arxiv_citation, 'verify_reference', return_value=arxiv_result),
+        patch('refchecker.utils.publication_years.reconcile_publication_year'),
+    ):
+        data, issues, url = checker.verify_reference(reference, force_all_databases=force_all_databases)
+
+    lookup.assert_called_once_with(doi)
+    assert url == doi_url
+    assert data['_matched_checker'] == 'crossref'
+    assert data['year'] == 2016
+    assert [issue['ref_year_correct'] for issue in issues if issue.get('warning_type') == 'year'] == [2016]

@@ -3194,8 +3194,63 @@ class Database:
             await db.commit()
         return ident
 
-    async def lookup_verified_reference(self, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Return the cached identity record for a reference, or None."""
+    @staticmethod
+    def _cited_fields(ref: Dict[str, Any]) -> Dict[str, Any]:
+        cited = ref.get("cited_metadata")
+        return cited if isinstance(cited, dict) else ref
+
+    @staticmethod
+    def _decode_cached_result(row: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            result = json.loads(row.get("result_json") or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    @classmethod
+    def _cached_citation_year_matches(cls, ref: Dict[str, Any], result: Dict[str, Any]) -> bool:
+        # A snapshot lacking a year means the citation did not give one;
+        # do not fill that gap from an enriched result's year.
+        return len({
+            str(item.get("year") or "").strip()
+            for item in (ref, cls._cited_fields(result), result)
+        }) == 1
+
+    @staticmethod
+    def _citation_doi(cited: Dict[str, Any]) -> str:
+        from refchecker.utils.doi_utils import extract_doi_from_url, normalize_doi
+
+        for field in ("doi", "DOI"):
+            if doi := normalize_doi(str(cited.get(field) or "").strip().lower()):
+                return doi
+        for field in ("cited_url", "url"):
+            if doi := extract_doi_from_url(str(cited.get(field) or "").strip().lower()):
+                return normalize_doi(doi)
+        return ""
+
+    @classmethod
+    def _citation_version_kind(cls, cited: Dict[str, Any]) -> Optional[str]:
+        from refchecker.utils.url_utils import extract_arxiv_id_from_url
+
+        doi = cls._citation_doi(cited)
+        urls = [str(cited.get(field) or "").strip().lower() for field in ("cited_url", "url")]
+        if doi.startswith("10.48550/arxiv."):
+            return "arxiv"
+        # Published works can also have an arXiv ID; a cited publication
+        # DOI takes priority over that secondary identifier.
+        if doi.startswith("10.") and "/" in doi:
+            return "publication"
+        if cited.get("arxiv_id") or any(extract_arxiv_id_from_url(url) for url in urls if url):
+            return "arxiv"
+        if any(
+            str(cited.get(field) or "").strip().lower() in {"arxiv", "arxiv.org", "arxiv preprint"}
+            for field in ("venue", "journal")
+        ):
+            return "arxiv"
+        return None
+
+    async def lookup_reference_identity(self, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Read a Seen Refs identity, independent of verdict replay eligibility."""
         ident = self.reference_identity_key(ref)
         if not ident:
             return None
@@ -3206,18 +3261,22 @@ class Database:
                 (ident,),
             )
             row = await cursor.fetchone()
-            if row is None:
-                return None
-            if not cached_result_is_current(row):
-                # Produced by superseded checking logic — re-verify instead of
-                # replaying a verdict that known fixes have since changed.
-                return None
-            data = dict(row)
-            try:
-                data["result"] = json.loads(data.get("result_json") or "{}")
-            except Exception:
-                data["result"] = {}
-            return data
+            return dict(row) if row is not None else None
+
+    async def lookup_verified_reference(self, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return an exact identity hit only if its citation verdict can be replayed."""
+        data = await self.lookup_reference_identity(ref)
+        if not data or not cached_result_is_current(data):
+            return None
+        result = self._decode_cached_result(data)
+        if not result or not self._cached_citation_year_matches(ref, result):
+            return None
+        ref_kind = self._citation_version_kind(self._cited_fields(ref))
+        cached_kind = self._citation_version_kind(self._cited_fields(result))
+        if ref_kind and cached_kind and ref_kind != cached_kind:
+            return None
+        data["result"] = result
+        return data
 
     async def find_verified_by_fuzzy(self, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Pre-LLM fuzzy cache lookup against Seen-Refs.
@@ -3228,7 +3287,7 @@ class Database:
         looser lookup hits when:
           - normalized-title prefix (60 chars) matches a cached entry
           - first-author surname matches that entry
-          - year is identical OR within ±1
+          - cited and cached years agree and versions do not conflict
 
         Returns the cached entry's full row + its `result` JSON so the
         caller can short-circuit the LLM and network checks entirely.
@@ -3260,21 +3319,12 @@ class Database:
         # Longer prefix on long medical titles — 60 chars collide for
         # NEJM/Lancet review titles that share the first sentence.
         prefix = norm[:80] if len(norm) >= 100 else norm[:60]
-        ref_authors = ref.get("authors") or []
-        if isinstance(ref_authors, list):
-            ref_authors_str = ", ".join(a for a in ref_authors if a)
-        else:
-            ref_authors_str = str(ref_authors or "")
-        # First-author surname extractor — same logic as cross_check
-        def _first_surname(s: str) -> str:
-            s = (s or "").split(",")[0].split(";")[0].strip()
-            parts = s.split()
-            return parts[-1].lower() if parts else ""
-        ref_surname = _first_surname(ref_authors_str)
-        try:
-            ref_year = int(ref.get("year")) if ref.get("year") else None
-        except Exception:
-            ref_year = None
+        from refchecker.utils.doi_utils import normalize_doi
+
+        ref_surname = self._first_author_surname(self._author_names(ref.get("authors")))
+        cited = self._cited_fields(ref)
+        ref_doi = self._citation_doi(cited)
+        ref_kind = self._citation_version_kind(cited)
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout=5000")
@@ -3293,65 +3343,41 @@ class Database:
                 rows = await cursor.fetchall()
         except Exception:
             return None
-        # Pick the BEST candidate. Score by year match + author surname
-        # match, prefer entries with verified status.
         best = None
         best_score = 0
         for r in rows:
             if not cached_result_is_current(r):
-                # Superseded checking logic — don't let a stale verdict
-                # short-circuit verification.
                 continue
-            cached_surname = _first_surname(r["authors"] or "")
-            try:
-                cached_year = int(r["year"]) if r["year"] else None
-            except Exception:
-                cached_year = None
-            # Author surname must match — too risky to accept a fuzzy
-            # title with a totally different first author.
-            if not cached_surname or not ref_surname or cached_surname != ref_surname:
+            cached_surname = self._first_author_surname(self._author_names(r["authors"]))
+            if not ref_surname or cached_surname != ref_surname:
                 continue
-            # v0.7.55 (per ML review): DOI mismatch guard. If both
-            # sides have a DOI, they MUST agree, otherwise we'd accept
-            # a different paper with the same surname + year + title
-            # prefix (the Round 2 example: 10.X/abc vs 10.X/xyz).
-            cached_doi_raw = (r["doi"] or "").strip().lower()
-            if cached_doi_raw and ref_doi and cached_doi_raw != ref_doi:
+            data = dict(r)
+            result = self._decode_cached_result(data)
+            if not result or not self._cached_citation_year_matches(ref, result):
                 continue
-            score = 1
-            # Year exact match is the strongest signal; ±1 is acceptable
-            # for accepted-vs-published year drift.
-            if cached_year is not None and ref_year is not None:
-                if cached_year == ref_year:
-                    score += 2
-                elif abs(cached_year - ref_year) == 1:
-                    score += 1
-                else:
-                    # Year is way off — likely a different paper with
-                    # similar title (review of the same topic, etc.).
-                    continue
-            elif cached_year != ref_year:
-                # One side has year, the other doesn't — accept with
-                # lower confidence but only when there's a DOI or arXiv
-                # on the cached side to anchor the identity.
-                if not (r["doi"] or r["arxiv_id"]):
-                    continue
-            # Verified status > unverified status in the tiebreak.
-            if r["status"] == "verified":
-                score += 1
+            cached_cited = self._cited_fields(result)
+            # The identity key can contain a verified DOI even when the
+            # DOI column is empty. Some older rows only have a resolver URL.
+            identity_key = r["identity_key"] or ""
+            cached_doi = (
+                normalize_doi(str(r["doi"] or "").strip().lower())
+                or (normalize_doi(identity_key[4:]) if identity_key.startswith("doi:") else "")
+                or self._citation_doi(cached_cited)
+            )
+            if cached_doi and ref_doi and cached_doi != ref_doi:
+                continue
+            cached_kind = self._citation_version_kind(cached_cited)
+            if ref_kind and cached_kind and ref_kind != cached_kind:
+                continue
+            # Score only replay-eligible rows; prefer a verified entry.
+            score = 1 + (2 if r["year"] is not None else 0) + (r["status"] == "verified")
             if score > best_score:
-                best = r
+                data.pop("result_json", None)
+                data["result"] = result
+                data["_fuzzy_match_score"] = score
+                best = data
                 best_score = score
-        if best is None:
-            return None
-        data = dict(best)
-        try:
-            data["result"] = json.loads(data.get("result_json") or "{}")
-        except Exception:
-            data["result"] = {}
-        data.pop("result_json", None)
-        data["_fuzzy_match_score"] = best_score
-        return data
+        return best
 
     @staticmethod
     def _author_names(value: Any) -> List[str]:
@@ -3446,7 +3472,7 @@ class Database:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute(
                     """
-                    SELECT identity_key, title, authors, year, doi, arxiv_id, venue
+                    SELECT identity_key, title, authors, year, doi, arxiv_id, venue, result_json
                     FROM verified_reference_identity
                     WHERE LOWER(title) LIKE ?
                     LIMIT 10
@@ -3463,24 +3489,31 @@ class Database:
         ref_arxiv = (ref.get("arxiv_id") or "").strip().lower()
         ref_year = str(ref.get("year") or "").strip()
         ref_venue = (ref.get("venue") or "").strip().lower()
+        ref_kind = self._citation_version_kind(self._cited_fields(ref))
         for r in rows:
             cached_ident = r["identity_key"] or ""
-            if ident_self and cached_ident == ident_self:
+            data = dict(r)
+            cached_cited = self._cited_fields(self._decode_cached_result(data) or data)
+            cached_kind = self._citation_version_kind(cached_cited)
+            version_pair = {ref_kind, cached_kind} == {"arxiv", "publication"}
+            if ident_self and cached_ident == ident_self and not version_pair:
                 # Same identity — handled by the regular cache-hit
                 # path, not a discrepancy.
                 continue
+            # DOI, year and venue can legitimately differ by version;
+            # an author or conflicting explicit arXiv IDs still matter.
             diffs: List[Dict[str, str]] = []
             # DOI mismatch is the strongest signal — if the same title
             # already maps to a verified DOI, a new citation with a
             # different DOI is likely a typo or fabrication.
             cached_doi = (r["doi"] or "").strip().lower()
-            if cached_doi and ref_doi and cached_doi != ref_doi:
+            if not version_pair and cached_doi and ref_doi and cached_doi != ref_doi:
                 diffs.append({"field": "doi", "cached": r["doi"], "cited": ref.get("doi")})
             cached_arxiv = (r["arxiv_id"] or "").strip().lower()
             if cached_arxiv and ref_arxiv and cached_arxiv != ref_arxiv:
                 diffs.append({"field": "arxiv_id", "cached": r["arxiv_id"], "cited": ref.get("arxiv_id")})
             cached_year = str(r["year"] or "").strip()
-            if cached_year and ref_year and cached_year != ref_year:
+            if not version_pair and cached_year and ref_year and cached_year != ref_year:
                 diffs.append({"field": "year", "cached": r["year"], "cited": ref.get("year")})
             # Only flag if the FIRST author's surname differs — author-order,
             # et-al truncation and formatting differences shouldn't trigger
@@ -3500,7 +3533,7 @@ class Database:
                         "cited": ref_authors_str[:120],
                     })
             cached_venue = (r["venue"] or "").strip().lower()
-            if cached_venue and ref_venue and cached_venue != ref_venue:
+            if not version_pair and cached_venue and ref_venue and cached_venue != ref_venue:
                 diffs.append({"field": "venue", "cached": r["venue"], "cited": ref.get("venue")})
             if diffs:
                 out.append({

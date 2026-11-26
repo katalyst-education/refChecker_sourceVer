@@ -85,7 +85,10 @@ def _load_dispatch_namespace():
     ast.fix_missing_locations(module)
     code = compile(module, filename=str(_MAIN_PATH), mode="exec")
 
+    from backend.database import cached_result_is_current
+
     ns = {
+        "cached_result_is_current": cached_result_is_current,
         # Real, deps-free collaborators the cites_refs impl calls.
         "fetch_cites_and_refs": fetch_cites_and_refs,
         "_normalize_overlap_mode": normalize_mode,
@@ -129,7 +132,7 @@ class _OfflineDB:
     test fully offline and asserts the real-data-gated contract: nothing is
     marked verified unless a real source confirmed it (impossible offline)."""
 
-    async def lookup_verified_reference(self, _probe):
+    async def lookup_reference_identity(self, _probe):
         return None
 
     async def upsert_verified_reference(self, *_a, **_k):
@@ -469,10 +472,13 @@ class _CacheHitDB:
     def __init__(self, verified_dois):
         self._verified = {d.lower() for d in verified_dois}
 
-    async def lookup_verified_reference(self, probe):
+    async def lookup_reference_identity(self, probe):
         doi = (probe.get("doi") or "").lower()
         if doi and doi in self._verified:
-            return {"status": "verified", "times_seen": 3}
+            from backend.database import current_verification_logic_version
+
+            return {"status": "verified", "times_seen": 3,
+                    "logic_version": current_verification_logic_version()}
         return None
 
     async def upsert_verified_reference(self, *_a, **_k):
