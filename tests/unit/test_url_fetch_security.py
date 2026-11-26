@@ -100,3 +100,27 @@ def test_download_pdf_bytes_allows_public_pdf(monkeypatch):
 
     assert content == b'pdf-bytes'
     assert seen_urls == ["https://public.example/paper.pdf"]
+
+def test_doi_landing_page_does_not_follow_a_redirect_to_nonpublic_host(monkeypatch):
+    from unittest.mock import ANY, Mock
+
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    redirect = requests.Response()
+    redirect.status_code = 302
+    redirect.headers['Location'] = 'http://localhost/dataset'
+    redirect._content = b''
+    redirect._content_consumed = True
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *_, **__: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', 443))])
+    checker = WebPageChecker()
+    checker.session.get = Mock(return_value=redirect)
+    doi_url = 'https://doi.org/10.5281/zenodo.123'
+
+    data, findings, _ = checker.verify_raw_url_for_unverified_reference(
+        {'title': 'Archived dataset', 'url': doi_url}, require_title_match=True,
+    )
+
+    checker.session.get.assert_called_once_with(doi_url, timeout=ANY, allow_redirects=False)
+    assert 0 < checker.session.get.call_args.kwargs['timeout'] <= 15
+    assert data is None
+    assert findings[0]['verification_reason'] == 'url_access_failed'

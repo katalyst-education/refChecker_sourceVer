@@ -7,6 +7,7 @@ This module provides utilities for DOI handling, extraction, and validation.
 
 import re
 from typing import Any, Mapping, Optional
+from urllib.parse import quote, unquote
 
 from refchecker.utils.citation_urls import strip_citation_url_punctuation
 
@@ -120,6 +121,33 @@ def is_valid_doi_format(doi: str) -> bool:
     # Basic DOI format: starts with "10." followed by registrant code, slash, and meaningful suffix
     doi_format_pattern = r'^10\.\d+/.{2,}'
     return bool(re.match(doi_format_pattern, doi))
+
+
+def extract_cited_doi(reference: Mapping[str, Any]) -> Optional[str]:
+    """Read a cited DOI without changing the priority of the input fields."""
+    for field in ('doi', 'DOI', 'url', 'cited_url'):
+        value = reference.get(field)
+        if isinstance(value, str):
+            doi = normalize_doi(value.lower())
+            if is_valid_doi_format(doi):
+                return doi
+    return None
+
+
+def doi_request_path(doi: Optional[str]) -> str:
+    """Encode a normalized DOI for appending to a fixed HTTP endpoint."""
+    if not doi or not is_valid_doi_format(doi):
+        return ''
+    # DOI resolver URLs may already contain percent-escapes. Decode once,
+    # validate path segments, then encode for use in a URL (not a query).
+    decoded = unquote(doi)
+    if (
+        any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in decoded)
+        or '\\' in decoded
+        or any(segment in ('.', '..') for segment in decoded.split('/'))
+    ):
+        return ''
+    return quote(decoded, safe='/')
 
 
 def compare_dois(doi1: str, doi2: str) -> bool:

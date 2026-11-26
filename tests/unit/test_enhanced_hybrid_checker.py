@@ -1300,3 +1300,110 @@ def test_publication_doi_takes_priority_over_ancillary_arxiv_url(doi_field, arxi
     assert data['_matched_checker'] == 'crossref'
     assert data['year'] == 2016
     assert [issue['ref_year_correct'] for issue in issues if issue.get('warning_type') == 'year'] == [2016]
+
+
+@pytest.mark.parametrize('force_all_databases', [False, True])
+def test_datacite_is_a_doi_gated_fallback(force_all_databases):
+    checker = _build_checker()
+    checker.crossref = NoMatchChecker()
+    data = {'title': 'Archived dataset', 'doi': '10.5281/zenodo.123', 'authors': ['Ada Author']}
+    url = 'https://zenodo.org/records/123'
+    checker.datacite = Mock(database_label='DataCite')
+    checker.datacite.verify_reference.return_value = (data, [], url)
+    reference = {'title': data['title'], 'DOI': ' DOI:10.5281/ZENODO.123 '}
+
+    verified, errors, verified_url = checker.verify_reference(reference, force_all_databases)
+
+    assert verified['_matched_database'] == 'DataCite'
+    assert verified['_matched_checker'] == 'datacite'
+    assert errors == []
+    assert verified_url == url
+    assert checker.datacite.verify_reference.call_args.args[0]['doi'] == data['doi']
+    checker.datacite.reset_mock()
+    _, errors, _ = checker.verify_reference({'title': 'No DOI'}, force_all_databases)
+    checker.datacite.verify_reference.assert_not_called()
+    assert errors[0]['sources_negative'] == 2
+
+
+@pytest.mark.parametrize('http_status,html,expected_reason', [
+    (200, '<title>Archived dataset</title>', None),
+    (403, '', 'url_access_failed'),
+    (200, '<title>Please log in to DSpace</title>', 'authentication_required'),
+])
+def test_doi_only_uses_webpage_fallback_with_existing_access_handling(
+    monkeypatch, http_status, html, expected_reason,
+):
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker.crossref = None
+    response = requests.Response()
+    response.status_code = http_status
+    response.url = 'https://example.org/landing'
+    response._content = html.encode()
+    request = Mock(return_value=response)
+    monkeypatch.setattr(WebPageChecker, '_request_public_landing_page', request)
+    reference = {'title': 'Archived dataset', 'doi': 'DOI:10.5281/DATA(SET)'}
+
+    data, errors, _ = checker.verify_reference(reference)
+
+    request.assert_called_once_with('https://doi.org/10.5281/data%28set%29')
+    assert 'url' not in reference and 'cited_url' not in reference
+    if expected_reason:
+        assert data is None
+        assert errors[0]['verification_reason'] == expected_reason
+    else:
+        assert data['_matched_database'] == 'Web Page'
+        assert errors == []
+
+
+def test_datacite_timeout_is_distinguished_from_a_negative_lookup():
+    checker = _build_checker()
+    checker.crossref = None
+    checker.datacite = TimeoutChecker()
+    # An explicit non-web URL suppresses synthesis, letting us inspect the
+    # search finding independently of the outcome of a resolver request.
+    _, errors, _ = checker.verify_reference({
+        'title': 'Archived dataset', 'doi': '10.5281/zenodo.123', 'cited_url': 'ftp://example.org/data',
+    })
+
+    assert errors[0]['verification_reason'] == 'provider_failure'
+    assert 'DataCite' in errors[0]['error_details']
+    assert errors[0]['sources_checked'] == 2
+    assert errors[0]['sources_negative'] == 1
+
+
+def test_doi_web_fallback_does_not_verify_on_pdf_reachability_alone(monkeypatch):
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker.crossref = None
+    response = requests.Response()
+    response.status_code = 200
+    response.url = 'https://example.org/download'
+    response._content = b'%PDF-1.4 test'
+    monkeypatch.setattr(WebPageChecker, '_request_public_landing_page', Mock(return_value=response))
+
+    data, errors, _ = checker.verify_reference({'title': 'Archived dataset', 'doi': '10.5281/data'})
+
+    assert data is None
+    assert errors[0]['error_type'] == 'unverified'
+
+
+def test_datacite_cannot_displace_a_successful_local_lookup(monkeypatch):
+    from refchecker.checkers.webpage_checker import WebPageChecker
+
+    checker = _build_checker()
+    checker.local_db = Mock(database_label='Semantic Scholar')
+    checker.datacite = Mock()
+    request = Mock()
+    monkeypatch.setattr(WebPageChecker, '_request_public_landing_page', request)
+    reference = {'title': 'Archived dataset', 'authors': ['Ada Author'], 'year': 2024, 'doi': '10.5281/data'}
+    checker.local_db.verify_reference.return_value = (dict(reference), [], 'https://example.org/dataset')
+
+    data, errors, _ = checker.verify_reference(reference)
+
+    assert data['_matched_checker'] == 'local_s2'
+    assert errors == []
+    checker.datacite.verify_reference.assert_not_called()
+    request.assert_not_called()
