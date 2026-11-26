@@ -45,8 +45,9 @@ History:
    12 - verify structured journal locators during Crossref search fallback.
    13 - compare the cited book edition and its publication dates.
    14 - preserve cited publication/preprint versions and guard cached verdicts.
+   15 - accept years confirmed by the arXiv submission history.
 """
 
-VERIFICATION_LOGIC_VERSION = 14
+VERIFICATION_LOGIC_VERSION = 15
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

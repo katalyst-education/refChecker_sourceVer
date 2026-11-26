@@ -36,6 +36,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Optional, Any
 
+from bs4 import BeautifulSoup
 from pybtex.database import parse_string
 from pybtex.exceptions import PybtexError
 
@@ -534,6 +535,24 @@ class ArXivCitationChecker:
             return max(int(v) for v in versions)
         return None
 
+    def _get_version_years(self, arxiv_id: str) -> set[int]:
+        """Return the years of dated entries in the arXiv submission history."""
+        text = arxiv_cached_get(f"{self.abs_url}/{arxiv_id}", timeout=self.timeout)
+        if not text:
+            return set()
+
+        history = BeautifulSoup(text, 'html.parser').select_one('.submission-history')
+        if history is None:
+            return set()
+
+        # Match the timestamp, not unrelated four-digit numbers such as file sizes.
+        years = re.findall(
+            r'\[v\d+\]\s+[A-Za-z]{3},\s+\d{1,2}\s+[A-Za-z]{3}\s+'
+            r'((?:19|20)\d{2})\s+\d{2}:\d{2}:\d{2}',
+            history.get_text(' ', strip=True),
+        )
+        return {int(year) for year in years}
+
     def _calculate_match_score(
             self, cited_title: str, cited_authors: List[str],
             authoritative_title: str, authoritative_authors: List[Dict]) -> float:
@@ -826,7 +845,16 @@ class ArXivCitationChecker:
                      'cited_doi': reference.get('doi') or reference.get('DOI')}
         )
         if year_warning:
-            errors.append(year_warning)
+            try:
+                cited_year_int = int(cited_year)
+            except (TypeError, ValueError):
+                cited_year_int = None
+
+            version_years = self._get_version_years(arxiv_id) if cited_year_int else set()
+            if cited_year_int in version_years:
+                latest_data['_arxiv_version_years'] = sorted(version_years)
+            else:
+                errors.append(year_warning)
 
         paper_url = f"https://arxiv.org/abs/{arxiv_id}"
         

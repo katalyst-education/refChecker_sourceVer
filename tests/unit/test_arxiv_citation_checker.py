@@ -363,6 +363,66 @@ class TestVerifyReference:
         assert verified_data is not None
         assert len(errors) == 0
     
+    @pytest.mark.parametrize(
+        'arxiv_id,initial_year,cited_year,history,authors,expected_issue',
+        [
+            ('2412.15115', 2024, 2025, True, ['John Doe'], None),
+            ('1610.02424', 2016, 2018, True, ['John Doe'], None),
+            ('1610.02424', 2016, '2018', True, ['John Doe'], None),
+            ('2412.15115', 2024, 2026, True, ['John Doe'], ('warning_type', 'year')),
+            ('2412.15115', 2024, 2025, False, ['John Doe'], ('warning_type', 'year')),
+            ('2412.15115', 2024, None, True, ['John Doe'], ('error_type', 'year')),
+            ('2412.15115', 2024, 2025, True, ['Jane Roe'], ('error_type', 'author')),
+        ],
+    )
+    @patch('refchecker.checkers.arxiv_citation.arxiv_cached_get')
+    @patch.object(ArXivCitationChecker, '_get_latest_version_number', return_value=None)
+    @patch.object(ArXivCitationChecker, 'fetch_bibtex')
+    def test_arxiv_revision_year(
+        self, mock_bibtex, mock_latest, mock_get, checker,
+        arxiv_id, initial_year, cited_year, history, authors, expected_issue,
+    ):
+        revision_year = {2024: 2025, 2016: 2018}[initial_year]
+        mock_bibtex.return_value = f"""@misc{{test,
+      title={{Test Paper}},
+      author={{John Doe}},
+      year={{{initial_year}}},
+      eprint={{{arxiv_id}}}
+}}"""
+        mock_get.return_value = f"""
+        <div class="submission-history">
+          <h2>Submission history</h2>
+          <strong><a href="/abs/{arxiv_id}v1">[v1]</a></strong>
+          Thu, 19 Dec {initial_year} 17:56:09 UTC (2,142 KB)<br/>
+          <strong>[v2]</strong>
+          Fri, 3 Jan {revision_year} 02:18:21 UTC (2,124 KB)<br/>
+          <strong>[v3]</strong> unavailable (2,026 KB)<br/>
+        </div>
+        <p>[v4] Thu, 1 Jan 2026 17:56:09 UTC</p>
+        """ if history else None
+        paper_url = f'https://arxiv.org/abs/{arxiv_id}'
+
+        verified_data, issues, url = checker.verify_reference({
+            'title': 'Test Paper', 'authors': authors, 'year': cited_year, 'url': paper_url,
+        })
+
+        assert [(key, issue[key]) for issue in issues
+                for key in ('warning_type', 'error_type') if key in issue] == (
+            [expected_issue] if expected_issue else []
+        )
+        assert url == paper_url
+        assert verified_data['year'] == initial_year
+        if cited_year is not None:
+            mock_get.assert_called_once_with(paper_url, timeout=checker.timeout)
+        else:
+            mock_get.assert_not_called()
+        if history and cited_year is not None and int(cited_year) == revision_year:
+            assert verified_data['_arxiv_version_years'] == [initial_year, revision_year]
+        else:
+            assert '_arxiv_version_years' not in verified_data
+        if not expected_issue:
+            mock_latest.assert_not_called()
+
     def test_verify_reference_no_arxiv_id(self, checker):
         """Test verification with no ArXiv ID returns empty."""
         reference = {
