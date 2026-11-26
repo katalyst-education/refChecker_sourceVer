@@ -90,6 +90,7 @@ def normalize_doi(doi: str) -> str:
     
     # Remove common URL prefixes
     normalized = doi.replace('https://doi.org/', '').replace('http://doi.org/', '')
+    normalized = re.sub(r'^https?://dx[.]doi[.]org/', '', normalized.lstrip(), flags=re.IGNORECASE)
     normalized = normalized.replace('doi:', '')
     
     # Remove hash fragments and query parameters

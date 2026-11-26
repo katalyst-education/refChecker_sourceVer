@@ -9,7 +9,6 @@ from typing import Dict, Optional, Tuple, List, Any
 from bs4 import BeautifulSoup
 import time
 from refchecker.utils.text_utils import strip_latex_commands
-from refchecker.utils.url_utils import validate_remote_fetch_url
 
 logger = logging.getLogger(__name__)
 
@@ -305,25 +304,6 @@ class WebPageChecker:
             logger.debug(f"Request failed for {url}: {type(e).__name__}: {e}")
             return None
     
-    def _request_public_landing_page(self, url: str, timeout: int = 15) -> Optional[requests.Response]:
-        """Follow a synthesized DOI link without forwarding browser credentials."""
-        deadline = time.monotonic() + timeout
-        try:
-            for _ in range(6):  # At most five redirects, like PDF downloads.
-                validate_remote_fetch_url(url)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                response = self.session.get(url, timeout=min(timeout, remaining), allow_redirects=False)
-                location = response.headers.get('Location')
-                if not response.is_redirect or not location:
-                    return response
-                url = urljoin(url, location)
-                response.close()
-        except (ValueError, requests.RequestException) as exc:
-            logger.debug('DOI landing page request failed: %s', exc)
-        return None
-
     @staticmethod
     def _url_access_failure(details, status_code=None):
         finding = {
@@ -1068,16 +1048,12 @@ class WebPageChecker:
             logger.error(f"Error checking unverified URL {web_url}: {e}")
             return "paper not found and URL doesn't reference it"
 
-    def verify_raw_url_for_unverified_reference(
-        self, reference: Dict[str, Any], *, require_title_match: bool = False,
-    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+    def verify_raw_url_for_unverified_reference(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """
         Verify a raw URL from an unverified reference - can return verified data if appropriate
         
         Args:
             reference: Reference dictionary with title, authors, year, url, etc.
-            require_title_match: For synthesized DOI links, only use public redirects
-                and require content evidence rather than URL reachability.
             
         Returns:
             Tuple of (verified_data, errors, url) where:
@@ -1093,8 +1069,7 @@ class WebPageChecker:
             return None, [{"error_type": "unverified", "error_details": "paper not found and URL doesn't reference it"}], None
         
         # Make request to check if page exists
-        fetch = self._request_public_landing_page if require_title_match else self._respectful_request
-        response = fetch(web_url)
+        response = self._respectful_request(web_url)
         access_details = 'paper not verified; cited URL could not be accessed'
         if response is None:
             return None, [self._url_access_failure(access_details)], web_url
@@ -1135,8 +1110,6 @@ class WebPageChecker:
             if _is_pdf_response(response):
                 # For PDFs, treat as verified if no venue or venue is web content
                 venue_field = reference.get('journal') or reference.get('venue') or reference.get('booktitle')
-                if require_title_match:
-                    return None, [], web_url  # Reaching a PDF alone does not verify a synthesized link.
                 if not venue_field or self._is_web_content_venue(venue_field, web_url):
                     verified_data = {
                         'title': reference.get('title', ''),

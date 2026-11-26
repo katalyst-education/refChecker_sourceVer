@@ -13,6 +13,8 @@ queried had indexed the record.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from refchecker.checkers.datacite import DataCiteChecker
 
 
@@ -112,11 +114,12 @@ def test_datacite_skips_references_without_doi():
     mock_get.assert_not_called()
 
 
-def test_datacite_extracts_doi_from_url_when_doi_field_missing():
+@pytest.mark.parametrize('resolver', ['https://doi.org', 'http://dx.doi.org', 'https://dx.doi.org'])
+def test_datacite_extracts_doi_from_url_when_doi_field_missing(resolver):
     checker = DataCiteChecker()
     reference = {
         'title': 'Archived dataset',
-        'url': 'https://doi.org/10.5281/zenodo.16325125',
+        'url': f'{resolver}/10.5281/zenodo.16325125',
         'authors': ['Weimer'],
         'year': 2024,
     }
@@ -129,7 +132,11 @@ def test_datacite_extracts_doi_from_url_when_doi_field_missing():
         verified_data, errors, url = checker.verify_reference(reference)
 
     assert verified_data is not None
-    assert mock_get.call_args.args[0].endswith('10.5281/zenodo.16325125')
+    assert verified_data['doi'] == '10.5281/zenodo.16325125'
+    mock_get.assert_called_once_with(
+        'https://api.datacite.org/dois/10.5281/zenodo.16325125',
+        timeout=checker.timeout, allow_redirects=False,
+    )
 
 
 def test_datacite_quotes_doi_and_rejects_unsafe_request_paths():

@@ -3402,24 +3402,15 @@ class EnhancedHybridReferenceChecker:
             logger.debug("Enhanced Hybrid: All available APIs failed to verify reference")
         
         # PHASE 4: If the reference has a URL, try web page verification as final fallback.
+        # Only use cited URLs here; a bare DOI is not a web crawl target.
         # This handles non-academic references (websites, datasets, tools) whose
         # cited URL is valid and contains the reference title.
-        web_url = cited_url
-        synthesized_url = not web_url and bool(doi_path and title)
-        if synthesized_url:
-            web_url = f'https://doi.org/{doi_path}'
-        if web_url.startswith(('http://', 'https://')):
+        web_url = reference.get('cited_url') or reference.get('url', '')
+        if web_url and web_url.startswith('http'):
             try:
                 from refchecker.checkers.webpage_checker import WebPageChecker
                 webpage_checker = WebPageChecker()
-                if synthesized_url:
-                    # Give the fallback its own URL without turning it into a
-                    # cited link (or mutating the caller's reference).
-                    wp_data, wp_errors, wp_url = webpage_checker.verify_raw_url_for_unverified_reference(
-                        dict(reference, url=web_url), require_title_match=True,
-                    )
-                else:
-                    wp_data, wp_errors, wp_url = webpage_checker.verify_raw_url_for_unverified_reference(reference)
+                wp_data, wp_errors, wp_url = webpage_checker.verify_raw_url_for_unverified_reference(reference)
                 if wp_data:
                     logger.debug(f"Enhanced Hybrid: Web page verification succeeded for {web_url}")
                     return wp_data, wp_errors, wp_url

@@ -47,8 +47,9 @@ History:
    14 - preserve cited publication/preprint versions and guard cached verdicts.
    15 - accept years confirmed by the arXiv submission history.
    16 - verify DataCite DOIs and recognize Unicode author-list ellipses.
+   17 - limit web fallback to cited URLs and normalize legacy DOI resolvers.
 """
 
-VERIFICATION_LOGIC_VERSION = 16
+VERIFICATION_LOGIC_VERSION = 17
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]

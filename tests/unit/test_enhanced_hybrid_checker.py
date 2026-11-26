@@ -1325,69 +1325,71 @@ def test_datacite_is_a_doi_gated_fallback(force_all_databases):
     assert errors[0]['sources_negative'] == 2
 
 
-@pytest.mark.parametrize('http_status,html,expected_reason', [
-    (200, '<title>Archived dataset</title>', None),
-    (403, '', 'url_access_failed'),
-    (200, '<title>Please log in to DSpace</title>', 'authentication_required'),
-])
-def test_doi_only_uses_webpage_fallback_with_existing_access_handling(
-    monkeypatch, http_status, html, expected_reason,
-):
+@pytest.mark.parametrize('total_outage', [False, True])
+def test_doi_only_preserves_provider_failure_without_web_verification(monkeypatch, total_outage):
     from refchecker.checkers.webpage_checker import WebPageChecker
 
     checker = _build_checker()
-    checker.crossref = None
-    response = requests.Response()
-    response.status_code = http_status
-    response.url = 'https://example.org/landing'
-    response._content = html.encode()
-    request = Mock(return_value=response)
-    monkeypatch.setattr(WebPageChecker, '_request_public_landing_page', request)
-    reference = {'title': 'Archived dataset', 'doi': 'DOI:10.5281/DATA(SET)'}
-
-    data, errors, _ = checker.verify_reference(reference)
-
-    request.assert_called_once_with('https://doi.org/10.5281/data%28set%29')
-    assert 'url' not in reference and 'cited_url' not in reference
-    if expected_reason:
-        assert data is None
-        assert errors[0]['verification_reason'] == expected_reason
-    else:
-        assert data['_matched_database'] == 'Web Page'
-        assert errors == []
-
-
-def test_datacite_timeout_is_distinguished_from_a_negative_lookup():
-    checker = _build_checker()
+    if total_outage:
+        checker.semantic_scholar = TimeoutChecker()
     checker.crossref = None
     checker.datacite = TimeoutChecker()
-    # An explicit non-web URL suppresses synthesis, letting us inspect the
-    # search finding independently of the outcome of a resolver request.
-    _, errors, _ = checker.verify_reference({
-        'title': 'Archived dataset', 'doi': '10.5281/zenodo.123', 'cited_url': 'ftp://example.org/data',
-    })
+    monkeypatch.setattr(checker, '_wait_or_cancel', Mock())
+    web_check = Mock(side_effect=AssertionError('no cited URL to verify'))
+    monkeypatch.setattr(WebPageChecker, 'verify_raw_url_for_unverified_reference', web_check)
+    reference = {'title': 'Archived dataset', 'doi': '10.5281/data'}
 
-    assert errors[0]['verification_reason'] == 'provider_failure'
-    assert 'DataCite' in errors[0]['error_details']
-    assert errors[0]['sources_checked'] == 2
-    assert errors[0]['sources_negative'] == 1
+    data, errors, url = checker.verify_reference(reference)
+
+    assert data is None
+    assert url is None
+    web_check.assert_not_called()
+    assert reference == {'title': 'Archived dataset', 'doi': '10.5281/data'}
+    assert len(errors) == 1
+    finding = errors[0]
+    assert finding['verification_reason'] == 'provider_failure'
+    assert 'DataCite' in finding['error_details']
+    assert finding['sources_checked'] == 2
+    assert finding['sources_negative'] == (0 if total_outage else 1)
+    if total_outage:
+        assert finding['error_details'].startswith('All available checkers failed:')
 
 
-def test_doi_web_fallback_does_not_verify_on_pdf_reachability_alone(monkeypatch):
+@pytest.mark.parametrize('status,body,reason', [
+    (404, b'', 'no_match'),
+    (429, b'', 'provider_failure'),
+    (503, b'', 'provider_failure'),
+    (200, b'not JSON', 'provider_failure'),
+    (200, b'{}', 'provider_failure'),
+])
+def test_datacite_http_and_json_failure_reporting(monkeypatch, status, body, reason):
+    from refchecker.checkers.datacite import DataCiteChecker
     from refchecker.checkers.webpage_checker import WebPageChecker
 
     checker = _build_checker()
     checker.crossref = None
+    checker.datacite = DataCiteChecker()
     response = requests.Response()
-    response.status_code = 200
-    response.url = 'https://example.org/download'
-    response._content = b'%PDF-1.4 test'
-    monkeypatch.setattr(WebPageChecker, '_request_public_landing_page', Mock(return_value=response))
+    response.status_code = status
+    response._content = body
+    get = Mock(return_value=response)
+    monkeypatch.setattr(checker.datacite.session, 'get', get)
+    web_check = Mock(side_effect=AssertionError('no cited URL to verify'))
+    monkeypatch.setattr(WebPageChecker, 'verify_raw_url_for_unverified_reference', web_check)
 
-    data, errors, _ = checker.verify_reference({'title': 'Archived dataset', 'doi': '10.5281/data'})
+    data, errors, url = checker.verify_reference({'title': 'Archived dataset', 'doi': '10.5281/data'})
 
     assert data is None
-    assert errors[0]['error_type'] == 'unverified'
+    assert url is None
+    assert len(errors) == 1
+    assert errors[0]['verification_reason'] == reason
+    assert errors[0]['sources_checked'] == 2
+    assert errors[0]['sources_negative'] == (2 if status == 404 else 1)
+    get.assert_called_once_with(
+        'https://api.datacite.org/dois/10.5281/data',
+        timeout=checker.datacite.timeout, allow_redirects=False,
+    )
+    web_check.assert_not_called()
 
 
 def test_datacite_cannot_displace_a_successful_local_lookup(monkeypatch):
@@ -1397,7 +1399,7 @@ def test_datacite_cannot_displace_a_successful_local_lookup(monkeypatch):
     checker.local_db = Mock(database_label='Semantic Scholar')
     checker.datacite = Mock()
     request = Mock()
-    monkeypatch.setattr(WebPageChecker, '_request_public_landing_page', request)
+    monkeypatch.setattr(WebPageChecker, 'verify_raw_url_for_unverified_reference', request)
     reference = {'title': 'Archived dataset', 'authors': ['Ada Author'], 'year': 2024, 'doi': '10.5281/data'}
     checker.local_db.verify_reference.return_value = (dict(reference), [], 'https://example.org/dataset')
 
