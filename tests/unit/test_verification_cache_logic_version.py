@@ -85,6 +85,24 @@ class TestCachedResultIsCurrent:
 
 
 class TestCacheReplay:
+    @pytest.mark.parametrize('old_version', [15, 16])
+    def test_pre_numeric_bibtex_year_verdict_is_not_replayed(self, tmp_path, monkeypatch, old_version):
+        async def run():
+            db = Database(str(tmp_path / 'bibtex-years.db'))
+            await db.init_db()
+            # Older parsing could drop the cited year and verify without a warning.
+            verdict = dict(KIMI, status='verified', errors=[])
+            with monkeypatch.context() as previous:
+                previous.setattr(backend_db, 'current_verification_logic_version', lambda: old_version)
+                await db.upsert_verified_reference(verdict)
+                assert await db.lookup_verified_reference(verdict) is not None
+
+            assert await db.lookup_verified_reference(verdict) is None
+            assert await db.find_verified_by_fuzzy(verdict) is None
+            assert await db.count_verified_references() == 1
+
+        _run(run())
+
     @pytest.mark.parametrize('lookup', ['lookup_verified_reference', 'find_verified_by_fuzzy'])
     @pytest.mark.parametrize('input_year,snapshot_year,result_year,hit', [
         (2025, 2026, 2026, False),
