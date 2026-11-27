@@ -49,7 +49,10 @@ def test_shared_parser_llm_only_bypasses_deterministic_output():
 
     references = checker.parse_references('[1] Ada Author. A paper title. 2024.')
 
-    assert references == [{'title': 'LLM result'}]
+    assert references == [{
+        'title': 'LLM result',
+        'field_extraction_status': {'authors': 'uncertain', 'venue': 'uncertain'},
+    }]
     checker._parse_references_regex.assert_not_called()
     assert checker.llm_extractor.extract_references.call_count >= 1
     assert checker.last_reference_parser_method == 'llm'

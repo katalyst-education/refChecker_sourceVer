@@ -518,7 +518,7 @@ def clean_url_punctuation(url: str) -> str:
 
 
 _URL_START_RE = re.compile(
-    r'(?P<scheme>https?):[ \t]*(?:\r?\n[ \t]*)?//',
+    r'(?P<scheme>https?):[ \t]*(?:\r?\n[ \t]*)?//[ \t]*(?:\r?\n[ \t]*)?',
     re.IGNORECASE,
 )
 _URL_FRAGMENT_RE = re.compile(r"(?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]|\\_)+")
@@ -547,7 +547,7 @@ def _is_url_continuation(
     """Return whether a whitespace-delimited fragment plausibly continues a URL."""
     if not next_fragment or not _URL_FRAGMENT_RE.fullmatch(next_fragment):
         return False
-    if next_fragment.lower().split(':', 1)[0].rstrip('.,;') in _URL_STOP_WORDS:
+    if next_fragment.lower().lstrip('(').split(':', 1)[0].rstrip('.,;)') in _URL_STOP_WORDS:
         return False
     if next_fragment.lower().startswith(('http://', 'https://')):
         return False
@@ -573,6 +573,18 @@ def _is_url_continuation(
                 re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment)
             )
         )
+    if (
+        line_break
+        and previous.endswith('+')
+        and parsed
+        and parsed.path
+        and re.fullmatch(
+            r'[A-Za-z0-9_+%-]+(?:-[A-Za-z0-9_+%-]+)*\.(?:pdf|html?)[.,;]?',
+            next_fragment,
+            re.IGNORECASE,
+        )
+    ):
+        return True
     if previous.endswith(('=', '?', '&', '#', '.', '-', '_', '%')):
         # A period is useful evidence for a split numeric suffix, but prose such
         # as "accessed" or an author's name after a sentence-ending period is not.
@@ -583,6 +595,16 @@ def _is_url_continuation(
                 or re.fullmatch(r'(?:19|20)\d{2}', next_fragment)
             ):
                 return False
+            if (
+                line_break
+                and re.search(r'/(?:19|20)\d{2}\.$', parsed.path)
+                and re.fullmatch(
+                    r'[A-Za-z0-9_-]+\.\d+\.(?:pdf|html?)\.?',
+                    next_fragment,
+                    re.IGNORECASE,
+                )
+            ):
+                return True
             if (
                 expected_page
                 and next_fragment.isdigit()
@@ -604,8 +626,119 @@ def _is_url_continuation(
         if previous.endswith(('=', '?', '&', '#')):
             return next_fragment.isdigit() or bool(
                 re.search(r'[._~:/?#@!$&\'()*+,;=%\-]', next_fragment)
+            ) or bool(
+                line_break
+                and re.search(r'[?&](?:id|doi)=$', previous, re.IGNORECASE)
+                and re.fullmatch(r'(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8,}', next_fragment)
+            ) or bool(
+                line_break
+                and parsed
+                and re.fullmatch(r'books\.google\.com(?:\.[a-z]{2})?', parsed.hostname or '', re.IGNORECASE)
+                and re.search(r'[?&]id=$', previous, re.IGNORECASE)
+                and re.fullmatch(r'[A-Za-z0-9_-]{12}', next_fragment)
             )
         return True
+    if line_break and parsed and parsed.path:
+        isbn_start = re.search(r'/books/(97[89]\d{0,9})$', parsed.path)
+        if isbn_start and next_fragment.isdigit():
+            isbn = isbn_start.group(1) + next_fragment
+            if len(isbn) == 13 and (
+                sum(int(digit) * (1 if index % 2 == 0 else 3) for index, digit in enumerate(isbn))
+                % 10 == 0
+            ):
+                return True
+        if (
+            re.search(r'\.(?:h|ht|htm)$', parsed.path, re.IGNORECASE)
+            and re.fullmatch(r'(?:tml|ml|l)[.,;]?', next_fragment, re.IGNORECASE)
+            and re.search(r'\.html?[.,;]?$', parsed.path + next_fragment, re.IGNORECASE)
+        ):
+            return True
+        if (
+            re.search(r'/10\.\d{1,3}$', parsed.path)
+            and re.fullmatch(r'\d{1,5}/[A-Za-z0-9._~%()/-]+[.,;]?', next_fragment)
+        ):
+            return True
+        pii_start = re.search(r'/pii/(S\d{5,})$', parsed.path, re.IGNORECASE)
+        pii_end = re.fullmatch(r'(\d+)[.,;]?', next_fragment)
+        if pii_start and pii_end and len(pii_start.group(1) + pii_end.group(1)) == 17:
+            return True
+        if (
+            re.search(r'/[A-Za-z0-9_-]+_[a-z]{1,4}$', parsed.path)
+            and re.fullmatch(
+                r'[a-z][A-Za-z0-9_-]*_[A-Za-z0-9_.-]+\.(?:pdf|html?)[.,;]?',
+                next_fragment,
+            )
+        ):
+            return True
+        if (
+            re.search(r'/[a-z]+$', parsed.path)
+            and re.fullmatch(
+                r'[a-z]+/(?:[A-Za-z0-9_-]+/)*10\.\d{4,9}/[A-Za-z0-9._~%/-]+',
+                next_fragment,
+            )
+        ):
+            return True
+        if (
+            re.search(r'/[a-z]+$', parsed.path)
+            and re.fullmatch(r'[a-z]+/pii/[A-Za-z]\d{10,}', next_fragment, re.IGNORECASE)
+        ):
+            return True
+        if (
+            parsed.query
+            and re.search(r'(?:^|&)[A-Za-z]+$', parsed.query)
+            and re.fullmatch(r'[A-Za-z]+=[A-Za-z0-9._~%-]+(?:&[A-Za-z0-9._~%=-]+)*', next_fragment)
+        ):
+            return True
+        if (
+            re.search(r'/10\.\d{4,9}$', parsed.path)
+            and re.fullmatch(r'/[A-Za-z][A-Za-z0-9.-]*\.\d+\.\d+[.,;]?', next_fragment)
+        ):
+            return True
+        if re.search(r'/10\.\d{4,9}/[A-Za-z0-9._-]+$', parsed.path):
+            if re.fullmatch(r'\d+\.\d{4,}(?:\.\d+|/full)?[.,;]?', next_fragment):
+                return True
+            if re.fullmatch(r'\.\d+(?:\.\d+){1,}[.,;]?', next_fragment):
+                return True
+            if re.fullmatch(r'[a-z][A-Za-z]*\.(?:[A-Za-z]+\.)?\d+(?:\.\d+){1,}[.,;]?', next_fragment):
+                return True
+        if (
+            (parsed.hostname or '').lower() == 'ieeexplore.ieee.org'
+            and re.search(r'/document/\d{1,6}$', parsed.path)
+            and re.fullmatch(r'\d{4,9}/?', next_fragment)
+        ):
+            return True
+    if (
+        line_break
+        and parsed
+        and parsed.netloc.lower() in ('arxiv.org', 'www.arxiv.org')
+        and re.fullmatch(r'/a(?:b)?', parsed.path)
+        and re.fullmatch(r'(?:bs|s)/\d{4}\.\d{4,5}(?:v\d+)?\.?', next_fragment)
+    ):
+        return True
+    if (
+        line_break
+        and parsed
+        and re.search(r'/[a-z]+$', parsed.path)
+        and re.fullmatch(r'[a-z]+/[A-Za-z0-9._~%/-]+\.(?i:pdf|html?)\.?', next_fragment)
+    ):
+        return True
+    if (
+        line_break
+        and parsed
+        and re.search(r'/[A-Za-z]+$', parsed.path)
+        and re.fullmatch(
+            r'[a-z][A-Za-z0-9_-]*-[A-Za-z0-9_.-]+\.(?i:pdf|html?)\.?',
+            next_fragment,
+        )
+    ):
+        return True
+    if line_break and parsed:
+        hash_start = re.search(r'/([0-9a-f]{8,31})$', parsed.path, re.IGNORECASE)
+        hash_end = re.fullmatch(
+            r'([0-9a-f]+)-Abstract\.html[.,;]?', next_fragment, re.IGNORECASE
+        )
+        if hash_start and hash_end and len(hash_start.group(1) + hash_end.group(1)) == 32:
+            return True
     if (
         line_break
         and re.match(
@@ -629,6 +762,45 @@ def _is_url_continuation(
     ):
         return True
     return False
+
+
+def _title_slug_continuation_end(current_url: str, text: str, end: int, context: str) -> int:
+    if not re.match(r'\s*\[\d{1,4}\]\s+', context):
+        return end
+    titles = re.findall(r'["\u201c]([^"\u201c\u201d]+)["\u201d]', context)
+    if not titles:
+        return end
+    title_slug = re.sub(r'[^a-z0-9]+', '-', titles[-1].lower()).strip('-')
+    try:
+        parsed = urlsplit(current_url)
+    except ValueError:
+        return end
+    path_slug = parsed.path.rsplit('/', 1)[-1]
+    if (
+        len(title_slug) < 20 or len(path_slug) < 8
+        or parsed.query or parsed.fragment
+        or not re.fullmatch(r'[a-z0-9-]+', path_slug)
+        or not title_slug.startswith(path_slug)
+        or title_slug == path_slug
+    ):
+        return end
+
+    cursor = end
+    while cursor < len(text):
+        separator = re.match(r'\s+', text[cursor:])
+        if not separator or not re.search(r'[\r\n]', separator.group(0)):
+            break
+        start = cursor + separator.end()
+        fragment = _URL_FRAGMENT_RE.match(text, start)
+        if not fragment or not re.fullmatch(r'[a-z0-9-]+', fragment.group(0)):
+            break
+        path_slug += fragment.group(0)
+        if not title_slug.startswith(path_slug):
+            break
+        cursor = fragment.end()
+        if path_slug == title_slug:
+            return cursor
+    return end
 
 
 def join_wrapped_url_lines(text: str) -> str:
@@ -666,6 +838,7 @@ def join_wrapped_url_lines(text: str) -> str:
         )
         expected_page = page_range_match.group(1) if page_range_match else None
         end = fragment_match.end()
+        title_slug_end = _title_slug_continuation_end(current_url, text, end, reference_context)
         while end < len(text):
             separator = re.match(r'\s+', text[end:])
             if not separator:
@@ -689,15 +862,36 @@ def join_wrapped_url_lines(text: str) -> str:
             following_fragment = (
                 following_match.group(0) if following_match else ""
             )
+            accessed_line_join = (
+                line_break
+                and not current_url.endswith(('.', ',', ';'))
+                and next_fragment.endswith(',')
+                and not next_fragment[:-1].isdigit()
+                and bool(re.search(r'[/\d-]', next_fragment))
+                and bool(re.match(
+                    r'\s*accessed\s*:', text[next_match.end():], re.IGNORECASE
+                ))
+            )
+            annotated_camel_case_join = (
+                line_break
+                and re.search(r'/[A-Za-z]+$', current_url)
+                and re.fullmatch(r'[a-z]+[A-Z][A-Za-z0-9]*', next_fragment)
+                and re.match(
+                    r'\s*:contentReference\[[^\]\r\n]+\]\{[^}\r\n]*\}',
+                    text[next_match.end():],
+                )
+            )
             underscore_join = False
             try:
                 parsed_current = urlsplit(current_url)
                 has_path = bool(parsed_current.path)
             except ValueError:
                 has_path = False
+            slash_join = has_path and not line_break and next_fragment.startswith('/')
             if (
                 has_path
                 and not line_break
+                and not slash_join
                 and not current_url.endswith(('/', '.', '-', '_', '%', '=', '?', '&', '#'))
             ):
                 underscore_join = (
@@ -708,11 +902,18 @@ def join_wrapped_url_lines(text: str) -> str:
                     )
                 )
 
-            if not underscore_join and not _is_url_continuation(
-                current_url,
-                next_fragment,
-                line_break=line_break,
-                expected_page=expected_page,
+            if (
+                not slash_join
+                and not underscore_join
+                and not accessed_line_join
+                and not annotated_camel_case_join
+                and next_match.end() > title_slug_end
+                and not _is_url_continuation(
+                    current_url,
+                    next_fragment,
+                    line_break=line_break,
+                    expected_page=expected_page,
+                )
             ):
                 break
             if underscore_join:
@@ -744,6 +945,20 @@ def _strip_glued_pdf_citation_tail(url: str) -> str:
     if not url:
         return ""
 
+    url = re.sub(
+        r'(?i)(?:[\[(]accessed:[a-z0-9.,-]*[\])]?[.,;]?\s*|'
+        r',?\[online;accessed[a-z0-9.,-]*\]?)$',
+        '',
+        url,
+    )
+    url = re.sub(r'(?i)[.,;]accessedon\d{1,2}[a-z]+\d{4}$', '', url)
+    url = re.sub(
+        r'(?i)(?:[,;](?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)'
+        r'\.?\d{1,2}(?:,?\d{4})?|(?:19|20)\d{2}))?'
+        r'[.,;(]accessed(?::[a-z0-9.,-]*)?$',
+        '',
+        url,
+    )
     match = re.search(r'(?i)(\.pdf)(?:%20|\s).+$', url)
     if not match:
         return url

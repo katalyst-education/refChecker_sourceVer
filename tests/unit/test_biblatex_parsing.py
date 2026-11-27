@@ -186,9 +186,7 @@ class TestBiblatexParsing(unittest.TestCase):
         )
         assert by_number[10]["venue"] == "Cognitive Science"
         assert by_number[11]["title"] == "Design of Pulse Oximeters"
-        assert by_number[11]["venue"] == (
-            "Medical Science Series, Bristol: Inst. of Physics Publishing"
-        )
+        assert by_number[11]["venue"] == "Inst. of Physics Publishing"
         assert by_number[9]["authors"] == [
             "B. K. Maigaard Kjar Pedersen",
             "B. Charlotte Weigelin",
@@ -264,7 +262,7 @@ class TestBiblatexParsing(unittest.TestCase):
         )
         self.assertEqual(by_number[8]["title"], "Interaction Design: Beyond Human-Computer Interaction")
         self.assertEqual(by_number[8]["venue"], "Wiley")
-        self.assertEqual(by_number[15]["authors"], ["A. N. Kumar"])
+        self.assertEqual(by_number[15]["authors"], ["A. N. Kumar", "et al"])
         self.assertEqual(by_number[15]["title"], "Computer Science Curricula 2023")
         self.assertEqual(by_number[16]["year"], None)
         self.assertEqual(by_number[16]["url"], "https://www.cdio.org/content/cdio-optional-standards-30")
@@ -430,6 +428,25 @@ class TestBiblatexParsing(unittest.TestCase):
         ref = refs[0]
         self.assertEqual(ref['doi'], '10.1145/1234567')
         self.assertEqual(ref['url'], 'https://doi.org/10.1145/1234567')
+
+    def test_doi_with_alphabetic_dot_suffix(self):
+        from refchecker.utils.biblatex_parser import parse_biblatex_entry_content
+
+        ref = parse_biblatex_entry_content(
+            '16',
+            'UNESCO. Guidance for Generative AI in Education and Research. '
+            'Paris: UNESCO, 2023, doi: 10.54675/unesco.2023.iaedu.',
+        )
+        self.assertEqual(ref['doi'], '10.54675/unesco.2023.iaedu')
+        self.assertEqual(ref['url'], 'https://doi.org/10.54675/unesco.2023.iaedu')
+
+    def test_doi_does_not_consume_following_sentence(self):
+        from refchecker.utils.biblatex_parser import parse_biblatex_entry_content
+
+        ref = parse_biblatex_entry_content(
+            '1', 'Author. Title. DOI: 10.1234/example. Available online.',
+        )
+        self.assertEqual(ref['doi'], '10.1234/example')
         self.assertEqual(ref['type'], 'non-arxiv')
         
     def test_parse_year_prioritization(self):
@@ -936,6 +953,8 @@ assisted question-answering with human feedback". In: arXiv preprint arXiv:2112.
         
         # Test the decision function directly
         self.assertTrue(_is_syllable_break("Christo", "pher"))      # Name syllable break
+        self.assertFalse(_is_syllable_break("IoT", "education"))
+        self.assertFalse(_is_syllable_break("AI", "powered"))
         self.assertFalse(_is_syllable_break("Browser", "assisted")) # Compound word
         self.assertTrue(_is_syllable_break("walk", "ing"))          # Word + suffix
         self.assertFalse(_is_syllable_break("question", "answering")) # Compound word

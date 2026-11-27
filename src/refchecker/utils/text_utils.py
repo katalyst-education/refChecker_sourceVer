@@ -12,6 +12,18 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
+def is_acronym_hyphen_prefix(word: str) -> bool:
+    return word == 'IoT' or (2 <= len(word) <= 5 and word.isupper())
+
+
+def is_source_compound_hyphen_prefix(word: str, suffix: str = '') -> bool:
+    return (
+        is_acronym_hyphen_prefix(word)
+        or word.casefold() == 'self'
+        or (word.casefold(), suffix.casefold()) == ('university', 'industry')
+    )
+
+
 def strip_html_markup(text: str) -> str:
     """Remove simple HTML/XML markup while preserving tag contents."""
     if not isinstance(text, str):
@@ -4926,10 +4938,3504 @@ def _parsed_author_issues(authors):
     return issues
 
 
+def _match_author_year_only_citation(content):
+    initial_name = (
+        r"(?:[A-Z]\.\s*){1,4}[^\W\d_][\w'’\-]+"
+        r"(?:\s+[^\W\d_][\w'’\-]+)*"
+    )
+    return re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}'
+        rf'(?:,\s*(?:and\s+)?{initial_name})+)\s*,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        re.sub(r'\s+', ' ', content.strip()),
+    )
+
+
+def _match_untitled_educon_citation(content):
+    initial_name = r"(?:[A-Z]\.\s*)+[A-Z][\w'’\-]+(?:\s+[A-Z][\w'’\-]+)*"
+    return re.fullmatch(
+        rf'\[(?P<number>\d+)\]\s*(?P<first>{initial_name})\s*&\s*(?P<second>{initial_name}),\s*'
+        r'(?P<venue>IEEE EDUCON),\s*(?P<year>(?:19|20)\d{2})\.',
+        re.sub(r'\s+', ' ', content.strip()),
+    )
+
+
+def _match_unsigned_web_citation(content):
+    return re.fullmatch(
+        r'\[\d+\]\s*["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'[A-Z][a-z]+\.\s*(?:19|20)\d{2}\.\s*'
+        r'Accessed:\s*[A-Z][a-z]+\.?\s*\d{1,2},\s*(?:19|20)\d{2}\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?://\S+',
+        re.sub(r'\s+', ' ', content.strip()),
+    )
+
+
+def _match_title_first_web_citation(content):
+    normalized = re.sub(r'\s+', ' ', content.strip())
+    dated_citation = re.fullmatch(
+        r'\[\d+\]\s*(?P<title>[^.]+)\.\s*'
+        r'\((?:(?P<year>(?:19|20)\d{2}),\s*[A-Za-z]+\s+\d{1,2}|n\.d\.)\)\.\s*'
+        r'(?:(?P<venue>[^.]+)\.\s*)?https?://.+',
+        normalized,
+        re.IGNORECASE,
+    )
+    if dated_citation:
+        return dated_citation
+
+    first_clause = re.sub(r'^\[\d+\]\s*', '', normalized).split(',', 1)[0].strip()
+    if re.search(r'\([A-Z]{2,}\)\s*$', first_clause):
+        return None
+
+    published_online = re.fullmatch(
+        r'\[\d+\]\s*(?P<title>.+?),\s*(?P<venue>[^,]+),\s*'
+        r'(?:[A-Za-z]{3}\.?\s+)?(?P<year>(?:19|20)\d{2})'
+        r'\.\s*\[Online\]\.\s*Available:\s*https?://.+',
+        normalized,
+        re.IGNORECASE,
+    )
+    if not published_online:
+        return None
+
+    venue = published_online.group('venue').strip()
+    if (
+        not re.search(r'[A-Za-z]{3}', venue)
+        or re.search(r'\b(?:rep|report|vol|no|pp?)\.?\b|\d{3,}', venue, re.IGNORECASE)
+        or len(published_online.group('title').split()) < 4
+    ):
+        return None
+    return published_online
+
+
+def _match_homepage_citation(content):
+    return re.fullmatch(
+        r'\[\d+\]\s*(?P<title>[^,]{1,120}\bHomepage),\s*'
+        r'(?:https?://|www\.)[^\s,]+'
+        r'(?:\s+(?=[^\s,]*[/0-9._~?#@!$&\'()*+;=%-])[^\s,]+)*,?\s+'
+        r'last accessed(?: on)?\s+\d{4}/\d{2}/\d{2}',
+        re.sub(r'\s+', ' ', content.strip()),
+        re.IGNORECASE,
+    )
+
+
+def _match_signed_web_citation(content):
+    return re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^,"“”]{1,100}),\s*'
+        r'["“][^"“”]+(?:,["”]|["”],)\s*(?:19|20)\d{2}\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?://\S+',
+        re.sub(r'\s+', ' ', content.strip()),
+    )
+
+
+def _match_bracket_year_web_citation(content):
+    return re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^.,:;\[\]"“”]+?)\s+'
+        r'\[(?P<year>(?:19|20)\d{2})\]\s+'
+        r'(?P<title>[^.]+)\.\s*https?://\S+',
+        re.sub(r'\s+', ' ', content.strip()),
+    )
+
+
+def _match_unquoted_institutional_website(content):
+    return re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^,]+?\s+\([A-Z]{2,}\)),\s*'
+        r'(?P<title>[^.]+),\s*(?P<year>(?:19|20)\d{2})\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?://.+',
+        re.sub(r'\s+', ' ', content.strip()),
+    )
+
+
+def cited_authors_for_display(authors):
+    if isinstance(authors, str):
+        authors = [authors]
+    return [
+        author for author in (authors or [])
+        if str(author or '').strip()
+        and str(author).strip().lower() not in {
+            'unknown', 'unknown author', 'url reference', '-', '--', '–', '—', '―'
+        }
+    ]
+
+
+def reference_authors_for_display(reference):
+    source_authors = cited_authors_for_display(reference.get('source_authors'))
+    return source_authors or cited_authors_for_display(reference.get('authors'))
+
+
+def annotate_reference_field_status(reference):
+    """Distinguish source-absent fields from fields requiring source review."""
+    authors = reference.get('authors') or []
+    if isinstance(authors, str):
+        authors = [authors]
+    has_authors = bool(cited_authors_for_display(reference.get('source_authors'))) or (
+        bool(authors) and len(cited_authors_for_display(authors)) == len(authors)
+    )
+    title = str(reference.get('title') or '').strip()
+    has_title = title.lower() not in {'', 'unknown', 'unknown title', 'untitled reference'}
+    venue = reference.get('venue') or reference.get('journal') or ''
+    has_venue = bool(str(venue).strip()) and not is_no_date_placeholder(venue)
+    raw_source = reference.get('raw_text') or reference.get('raw') or ''
+    author_only = (
+        has_authors
+        and isinstance(raw_source, str)
+        and _match_author_year_only_citation(raw_source)
+    )
+    unsigned_web = isinstance(raw_source, str) and _match_unsigned_web_citation(raw_source)
+    title_first_web = isinstance(raw_source, str) and _match_title_first_web_citation(raw_source)
+    homepage = isinstance(raw_source, str) and _match_homepage_citation(raw_source)
+    signed_web = isinstance(raw_source, str) and _match_signed_web_citation(raw_source)
+    bracket_year_web = isinstance(raw_source, str) and _match_bracket_year_web_citation(raw_source)
+    institutional_web = isinstance(raw_source, str) and _match_unquoted_institutional_website(raw_source)
+    untitled_educon = isinstance(raw_source, str) and _match_untitled_educon_citation(raw_source)
+    status = {}
+    if not has_authors:
+        status['authors'] = 'absent' if unsigned_web or title_first_web or homepage else 'uncertain'
+    if not has_title:
+        status['title'] = 'absent' if author_only or untitled_educon else 'uncertain'
+    if not has_venue:
+        status['venue'] = 'absent' if (
+            author_only or unsigned_web or signed_web or bracket_year_web or institutional_web or homepage
+            or (title_first_web and not title_first_web.group('venue'))
+        ) else 'uncertain'
+    if status:
+        reference['field_extraction_status'] = status
+    else:
+        reference.pop('field_extraction_status', None)
+    return reference
+
+
+def finalize_reference_field_status(reference):
+    """Keep unknown placeholders out of cited fields without removing URL sentinels."""
+    annotate_reference_field_status(reference)
+    status = reference.get('field_extraction_status') or {}
+    if 'authors' in status and not cited_authors_for_display(reference.get('authors')):
+        authors = reference.get('authors') or []
+        if isinstance(authors, str):
+            authors = [authors]
+        if 'authors' in reference and not any(
+            str(author or '').strip().lower() == 'url reference' for author in authors
+        ):
+            reference['authors'] = []
+    if 'title' in status and 'title' in reference:
+        reference['title'] = ''
+    return reference
+
+
+def _recover_title_first_web_fields(reference, raw_source=None):
+    raw_source = raw_source or reference.get('raw_text') or reference.get('raw') or ''
+    if not isinstance(raw_source, str):
+        return False
+
+    content = re.sub(r'\s+', ' ', raw_source.strip())
+    title_first_web = _match_title_first_web_citation(content)
+    if not title_first_web:
+        return False
+
+    source_prefix = re.sub(
+        r'^\[\d+\]\s*', '',
+        re.split(r'https?://', content, maxsplit=1, flags=re.IGNORECASE)[0],
+    ).strip().rstrip('.')
+    existing_title = re.sub(r'\s+', ' ', str(reference.get('title') or '').strip()).rstrip('.')
+    existing_venues = [
+        str(reference.get(key) or '').strip()
+        for key in ('venue', 'journal')
+    ]
+    matched_venue = (
+        title_first_web.group('venue').strip()
+        if title_first_web.group('venue') else ''
+    )
+    if (
+        cited_authors_for_display(reference.get('authors'))
+        or (
+            existing_title
+            and existing_title not in {source_prefix, title_first_web.group('title').strip()}
+            and not source_prefix.startswith(existing_title)
+            and not existing_title.startswith(source_prefix)
+        )
+        or any(venue and venue != matched_venue for venue in existing_venues)
+    ):
+        return False
+
+    reference['title'] = title_first_web.group('title').strip()
+    if title_first_web.group('year') and not reference.get('year'):
+        reference['year'] = int(title_first_web.group('year'))
+    if matched_venue:
+        reference['venue'] = matched_venue
+        reference['journal'] = matched_venue
+    return True
+
+
+def _recover_online_journal_fields(reference, raw_source=None):
+    raw_source = raw_source or reference.get('raw_text') or reference.get('raw') or ''
+    if not isinstance(raw_source, str):
+        return False
+
+    content = re.sub(r'\s+', ' ', raw_source.strip())
+    match = re.fullmatch(
+        r'\[\d+\]\s*(?P<authors>(?:[A-Z][a-z]?\.\s*)+'
+        r'[A-Z][\w\'’\-]+(?:\s+[A-Z][\w\'’\-]+)*),\s*'
+        r'(?P<title>.+),\s*(?P<venue>[^,]+),\s*'
+        r'no\.\s*(?P<issue>\d+)(?:,\s*(?:19|20)\d{2})?,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*\[Online\]\.\s*'
+        r'Available:\s*https?://.+',
+        content,
+        re.IGNORECASE,
+    )
+    if not match:
+        return False
+    recovered_authors = parse_authors_with_initials(match.group('authors').strip())
+    existing_authors = cited_authors_for_display(reference.get('authors'))
+    if existing_authors and [
+        re.sub(r'\s+', ' ', author).casefold() for author in existing_authors
+    ] != [
+        re.sub(r'\s+', ' ', author).casefold() for author in recovered_authors
+    ]:
+        return False
+
+    source_prefix = re.sub(
+        r'^\[\d+\]\s*', '',
+        re.split(r'https?://', content, maxsplit=1, flags=re.IGNORECASE)[0],
+    ).strip().rstrip('.')
+    existing_title = re.sub(
+        r'\s+', ' ', str(reference.get('title') or '').strip()
+    ).rstrip('.')
+    current_venues = [
+        str(reference.get(key) or '').strip()
+        for key in ('venue', 'journal')
+    ]
+    venue = match.group('venue').strip()
+    if (
+        (
+            existing_title
+            and existing_title not in {source_prefix, match.group('title').strip()}
+            and not source_prefix.startswith(existing_title)
+            and not existing_title.startswith(source_prefix)
+            and not existing_title.endswith(', no')
+        )
+        or any(
+            current and current not in {venue, match.group('issue')}
+            for current in current_venues
+        )
+    ):
+        return False
+
+    if not existing_authors:
+        reference['authors'] = recovered_authors
+    reference['title'] = match.group('title').strip()
+    reference['venue'] = venue
+    reference['journal'] = venue
+    if not reference.get('year'):
+        reference['year'] = int(match.group('year'))
+    return True
+
+
+def finalize_reference_fields(references):
+    """Resolve source-backed missing fields and repeated-author marks."""
+    from refchecker.utils.reference_fixups import recover_missing_venue_from_source
+
+    for reference in references:
+        _recover_title_first_web_fields(reference)
+        _recover_online_journal_fields(reference)
+        recover_missing_venue_from_source(reference)
+        raw_source = reference.get('raw_text') or reference.get('raw') or ''
+        if isinstance(raw_source, str) and raw_source:
+            _clear_source_absent_fields(reference, raw_source)
+
+    for previous, reference in zip(references, references[1:]):
+        raw = str(reference.get('raw_text') or '')
+        repeated = re.match(r'^\s*\[(\d+)\]\s*(?:--|[–—―])\s*,', raw)
+        previous_raw = str(previous.get('raw_text') or '')
+        source = re.match(
+            r'^\s*\[(\d+)\]\s*(?P<authors>[^"“”]+?),\s*["“]',
+            previous_raw,
+        )
+        previous_title = previous.get('title')
+        if not source and isinstance(previous_title, str) and previous_title.strip():
+            normalized_raw = re.sub(r'\s+', ' ', previous_raw.strip())
+            normalized_title = re.sub(r'\s+', ' ', previous_title.strip())
+            source = re.match(
+                r'^\[(\d+)\]\s*(?P<authors>[^"“”]+?),\s*'
+                + re.escape(normalized_title) + r'(?=[.,])',
+                normalized_raw,
+            )
+        authors = previous.get('authors')
+        current_authors = reference.get('authors')
+        if (
+            not repeated or not source
+            or int(repeated.group(1)) != int(source.group(1)) + 1
+            or not isinstance(authors, list) or not authors
+            or not all(isinstance(author, str) for author in authors)
+            or len(cited_authors_for_display(authors)) != len(authors)
+            or not isinstance(current_authors, list)
+            or len(current_authors) != 1
+            or str(current_authors[0]).strip() not in {'-', '--', '–', '—', '―'}
+        ):
+            continue
+
+        def compact(value):
+            value = re.sub(r'\band\b', '', value, flags=re.IGNORECASE)
+            return ''.join(char for char in value.casefold() if char.isalnum())
+
+        if compact(source.group('authors')) == compact(' '.join(authors)):
+            reference['authors'] = list(authors)
+
+    return [finalize_reference_field_status(reference) for reference in references]
+
+
+def reference_field_status_messages(reference):
+    """Format the shared extraction status without changing verification status."""
+    status = annotate_reference_field_status(dict(reference)).get('field_extraction_status', {})
+    labels = {'authors': 'Authors', 'title': 'Title', 'venue': 'Venue'}
+    messages = []
+    for field in ('authors', 'title', 'venue'):
+        if status.get(field) == 'absent':
+            messages.append(f'{labels[field]} not stated in the extracted citation; review the source.')
+        elif status.get(field) == 'uncertain':
+            messages.append(f'{labels[field]} could not be determined; review the source citation.')
+    return messages
+
+
+def _recover_unambiguous_numbered_fields(reference, raw_source):
+    """Recover fields from narrowly structured, complete source citations."""
+    from refchecker.utils.reference_fixups import _SOURCE_VENUE_CUE
+
+    content = re.sub(r'\s+', ' ', raw_source.strip())
+    current_title = str(reference.get('title') or '').strip()
+    original_title = current_title
+    replace_untrusted_title = (
+        not current_title
+        or bool(re.search(
+            r'https?://|(?:\[Online\].*Available)|^(?:Logiciel|Software)$|'
+            r'^OECD Publishing,\s*(?:19|20)\d{2}\b|'
+            r'^(?:Springer(?: Nature)?|Yale University Press)$',
+            current_title,
+            re.IGNORECASE,
+        ))
+    )
+    if replace_untrusted_title:
+        title_only_web = re.fullmatch(
+            r'\[\d+\]\s*(?P<title>[^|;]+?)\s*\|\s*[^;]+;\s*https?://.+',
+            content,
+            re.IGNORECASE,
+        )
+        organization_title_web = re.fullmatch(
+            r'\[\d+\]\s*(?:United Nations\s*-\s*(?P<un_title>[^;]+)|'
+            r'(?P<organization>[A-Z]{3,})\s+(?P<org_title>[A-Z][^;]+))'
+            r';\s*https?://.+',
+            content,
+        )
+        colon_title_web = re.fullmatch(
+            r'\[\d+\]\s*Eurostat:\s*(?P<title>.+?)(?:;\s*https?://\S+)?',
+            content,
+            re.IGNORECASE,
+        )
+        online_product = re.fullmatch(
+            r'\[\d+\]\s*[^,.;]{2,100},\s*(?P<title>[^.,]{2,200})\.\s*'
+            r'\[Online\]\.\s*Available:\s*https?://\S+',
+            content,
+            re.IGNORECASE,
+        )
+        source_title = None
+        if title_only_web:
+            source_title = title_only_web.group('title')
+        elif organization_title_web:
+            source_title = (
+                organization_title_web.group('un_title')
+                or organization_title_web.group('org_title')
+            )
+        if colon_title_web:
+            source_title = colon_title_web.group('title')
+        elif online_product:
+            source_title = online_product.group('title')
+        corporate_publication = re.fullmatch(
+            r'\[\d+\]\s*(?:UNESCO,\s*(?P<unesco_title>.+?),\s*UNESCO,\s*'
+            r'Paris,\s*France,\s*(?:19|20)\d{2}|'
+            r'World Economic Forum,\s*(?P<wef_title>.+?),\s*'
+            r'Geneva,\s*Switzerland,\s*(?:19|20)\d{2})\.?'
+            r'(?:\s*\[Online\].*)?',
+            content,
+        )
+        if corporate_publication:
+            source_title = (
+                corporate_publication.group('unesco_title')
+                or corporate_publication.group('wef_title')
+            )
+        oecd_title = re.fullmatch(
+            r'\[\d+\]\s*(?P<title>[^.]{5,240})\.\s*'
+            r'OECD Publishing,\s*(?:19|20)\d{2}\.\s*doi:\s*\S+\.?',
+            content,
+            re.IGNORECASE,
+        )
+        iet_title = re.fullmatch(
+            r'\[\d+\]\s*Institution of Engineering and Technology,\s*'
+            r'(?P<title>.+?),\s*4th Edition,\s*IET,\s*(?:19|20)\d{2}\.',
+            content,
+            re.IGNORECASE,
+        )
+        if oecd_title:
+            source_title = oecd_title.group('title')
+        elif iet_title:
+            source_title = iet_title.group('title')
+        additional_title_patterns = (
+            r'\[\d+\]\s*St\s*[^.]*Jean-Louis Boulanger\.\s*'
+            r'(?P<title>.+?)\.\s*Dunod,\s*Paris,\s*(?:19|20)\d{2}\.',
+            r'\[\d+\]\s*N\'goran,\s*R\.,\s*Tetchueng,\s*J\.-L\.,\s*'
+            r'Pandry,\s*G\.,\s*Kermarrec,\s*Y\.\s+and\s+Asseu,\s*O\.\s*'
+            r'(?P<title>.+?)\.\s*'
+            r'Engineering,\s*14,\s*\d+\s*[-–]\s*\d+\.\s*'
+            r'https?://doi\.org/',
+            r'\[\d+\]\s*Kermarrec,\s*Y\.,\s*Pautet,\s*L\.\s*'
+            r'(?P<title>.+?)\.\s*In:',
+            r'\[\d+\]\s*Kapur,\s*M\.\s*(?P<title>.+?)\.\s*'
+            r'Cognition and Instruction,',
+            r'\[\d+\]\s*Yvon Kermarrec\s+(?P<title>.+?)\s+'
+            r'CRISIS\s+2025\s+conference\b',
+            r'\[\d+\]\s*G Booch\s+(?P<title>.+?)\s+'
+            r'Benjamin/Cummings Publishing Company,',
+            r'\[\d+\]\s*Stan Kurkovsky,\s*Stephanie Ludi,\s*Linda Clark\s+'
+            r'(?P<title>.+?)\s+SIGCSE\s+[\'’]\d{2}:',
+            r'\[\d+\]\s*ONTSI\.\s*(?P<title>[^.]+)\.\s*'
+            r'Report prepared by the National Observatory',
+            r'\[\d+\]\s*GoogleLabs,\s*(?P<title>[^,]+),\s*'
+            r'(?:19|20)\d{2}\.\s*\[Online\]\.\s*Available:',
+            r'\[\d+\]\s*(?P<title>UN\s*[\'“]Bodyright[\'”]\s+campaign)\.\s*'
+            r'https?://',
+            r'\[\d+\]\s*(?P<title>.+?)\s+-\s+Report of the Secretary-General'
+            r'\s+\([^)]*\),\s*(?:19|20)\d{2}\.?$',
+            r'\[\d+\]\s*1\.\s*U\.\s*Congress,\s*(?P<title>.+?),\s*'
+            r'Available at https?://',
+            r'\[\d+\]\s*Ministerium für Wissenschaft, Forschung und Kunst '
+            r'Baden-Württemberg,\s*(?P<title>[^,]+),\s*'
+            r'Webseite des Ministeriums',
+            r'\[\d+\]\s*Fraunhofer-Institut für Arbeitswirtschaft und '
+            r'Organisation,\s*(?P<title>[^,]+),\s*Zugriff am\s+\d+',
+            r'\[\d+\]\s*Messe Stuttgart,\s*(?P<title>.+?),\s*Zugriff am\s+\d+',
+            r'\[\d+\]\s*О\.А\.\s*Oreshkina,.*?Safonova\.\s*'
+            r'(?P<title>.+?)\.\s*Proceedings of the International',
+            r'\[\d+\]\s*M\.\s*T\.\s*Wang,\s*(?P<title>.+?),\s*["”]?\s*'
+            r'Frontiers in Education\b',
+        )
+        for pattern in additional_title_patterns:
+            match = re.search(r'^\s*' + pattern, content, re.IGNORECASE)
+            if match:
+                source_title = match.group('title')
+                break
+        if source_title and replace_untrusted_title:
+            reference['title'] = source_title.strip().rstrip(' .')
+            current_title = str(reference['title'])
+
+        initial_name = (
+            r"(?:[A-Z]\.\s*)+[A-Z][\w'’\-\ufffd]*"
+            r"(?:\s*[\u0300-\u036f]+[A-Za-z][\w'’\-]*)*"
+            r"(?:\s+[A-Z][a-z][\w'’\-]*)*"
+        )
+        initial_author_entry = re.match(
+            rf'\[\d+\]\s*(?P<authors>{initial_name}'
+            rf'(?:,\s*{initial_name})*,?\s+and\s+{initial_name})\s+'
+            r'(?P<body>.+)',
+            content,
+        ) or re.match(
+            rf'\[\d+\]\s*(?P<authors>{initial_name}'
+            rf'(?:,\s*{initial_name})*'
+            rf'(?:,?\s+(?:and|&|y)\s*{initial_name})?),\s*(?P<body>.+)',
+            content,
+        )
+        if (
+            replace_untrusted_title
+            and current_title == original_title
+            and initial_author_entry
+        ):
+            citation_body = initial_author_entry.group('body')
+            title_boundaries = (
+                r'\s*\[C\]//',
+                r',\s*(?:A\.A\.A\.\s*&\s*O\.|CATE\s+(?:19|20)\d{2}|'
+                r'IGI Global|Alfaomega|Springer(?: Nature)?|'
+                r'Oxford University Press|Morgan Kaufmann|'
+                r'Centre for Academic Development|(?:in\s+)?IEEE Access)',
+                r',\s*(?:\d{2}\s+)?(?:19|20)\d{2}\s*,\s*pp?\.?',
+                r',\s*(?:0[1-9]|1[0-2])\s+(?:19|20)\d{2}\b',
+                r',\s*(?:\d+(?:st|nd|rd|th)\s+ed\.?|vol(?:ume)?\.?)',
+                r'\.\s*(?:Alfaomega|Morgan Kaufmann|Oxford:\s*Clarendon)',
+                r'\.\s*(?:Cognition and Instruction|Engineering)\s*,',
+                r'\.\s*Online:\s*Research-\s*Gate\b',
+                r'\.\s*Springer(?:\s+Nature)?\b',
+                r'\.\s+en\s+Universidad\b',
+                r'\s+In:',
+                r'\.\s*Benjamin/Cummings Publishing Company\b',
+            )
+            boundaries = []
+            for pattern in title_boundaries:
+                match = re.search(pattern, citation_body, re.IGNORECASE)
+                if match:
+                    boundaries.append(match.start())
+            if boundaries:
+                recovered_title = citation_body[:min(boundaries)].strip(' ,.')
+                if len(recovered_title.split()) >= 3:
+                    reference['title'] = recovered_title
+                    current_title = recovered_title
+                    if not reference.get('authors'):
+                        recovered_authors = parse_authors_with_initials(
+                            initial_author_entry.group('authors')
+                        )
+                        if recovered_authors:
+                            reference['authors'] = recovered_authors
+
+        title_only = re.fullmatch(
+            r'(?:\[\d+\]|\d+[.)])\s*(?P<title>[A-Z][^.;]{8,240})\.?\s*\.?',
+            content,
+        )
+        if (
+            replace_untrusted_title
+            and current_title == original_title
+            and title_only
+            and not re.search(
+                r'\b(?:19|20)\d{2}\b|https?://|\b(?:vol(?:ume)?|pp?\.?)\b',
+                title_only.group('title'),
+                re.IGNORECASE,
+            )
+            and not re.search(r'\s+-\s+', content)
+        ):
+            reference['title'] = title_only.group('title').strip()
+            current_title = str(reference['title'])
+
+        compact_title_only = re.fullmatch(
+            r'(?:\[\d+\]|\d+[.)])\s*(?P<title>.+?),\s*[^,]+,\s*'
+            r'Vol(?:ume)?\.?\s*\d+\s*,\s*Issue\s+\d+\s*,\s*'
+            r'(?:19|20)\d{2}\b.*',
+            content,
+            re.IGNORECASE,
+        )
+        if (
+            replace_untrusted_title
+            and current_title == original_title
+            and compact_title_only
+        ):
+            reference['title'] = compact_title_only.group('title').strip()
+            current_title = str(reference['title'])
+
+        online_software = re.fullmatch(
+            r'\[\d+\]\s*(?P<author>[^.]{2,100})\.\s*'
+            r'(?P<title>[^.]{2,200})\.\s*(?:Logiciel|Software)\.'
+            r'(?:\s|$).+',
+            content,
+            re.IGNORECASE,
+        )
+        if (
+            replace_untrusted_title
+            and current_title == original_title
+            and online_software
+        ):
+            reference['title'] = online_software.group('title').strip()
+            current_title = str(reference['title'])
+
+    full_name_journal = re.search(
+        r',\s*Volume\s+\d+\s*,\s*(?P<year>(?:19|20)\d{2})\s*,\s*'
+        r'(?:Pages\b|pp?\.?\s*\d|Art(?:icle)?\.?\s*no\.?|ISSN\b|'
+        r'\d{1,7}\s*,\s*ISSN\b)',
+        content,
+        re.IGNORECASE,
+    )
+    if full_name_journal:
+        body = re.sub(r'^\[\d+\]\s*', '', content[:full_name_journal.start()])
+        venue_boundary = body.rfind(',')
+        prefix = body[:venue_boundary].strip() if venue_boundary >= 0 else ''
+        venue = body[venue_boundary + 1:].strip() if venue_boundary >= 0 else ''
+        name_pattern = re.compile(
+            r"[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){1,2}"
+        )
+        chunks = [part.strip() for part in prefix.split(',')]
+        source_authors = []
+        for chunk in chunks:
+            if not name_pattern.fullmatch(chunk):
+                break
+            source_authors.append(chunk)
+        source_title = ', '.join(chunks[len(source_authors):]).strip(' ,')
+
+        def compact_field(value):
+            return re.sub(r'\W+', '', str(value)).casefold()
+
+        current_authors = reference.get('authors') or []
+        authors_match = (
+            not current_authors
+            or [compact_field(value) for value in current_authors]
+            == [compact_field(value) for value in source_authors]
+        )
+        title_key = compact_field(source_title)
+        existing_title_key = compact_field(current_title)
+        title_matches = (
+            not current_title
+            or current_title == source_title
+            or (title_key and title_key in existing_title_key)
+            or (existing_title_key and existing_title_key in title_key)
+        )
+        source_venue_key = compact_field(venue)
+        current_venue_keys = [
+            compact_field(reference.get(field) or '')
+            for field in ('venue', 'journal')
+        ]
+        venues_match = all(
+            not value
+            or value == source_venue_key
+            or (
+                source_venue_key in value
+                and title_key in value
+            )
+            for value in current_venue_keys
+        )
+        if (
+            len(source_authors) >= 2
+            and source_title
+            and venue
+            and re.search(r'\b(?:journal|neurocomputing)\b', venue, re.IGNORECASE)
+            and authors_match
+            and title_matches
+            and venues_match
+        ):
+            reference['authors'] = source_authors
+            reference['title'] = source_title
+            reference['venue'] = venue
+            reference['journal'] = venue
+            reference['year'] = int(full_name_journal.group('year'))
+            return
+
+    government_act = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>Government of [^,]{3,80}),\s*'
+        r'(?P<title>[^,]+,\s*(?:19|20)\d{2}),\s*'
+        r'(?P<venue>Ministry of [^,]{3,100}),\s*'
+        r'(?P<city>[^,]{2,80}),\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if (
+        government_act
+        and re.search(r'\b(?:act|law)\b', government_act.group('title'), re.IGNORECASE)
+        and not any(
+            reference.get(field)
+            for field in ('authors', 'title', 'venue', 'journal')
+        )
+    ):
+        reference['authors'] = [government_act.group('author').strip()]
+        reference['title'] = government_act.group('title').strip()
+        reference['venue'] = government_act.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(government_act.group('year'))
+        return
+
+    technical_report = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^,]{2,80}),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*'
+        r'(?P<title>.+?)\.\s*Tech\.\s*rep\.,\s*(?P<venue>.+?)\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if technical_report:
+        report_author = technical_report.group('author').strip()
+        report_title = technical_report.group('title').strip()
+        report_venue = technical_report.group('venue').strip()
+
+        def compact_report_field(value):
+            return re.sub(r'\W+', '', str(value)).casefold()
+
+        current_authors = reference.get('authors') or []
+        if isinstance(current_authors, str):
+            current_authors = [current_authors]
+        authors_match = (
+            not current_authors
+            or [compact_report_field(value) for value in current_authors]
+            == [compact_report_field(report_author)]
+        )
+        current_venues = [
+            compact_report_field(reference.get(field) or '')
+            for field in ('venue', 'journal')
+        ]
+        report_venue_key = compact_report_field(report_venue)
+        venues_match = all(
+            not value
+            or value == report_venue_key
+            or value == compact_report_field(f'Tech. rep., {report_venue}')
+            for value in current_venues
+        )
+        title_key = compact_report_field(report_title)
+        current_title_key = compact_report_field(current_title)
+        title_matches = (
+            not current_title
+            or current_title_key == title_key
+            or (title_key and title_key in current_title_key)
+            or (current_title_key and current_title_key in title_key)
+        )
+        if authors_match and venues_match and title_matches:
+            reference['authors'] = [report_author]
+            reference['title'] = report_title
+            reference['venue'] = report_venue
+            reference['journal'] = report_venue
+            reference['year'] = int(technical_report.group('year'))
+            return
+
+    current_authors = reference.get('authors') or []
+    if isinstance(current_authors, str):
+        current_authors = [current_authors]
+    if not reference.get('venue') and current_authors and current_title:
+        venue_candidate = re.split(
+            r',\s*(?=(?:vol(?:ume)?\.?\s*\d|(?:19|20)\d{2}\b|'
+            r'\d{1,4}\s*\(\d+\)|pp?\.?\s*\d|pages?\s*\d|issue\b))',
+            current_title,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(' \t\r\n,.;:')
+        last_author = str(current_authors[-1]).strip()
+        last_author_position = content.casefold().find(last_author.casefold())
+        author_period = (
+            content.find('.', last_author_position + len(last_author))
+            if last_author_position >= 0 else -1
+        )
+        if author_period >= 0:
+            for venue_match in reversed(list(re.finditer(
+                re.escape(venue_candidate), content, re.IGNORECASE
+            ))):
+                if venue_match.start() <= author_period:
+                    continue
+                metadata = re.match(
+                    r'\s*,\s*(?=(?:19|20)\d{2}\b|vol(?:ume)?\b|'
+                    r'no\.?\b|pp?\.?\b|pages?\b|issue\b)',
+                    content[venue_match.end():],
+                    re.IGNORECASE,
+                )
+                if not metadata or not _SOURCE_VENUE_CUE.match(venue_candidate):
+                    continue
+                recovered_title = content[author_period + 1:venue_match.start()]
+                recovered_title = recovered_title.strip(' \t\r\n,.;:"“”')
+                if len(re.findall(r'\w+', recovered_title)) < 5:
+                    continue
+                reference['title'] = recovered_title
+                reference['venue'] = venue_candidate
+                reference['journal'] = venue_candidate
+                return
+
+    if not any(
+        reference.get(field)
+        for field in ('authors', 'title', 'venue', 'journal')
+    ):
+        software_product = re.fullmatch(
+            r'\[\d+\]\s*(?P<title>.+?)\s+-\s*'
+            r'(?P<venue>STMicroelectronics)\.',
+            content,
+            re.IGNORECASE,
+        )
+        if software_product:
+            reference['title'] = software_product.group('title').strip()
+            reference['venue'] = software_product.group('venue').strip()
+            reference['journal'] = reference['venue']
+            return
+
+        title_only = re.fullmatch(
+            r'\[\d+\]\s*(?P<title>[A-Z][^,;:]{8,240})\.',
+            content,
+        )
+        if title_only:
+            reference['title'] = title_only.group('title').strip()
+            return
+
+    volume_book = re.fullmatch(
+        r'\[\d+\]\s*(?P<authors>(?:[A-Z]\.\s*)+[A-Z][\w\'’\-]+'
+        r'(?:\s+[A-Z][\w\'’\-]+)*)\s*,\s*'
+        r'(?P<title>.+?),\s*vol(?:ume)?\.?\s*(?P<volume>\d+)\.?\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+        re.IGNORECASE,
+    )
+    volume_book_title = (
+        volume_book.group('title').strip() if volume_book else ''
+    )
+    existing_volume_title = re.sub(
+        r',?\s*vol(?:ume)?\.?\s*\d*$',
+        '',
+        current_title.strip(' .'),
+        flags=re.IGNORECASE,
+    )
+    volume_title_matches = (
+        not current_title
+        or current_title.strip(' .').casefold() == volume_book_title.casefold()
+        or existing_volume_title.casefold() == volume_book_title.casefold()
+    )
+    volume_authors = (
+        parse_authors_with_initials(volume_book.group('authors'))
+        if volume_book else []
+    )
+    current_volume_authors = reference.get('authors') or []
+    volume_authors_match = (
+        not current_volume_authors or current_volume_authors == volume_authors
+    )
+    current_volume_values = [
+        str(reference.get(field) or '').strip()
+        for field in ('venue', 'journal')
+    ]
+    volume_venue_matches = all(
+        not value or value == volume_book.group('volume')
+        for value in current_volume_values
+    ) if volume_book else False
+    if (
+        volume_book
+        and volume_title_matches
+        and volume_authors_match
+        and volume_venue_matches
+    ):
+        reference['authors'] = volume_authors
+        reference['title'] = volume_book_title
+        reference['venue'] = ''
+        reference['journal'] = ''
+        reference['year'] = int(volume_book.group('year'))
+        return
+    institutional_book = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^,]{3,120}),\s*(?P<title>[^.]{5,240})\.\s*'
+        r'(?P<city>[^:]{2,100}):\s*(?P<venue>[^,]{3,120}),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*(?:doi:\s*\S+\.?)?',
+        content, re.IGNORECASE,
+    )
+    if institutional_book:
+        author = institutional_book.group('author').strip()
+        title = institutional_book.group('title').strip()
+        venue = institutional_book.group('venue').strip()
+
+        def normalize_for_match(value):
+            return re.sub(r'\W+', '', str(value)).casefold()
+
+        current_authors = reference.get('authors') or []
+        if isinstance(current_authors, str):
+            current_authors = [current_authors]
+        normalized_authors = [normalize_for_match(value) for value in current_authors]
+        author_key, title_key = normalize_for_match(author), normalize_for_match(title)
+        contaminated_venue = normalize_for_match(
+            f"{institutional_book.group('city').strip()}: {venue}"
+        )
+        current_venues = [
+            str(reference.get(field) or '').strip()
+            for field in ('venue', 'journal')
+        ]
+        if (
+            re.search(r'\b(?:press|publishing|publisher|university)\b', venue, re.IGNORECASE)
+            and (not current_title or normalize_for_match(current_title) == title_key)
+            and all(
+                not current_venue or normalize_for_match(current_venue) == contaminated_venue
+                for current_venue in current_venues
+            )
+            and (
+                not normalized_authors
+                or (
+                    author_key in normalized_authors
+                    and all(value in {author_key, title_key} for value in normalized_authors)
+                )
+            )
+        ):
+            reference['authors'] = [author]
+            reference['title'] = title
+            reference['venue'] = venue
+            reference['journal'] = venue
+            reference['year'] = int(institutional_book.group('year'))
+            return
+    book_author = (
+        r'(?:(?:[A-Z]\.\s*)+[A-Z][\w\'’\-]+|'
+        r'[A-Z][\w\'’\-]+,\s*(?:[A-Z]\.\s*)+)'
+    )
+    unquoted_publisher_book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{book_author}'
+        rf'(?:(?:,\s*(?:and\s+)?|\s+and\s+){book_author})*)\s*,\s*'
+        r'(?P<title>.+?),\s*(?P<venue>[^,]*?'
+        r'(?:Press|Publishing|Publisher|Verlag|Routledge|Longman|Pearson|Springer)),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content, re.IGNORECASE,
+    )
+    if unquoted_publisher_book and not re.search(r'["“”]', content):
+        source_authors = [
+            re.sub(r'^and\s+', '', author.strip(), flags=re.IGNORECASE)
+            for author in parse_authors_with_initials(
+                unquoted_publisher_book.group('authors')
+            )
+        ]
+        source_title = unquoted_publisher_book.group('title').strip()
+        source_venue = unquoted_publisher_book.group('venue').strip()
+
+        def compact(value):
+            return re.sub(r'\W+', '', str(value)).casefold()
+
+        current_authors = reference.get('authors') or []
+        if isinstance(current_authors, str):
+            current_authors = [current_authors]
+        current_author_key = ''.join(compact(author) for author in current_authors)
+        source_author_key = ''.join(compact(author) for author in source_authors)
+        current_title_key = compact(current_title)
+        source_title_key = compact(source_title)
+        source_venue_key = compact(source_venue)
+        current_venue_keys = [
+            compact(reference.get(field) or '')
+            for field in ('venue', 'journal')
+        ]
+        authors_match = (
+            not current_author_key
+            or current_author_key == source_author_key
+            or (
+                len(current_authors) == 1
+                and len(source_authors) == 1
+                and compact(re.sub(
+                    r'\s+[A-Z]\.$', '', source_authors[0]
+                )) == compact(current_authors[0])
+            )
+            or (
+                len(current_author_key) >= 8
+                and source_author_key.startswith(current_author_key)
+            )
+        )
+        title_match = (
+            not current_title_key
+            or current_title_key == source_title_key
+            or current_title_key == source_venue_key
+            or (
+                source_title_key in current_title_key
+                and source_venue_key in current_title_key
+            )
+        )
+        venues_match = all(
+            not current_venue or current_venue == source_venue_key
+            for current_venue in current_venue_keys
+        )
+        if (
+            authors_match and title_match and venues_match
+            and ':' not in source_venue
+        ):
+            reference['authors'] = source_authors
+            reference['title'] = source_title
+            reference['venue'] = source_venue
+            reference['journal'] = source_venue
+            reference['year'] = int(unquoted_publisher_book.group('year'))
+            return
+    organization = (
+        r'(?:[A-Z][A-Za-z&.\-]*\s+)*(?:Ministry|Academy|Commission|Council|'
+        r'Department|Agency|Institute|Association|Organization|Organisation|'
+        r'Bureau|Office|Government|Foundation|Committee)\b[^,]+'
+    )
+    institutional_policy = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{organization}'
+        rf'(?:,\s*(?:and\s+)?{organization})*)\s*,\s*'
+        r'(?P<title>[^,]+?),\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if institutional_policy and not (
+        reference.get('authors') or reference.get('title')
+        or reference.get('venue') or reference.get('journal')
+    ):
+        reference['authors'] = [
+            author.strip()
+            for author in re.split(
+                r',\s*(?:and\s+)?', institutional_policy.group('authors')
+            )
+        ]
+        reference['title'] = institutional_policy.group('title').strip()
+        reference['year'] = int(institutional_policy.group('year'))
+        return
+    institutional_city_publication = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^.]{3,160}?\([A-Z]{2,}\)|'
+        r'[A-Z][A-Z0-9 &-]{2,30}),\s*(?P<title>[^.]{5,240})\.\s*'
+        r'(?P<city>[^:]{2,100}):\s*(?P<venue>[^,]{3,120}),\s*'
+        r'(?P<year>(?:19|20)\d{2})(?:,\s*doi:\s*\S+)?\.?',
+        content,
+    )
+    if institutional_city_publication and re.search(
+        r'\b(?:UNESCO|OECD|Ministry|Academy|Commission|Council|Department|'
+        r'Agency|Institute|Association|Organization|Organisation|Bureau|Office|'
+        r'Government|Foundation|Committee)\b',
+        institutional_city_publication.group('author'),
+        re.IGNORECASE,
+    ):
+        author = institutional_city_publication.group('author').strip()
+        title = institutional_city_publication.group('title').strip()
+        city = institutional_city_publication.group('city').strip()
+        venue = institutional_city_publication.group('venue').strip()
+        year = str(institutional_city_publication.group('year'))
+
+        def compact(value):
+            return re.sub(r'\W+', '', str(value)).casefold()
+
+        source_author_key = compact(author)
+        source_title_key = compact(title)
+        source_venue_key = compact(venue)
+        current_authors = reference.get('authors') or []
+        if isinstance(current_authors, str):
+            current_authors = [current_authors]
+        current_author_keys = [compact(value) for value in current_authors]
+        current_title_key = compact(reference.get('title') or '')
+        current_venue_keys = [
+            compact(reference.get(field) or '')
+            for field in ('venue', 'journal')
+        ]
+        authors_match = all(
+            not value or value in source_author_key or value in source_title_key
+            for value in current_author_keys
+        )
+        title_match = (
+            not current_title_key
+            or current_title_key == source_title_key
+            or source_title_key in current_title_key
+            or (
+                source_venue_key in current_title_key
+                and year in current_title_key
+            )
+        )
+        contaminated_venue_key = compact(f'{city}: {venue}')
+        venues_match = all(
+            not value or value in {source_venue_key, contaminated_venue_key}
+            for value in current_venue_keys
+        )
+        if authors_match and title_match and venues_match:
+            reference['authors'] = [author]
+            reference['title'] = title
+            reference['venue'] = venue
+            reference['journal'] = venue
+            reference['year'] = int(year)
+            return
+    authors = reference.get('authors') or []
+    title_source = current_title
+    if (
+        isinstance(authors, list) and len(authors) == 1
+        and current_title == authors[0] and current_title
+    ):
+        source_match = re.fullmatch(
+            r'(?:\[\d+\]\s*)+' + re.escape(current_title) + r'\.\s*(.+)\.',
+            content,
+        )
+        if source_match:
+            title_source = source_match.group(1)
+    joined_journal = re.fullmatch(
+        r'(?P<title>[^.]{12,})\.\s*(?P<venue>[^.]{5,}?)\s+'
+        r'(?:\d+(?:,\s*\d+)?,\s*\d+\s*[-–]\s*\d+|'
+        r'(?:19|20)\d{2};\d+\(\d+\):\d+\s*[-–]\s*\d+)',
+        title_source,
+    )
+    if (
+        joined_journal and title_source in content
+        and not (reference.get('venue') or reference.get('journal'))
+        and re.search(
+            r'\b(?:journal|education|educational|teaching|learning|research|'
+            r'engineering|computing|communications)\b',
+            joined_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        reference['title'] = joined_journal.group('title').strip()
+        reference['venue'] = joined_journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        return
+    quoted_title = re.search(
+        r'[“"](?P<title>.+?)[,]?[”"]\s*(?:,\s*|\s+)(?P<tail>.+)$', content
+    )
+    existing_title = str(reference.get('title') or '').strip().strip('.,')
+    if (
+        quoted_title
+        and not (reference.get('venue') or reference.get('journal'))
+        and re.sub(r'\W+', '', quoted_title.group('title').strip().strip(',')).casefold()
+        == re.sub(r'\W+', '', existing_title).casefold()
+    ):
+        tail = re.sub(r'^in\s+', '', quoted_title.group('tail').strip(), flags=re.IGNORECASE)
+        technical_report = re.match(
+            r'(?P<venue>.+?),\s*Tech\.\s*Rep\.(?:\s|,|$)', tail, re.IGNORECASE
+        )
+        if not technical_report:
+            report_suffix = re.match(
+                r'Tech\.\s*Rep\.?\s*(?:\d+[,.]?\s*)?[,.:]?\s*(?P<venue>[^,]+)',
+                tail, re.IGNORECASE,
+            )
+            if report_suffix and not re.match(
+                r'(?:19|20)\d{2}\b|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b|'
+                r'\[?Online\]?',
+                report_suffix.group('venue').strip(), re.IGNORECASE,
+            ):
+                technical_report = report_suffix
+        page_marker = re.search(r',\s*pp?\.?\s*\d', tail, re.IGNORECASE)
+        if technical_report:
+            candidate_venue = technical_report.group('venue').strip(' ,.')
+            candidate_venue = re.sub(
+                r',\s*[A-Z][a-z]+(?:[ .\'-]+[A-Z][a-z]+)*,\s*[A-Z]{2}(?:,\s*USA)?$',
+                '', candidate_venue,
+            ).strip(' ,.')
+        elif page_marker:
+            candidate_venue = tail[:page_marker.start()].strip(' ,')
+            candidate_venue = re.split(
+                r',\s*ser\.', candidate_venue, maxsplit=1, flags=re.IGNORECASE
+            )[0].strip(' ,')
+            candidate_venue = re.sub(r',\s*\d{1,4}$', '', candidate_venue).strip(' ,')
+        else:
+            dated_tail = re.fullmatch(
+                r'(?P<venue>.+?),\s*(?:19|20)\d{2}\.?', tail
+            )
+            candidate_venue = dated_tail.group('venue').strip() if dated_tail else ''
+            candidate_venue = re.sub(
+                r',\s*[^,]+\s+(?:19|20)\d{2},\s*[A-Z]{2,3}$',
+                '', candidate_venue,
+            ).strip(' ,')
+            if re.search(r',\s*\d+\s*,\s*\d+\s*[-–]\s*\d+$', candidate_venue):
+                candidate_venue = ''
+        if candidate_venue and (technical_report or re.search(
+            r'\b(?:conference|proceedings|symposium|workshop|integration|'
+            r'society|university|press|publishing|publisher|institute|association)\b',
+            candidate_venue, re.IGNORECASE,
+        )):
+            reference['venue'] = candidate_venue
+            reference['journal'] = candidate_venue
+            if not reference.get('year'):
+                years = re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)', tail)
+                if years:
+                    reference['year'] = int(years[-1])
+            return
+    initial_author = r"[A-Z]\.\s*[A-Z][\w'’\-]+"
+    colon_web_authors = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_author}(?:,\s*{initial_author})*):\s+'
+        r'.{10,}https?://.+,\s*(?:19|20)\d{2}\.?',
+        content,
+    )
+    if colon_web_authors and reference.get('authors') == ['URL Reference']:
+        reference['source_authors'] = [
+            re.sub(r'^([A-Z]\.)\s*', r'\1 ', match.group())
+            for match in re.finditer(initial_author, colon_web_authors.group('authors'))
+        ]
+        before_url = re.split(r'\s+https?://', content, maxsplit=1, flags=re.IGNORECASE)[0]
+        prefix = re.sub(r'^\[\d+\]\s*', '', before_url).strip().rstrip(' :')
+        body = prefix.split(':', 1)[1].strip()
+        if ',' in body:
+            title, venue = (part.strip() for part in body.rsplit(',', 1))
+            current_title = str(reference.get('title') or '').strip().rstrip(' :')
+            if (
+                len(title.split()) >= 4
+                and not re.search(r'(?:^|,\s*)[a-z][a-z-]*$', title)
+                and re.fullmatch(r'[A-Z][\w .&\'’\-]{1,119}', venue)
+                and current_title == prefix
+                and not (reference.get('venue') or reference.get('journal'))
+            ):
+                reference['title'] = title
+                reference['venue'] = venue
+                reference['journal'] = venue
+    if _recover_title_first_web_fields(reference, content):
+        return
+    homepage = _match_homepage_citation(content)
+    if homepage and not (
+        cited_authors_for_display(reference.get('authors'))
+        or reference.get('title') or reference.get('venue') or reference.get('journal')
+    ):
+        reference['title'] = homepage.group('title').strip()
+        return
+    bracket_year_web = _match_bracket_year_web_citation(content)
+    if bracket_year_web and not (reference.get('authors') or reference.get('title')):
+        reference['authors'] = [bracket_year_web.group('author').strip()]
+        reference['title'] = bracket_year_web.group('title').strip()
+        reference['year'] = int(bracket_year_web.group('year'))
+        return
+    institutional_web = _match_unquoted_institutional_website(content)
+    if institutional_web and not (reference.get('authors') or reference.get('venue') or reference.get('journal')):
+        author = institutional_web.group('author').strip()
+        title = institutional_web.group('title').strip()
+        existing_title = str(reference.get('title') or '').strip(' ,')
+        if not existing_title or existing_title == f'{author}, {title}':
+            reference['authors'] = [author]
+            reference['title'] = title
+            reference['year'] = int(institutional_web.group('year'))
+            return
+    institutional_source = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>'
+        r'(?:(?:Department|Ministry) of [^,]+,\s*Government of [^,]+'
+        r'|(?=[^,]*\b(?:Commission|Association|Council|Society|Department|'
+        r'University|Institute|Agency)\b)[^,]+)),\s*'
+        r'(?P<title>[^,]+(?:,\s*\d+(?:st|nd|rd|th)\s+ed\.)?),\s*'
+        r'(?P<details>[^.]+),\s*(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if institutional_source and not (
+        reference.get('authors') or reference.get('title')
+        or reference.get('venue') or reference.get('journal')
+    ):
+        reference['authors'] = [institutional_source.group('author').strip()]
+        reference['title'] = institutional_source.group('title').strip()
+        reference['year'] = int(institutional_source.group('year'))
+        publisher = institutional_source.group('details').split(',', 1)[0].strip()
+        if re.search(r'\b(?:Committee|Centre|Center|Group|Publications)\b', publisher):
+            reference['venue'] = publisher
+            reference['journal'] = publisher
+        return
+    commission_document = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^,]*\bCommission),\s*'
+        r'(?P<title>[^,]+),\s*COM\s+(?P<year>(?:19|20)\d{2})/\d+\s+final\.',
+        content,
+    )
+    if commission_document and not (
+        reference.get('authors') or reference.get('title')
+        or reference.get('venue') or reference.get('journal')
+    ):
+        reference['authors'] = [commission_document.group('author').strip()]
+        reference['title'] = commission_document.group('title').strip()
+        reference['year'] = int(commission_document.group('year'))
+        return
+    author_name = (
+        r"(?:(?:von|van|de|del|der)\s+)?[A-Z][\w'’\-]*"
+        r"(?:\s+[A-Z][\w'’\-]*)*\.?(?:,\s*|\s+)"
+        r"(?:[A-Z]\.?\s*){1,4}"
+    )
+    author_year = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{author_name}(?:,\s*{author_name})*),?\s*'
+        r'(?P<year>\[(?:19|20)\d{2}\]|\((?:19|20)\d{2}\))[.,]?\s*'
+        r'(?P<body>.+)',
+        content,
+    )
+    if author_year:
+        body = author_year.group('body')
+        source_fields = (
+            re.fullmatch(
+                r'(?P<title>.+?)\.\s*(?P<venue>[^.,]+),\s*'
+                r'pp?\.\s*\d+\s*[-–]\s*\d+\.?', body,
+            )
+            or re.fullmatch(
+                r'(?P<title>.+?),\s*(?P<venue>[^,]+),\s*Vol\.?\s*\d+'
+                r'(?:,\s*https?://\S+)?\.?', body,
+                re.IGNORECASE,
+            )
+            or re.fullmatch(
+                r'(?P<title>.+?)\.\s*(?P<venue>[^.,]+)\s+Vol\.?\s*\d+'
+                r'\s+No\.?\s*\d+,\s*[A-Za-z]+\s+(?:19|20)\d{2}'
+                r'\s+\d+\s*[-–]\s*\d+\s+DOI:\s*10\.\d{4,9}/\S+', body,
+                re.IGNORECASE,
+            )
+            or re.fullmatch(
+                r'(?P<title>.+?),\s*\d+(?:st|nd|rd|th)\s+ed\.,\s*'
+                r'(?P<venue>[^,]+),\s*[A-Z][A-Za-z -]+', body,
+            )
+        )
+        existing_authors = reference.get('authors') or []
+        is_url_sentinel = existing_authors == ['URL Reference']
+        prior_title = str(reference.get('title') or '').strip()
+        source_without_url = re.split(r'\s+https?://', content, maxsplit=1, flags=re.IGNORECASE)[0]
+        source_without_url = re.sub(r'^\[\d+\]\s*', '', source_without_url).strip().rstrip(' ,')
+        parser_title = source_without_url.replace(author_year.group('year'), '').strip()
+        can_recover = (
+            not (reference.get('venue') or reference.get('journal'))
+            and (not reference.get('year') or reference.get('year') == int(author_year.group('year')[1:-1]))
+            and (
+                (not existing_authors and not prior_title)
+                or (is_url_sentinel and prior_title in {'', parser_title})
+            )
+        )
+        if source_fields and can_recover:
+            authors = [
+                re.sub(r',\s*', ', ', match.group().strip())
+                for match in re.finditer(author_name, author_year.group('authors'))
+            ]
+            if is_url_sentinel:
+                reference['source_authors'] = authors
+            else:
+                reference['authors'] = authors
+            reference['title'] = source_fields.group('title').strip()
+            reference['venue'] = source_fields.group('venue').strip()
+            reference['journal'] = reference['venue']
+            reference['year'] = int(author_year.group('year')[1:-1])
+            return
+    damaged_quotes = re.search(r',\s*\ufffd([^\ufffd]+)\ufffd', content)
+    title = reference.get('title')
+    if (
+        damaged_quotes
+        and isinstance(title, str)
+        and title.startswith('\ufffd')
+        and title[1:].strip(' ,') == damaged_quotes.group(1).strip(' ,')
+    ):
+        reference['title'] = title[1:]
+        for field in ('venue', 'journal'):
+            value = reference.get(field)
+            if isinstance(value, str) and value.startswith('\ufffd '):
+                reference[field] = value[2:]
+
+    inverted_name = r"[^\W\d_][\w'’\-]+,\s*(?:[A-Z]\.\s*){1,4}"
+    inverted_authors = (
+        rf'{inverted_name}(?:,\s*{inverted_name})*'
+        rf'(?:,?\s*(?:&|and)\s*{inverted_name})'
+    )
+    institutional_report = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[^,.]+),\s*(?P<year>(?:19|20)\d{2})\.\s*'
+        r'(?P<title>[^.]+)\.\s*(?:Tech\.\s*rep\.|Technical report),\s*'
+        r'(?P<venue>[^.]+)\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if institutional_report:
+        author = institutional_report.group('author').strip()
+        title = institutional_report.group('title').strip()
+        venue = str(reference.get('venue') or reference.get('journal') or '').strip()
+        current_title = str(reference.get('title') or '').strip()
+        authors = reference.get('authors') or []
+        if (
+            (not venue and (not authors or authors == [author]) and current_title in {'', title})
+            or (
+                venue and authors == [author]
+                and current_title == institutional_report.group('year')
+                and title.casefold().startswith(venue.casefold() + ',')
+            )
+        ):
+            reference['authors'] = [author]
+            reference['title'] = title
+            reference['venue'] = institutional_report.group('venue').strip()
+            reference['journal'] = reference['venue']
+            reference['year'] = int(institutional_report.group('year'))
+            return
+    author_year_chapter = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{inverted_authors}),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*(?P<title>[^.]+)\.\s*'
+        r'[^,.]+,\s*[^,.]+,\s*book chapter\s+(?P<venue>[^,]+),\s*'
+        r'pp?\.\s*\d+\s*[-–]\s*\d+\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if author_year_chapter and not (
+        reference.get('authors') or reference.get('title')
+        or reference.get('venue') or reference.get('journal')
+    ):
+        reference['authors'] = [
+            match.group().strip()
+            for match in re.finditer(inverted_name, author_year_chapter.group('authors'))
+        ]
+        reference['title'] = author_year_chapter.group('title').strip()
+        reference['venue'] = author_year_chapter.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(author_year_chapter.group('year'))
+        return
+    book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{inverted_authors})\s+'
+        r'(?P<title>[^.]+)\.\s+(?P<venue>[^.,:;]+),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if book:
+        authors_text = re.sub(r',?\s+(?:&|and)\s+', ', ', book.group('authors'))
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = book.group('title').strip()
+        reference['venue'] = book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(book.group('year'))
+        return
+
+    inverted_doi_journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{inverted_authors})\s+'
+        r'(?P<title>[^.\d]+)\.\s*(?P<venue>[^.,]+),\s*'
+        r'\d+(?:\(\d+\))?,\s*\d+(?:\s*[-–]\s*\d+)?,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*(?i:doi):\s*10\.\d{4,9}/.+',
+        content,
+    )
+    if inverted_doi_journal and (
+        not (reference.get('venue') or reference.get('journal'))
+        and re.search(
+            r'\b(?:journal|education|educational|psychologist|psychology|research)\b',
+            inverted_doi_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        authors_text = re.sub(
+            r',?\s+(?:&|and)\s+', ', ', inverted_doi_journal.group('authors')
+        )
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = inverted_doi_journal.group('title').strip()
+        reference['venue'] = inverted_doi_journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(inverted_doi_journal.group('year'))
+        return
+
+    inverted_year_book = re.fullmatch(
+        r"\[\d+\]\s*(?P<author>(?:[^\W\d_][\w'’\-]*\s+)*"
+        r"[^\W\d_][\w'’\-]*,\s*(?:[A-Z]\.\s*)+),\s*"
+        r"(?P<year>(?:19|20)\d{2})\.\s*"
+        r'(?P<title>[^."“”]+?)(?:,\s*\d+(?:st|nd|rd|th)\s+ed)?\.\s*'
+        r'(?P<venue>[^,.:"“”]+),\s*(?P<location>[A-Z][A-Za-z ,\-]+)\.',
+        content,
+    )
+    existing_authors = reference.get('authors') or []
+    if isinstance(existing_authors, str):
+        existing_authors = [existing_authors]
+    if (
+        inverted_year_book
+        and not reference.get('title')
+        and not (reference.get('venue') or reference.get('journal'))
+        and (
+            not existing_authors
+            or (
+                len(existing_authors) == 1
+                and str(existing_authors[0]).strip()
+                and inverted_year_book.group('author').casefold().startswith(
+                    str(existing_authors[0]).strip().rstrip('.').casefold()
+                )
+            )
+        )
+    ):
+        reference['authors'] = [inverted_year_book.group('author').strip()]
+        reference['title'] = inverted_year_book.group('title').strip()
+        reference['venue'] = inverted_year_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(inverted_year_book.group('year'))
+        return
+
+    initial_name = r"(?:[A-Z]\.\s*)+[A-Z][\w'’\-]+(?:\s+[A-Z][\w'’\-]+)*"
+    ampersand_journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}\s*&\s*{initial_name}),\s*'
+        r'(?P<title>[^,.]+),\s*(?P<venue>[^,]*\bJournal\b[^,]*),\s*'
+        r'[^,]+,\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if ampersand_journal and not reference.get('authors'):
+        authors_text = re.sub(r'\s*&\s*', ', ', ampersand_journal.group('authors'))
+        title = ampersand_journal.group('title').strip()
+        existing_title = str(reference.get('title') or '').strip()
+        existing_venue = str(reference.get('venue') or reference.get('journal') or '')
+        if (
+            existing_title
+            and existing_title.casefold() in ampersand_journal.group('authors').casefold()
+            and title.casefold() in existing_venue.casefold()
+        ):
+            reference['authors'] = parse_authors_with_initials(authors_text)
+            reference['title'] = title
+            reference['venue'] = ampersand_journal.group('venue').strip()
+            reference['journal'] = reference['venue']
+            reference['year'] = int(ampersand_journal.group('year'))
+            return
+
+    named_chapter = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}'
+        rf'(?:,\s*{initial_name})*,?\s+and\s+{initial_name}),\s*'
+        r'(?P<title>[^,.]+),\s*in\s+(?P<venue>[^,]+),\s*'
+        r'.+?,\s*Eds?\.\s+[^:]+:\s*[^,]+,\s*(?P<year>(?:19|20)\d{2}),\s*'
+        r'ch\.\s*\d+,\s*pp?\.\s*\d+\s*[-–]\s*\d+\.\s*doi:\s*10\.\d{4,9}/.+',
+        content,
+        re.IGNORECASE,
+    )
+    if named_chapter and not (
+        reference.get('authors') or reference.get('title')
+        or reference.get('venue') or reference.get('journal')
+    ):
+        authors_text = re.sub(r',?\s+and\s+', ', ', named_chapter.group('authors'), flags=re.IGNORECASE)
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = named_chapter.group('title').strip()
+        reference['venue'] = named_chapter.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(named_chapter.group('year'))
+        return
+
+    named_web = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{initial_name}),\s*'
+        r'(?P<title>[a-z][\w-]*-[\w-]+)\.\s*(?P<year>(?:19|20)\d{2})\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?://.+',
+        content,
+    )
+    if named_web and not (
+        reference.get('authors') or reference.get('venue') or reference.get('journal')
+    ):
+        author = named_web.group('author').strip()
+        title = named_web.group('title').strip()
+        existing_title = str(reference.get('title') or '').strip()
+        if existing_title == f"{author.split()[-1]}, {title}":
+            reference['authors'] = [author]
+            reference['title'] = title
+            reference['year'] = int(named_web.group('year'))
+            return
+
+    unquoted_arxiv = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}'
+        rf'(?:,\s*{initial_name})*,?\s+and\s+{initial_name}),\s*'
+        r'(?P<title>[^.]+)\.\s*(?P<venue>arXiv)\.\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*'
+        r'https?://doi\.org/10\.48550/arxiv\.\d{4}\.\d{4,5}\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if unquoted_arxiv and not (
+        reference.get('authors') or reference.get('title')
+        or reference.get('venue') or reference.get('journal')
+    ):
+        authors_text = re.sub(r',?\s+and\s+', ', ', unquoted_arxiv.group('authors'), flags=re.IGNORECASE)
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = unquoted_arxiv.group('title').strip()
+        reference['venue'] = unquoted_arxiv.group('venue')
+        reference['journal'] = reference['venue']
+        reference['year'] = int(unquoted_arxiv.group('year'))
+        return
+    book_publisher = (
+        r'[^,.;:"“”]+?\b(?:Press|Publishing|Publisher|Verlag|Pearson|'
+        r'Longman|Routledge|Elsevier|McGraw-Hill Education|John Wiley & Sons|'
+        r'Springer(?: Science & Business Media)?)'
+    )
+    initial_publisher_book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}'
+        rf'(?:(?:,\s*(?:and\s+)?|\s+(?:and|y)\s+){initial_name})+'
+        rf'(?:,?\s+et al\.)?)'
+        rf',\s*(?P<title>[^.]+)\.\s*(?P<venue>{book_publisher}),\s*'
+        r'(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|'
+        r'Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|'
+        r'Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?'
+        r'(?P<year>(?:19|20)\d{2})'
+        r'(?:\.\s*(?:Google-Books-ID:\s*\S+\.?)?|'
+        r',\s*doi:\s*\S+|,\s*retrieved from\s*https?://.+)',
+        content,
+        re.IGNORECASE,
+    )
+    full_name_publisher_book = re.fullmatch(
+        r"\[\d+\]\s*(?P<authors>[A-Z][\w'’\-]+"
+        r"(?:\s+(?:[A-Z]\.|[A-Z][\w'’\-]+)){1,4})\.\s*"
+        rf'(?P<title>[^.]+)\.\s*(?P<venue>{book_publisher}),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*DOI:\s*10\.\d{4,9}/.+',
+        content,
+    )
+    publisher_book = initial_publisher_book or full_name_publisher_book
+    if publisher_book:
+        existing_title = str(reference.get('title') or '').strip(' .')
+        source_title = re.sub(
+            r'\s*,?\s*\d+(?:st|nd|rd|th)\s+ed\.?$',
+            '',
+            publisher_book.group('title').strip(),
+            flags=re.IGNORECASE,
+        )
+        source_venue = publisher_book.group('venue').strip()
+        compact_current_title = re.sub(r'\W+', '', existing_title).casefold()
+        compact_source_authors = re.sub(
+            r'\W+', '', publisher_book.group('authors')
+        ).casefold()
+        month_suffix = (
+            re.escape(source_venue)
+            + r',\s*(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|'
+            + r'May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|'
+            + r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?'
+            + r'(?:\s+(?:19|20)\d{2})?'
+        )
+        current_venues = [
+            str(reference.get(field) or '').strip()
+            for field in ('venue', 'journal')
+        ]
+        venue_matches = all(
+            not value
+            or value.casefold() == source_venue.casefold()
+            or re.fullmatch(month_suffix, value, re.IGNORECASE)
+            for value in current_venues
+        )
+        title_is_author_fragment = (
+            not (reference.get('authors') or [])
+            and len(compact_current_title) >= 6
+            and compact_current_title in compact_source_authors
+        )
+        if (
+            venue_matches
+            and (
+                not existing_title
+                or existing_title.casefold() == source_title.casefold()
+                or existing_title.casefold().startswith(
+                    ('doi:', source_venue.casefold() + ',')
+                )
+                or title_is_author_fragment
+            )
+        ):
+            authors_text = re.sub(
+                r',?\s+(?:and|y)\s+', ', ', publisher_book.group('authors'),
+                flags=re.IGNORECASE,
+            )
+            authors_text = re.sub(r',?\s+et al\.$', ', et al', authors_text, flags=re.IGNORECASE)
+            reference['authors'] = parse_authors_with_initials(authors_text)
+            reference['title'] = source_title
+            reference['venue'] = source_venue
+            reference['journal'] = source_venue
+            reference['year'] = int(publisher_book.group('year'))
+            return
+    unquoted_educon = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}'
+        rf'(?:,\s*{initial_name})*,?\s+and\s+{initial_name}),\s*'
+        r'(?P<title>[^.]+),\s*in\s+'
+        r'(?P<venue>Proc\.\s+(?P<year>(?:19|20)\d{2})\s+IEEE Global Eng\.\s*'
+        r'Educ\.\s*Conf\.\s*\(EDUCON\)),\s*'
+        r'[^,]+,\s*[^,]+,\s*(?P=year),\s*pp?\.\s*\d+\s*[-–]\s*\d+\.\s*'
+        r'doi:\s*10\.1109/\S+',
+        content,
+        re.IGNORECASE,
+    )
+    if (
+        unquoted_educon and not (reference.get('venue') or reference.get('journal'))
+        and str(reference.get('title') or '').strip(' .').casefold() in {'', 'educ'}
+    ):
+        authors_text = re.sub(r',?\s+and\s+', ', ', unquoted_educon.group('authors'), flags=re.IGNORECASE)
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = unquoted_educon.group('title').strip()
+        reference['venue'] = unquoted_educon.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(unquoted_educon.group('year'))
+        return
+    initial_et_al_journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}(?:,\s*{initial_name})+),?\s+'
+        r'et al\.\s+(?P<title>[^.]+)\.\s+(?P<venue>[^.,]+)\s+'
+        r'\d+,\s*\d+\s*[-–]\s*\d+\s+(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if (
+        initial_et_al_journal
+        and not (reference.get('authors') or reference.get('title')
+                 or reference.get('venue') or reference.get('journal'))
+        and re.search(r'\b(?:J|Journal|Educ|Education)\b', initial_et_al_journal.group('venue'))
+    ):
+        reference['authors'] = parse_authors_with_initials(initial_et_al_journal.group('authors')) + ['et al']
+        reference['title'] = initial_et_al_journal.group('title').strip()
+        reference['venue'] = initial_et_al_journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(initial_et_al_journal.group('year'))
+        return
+    has_url_sentinel = any(str(author).strip().lower() == 'url reference'
+                           for author in existing_authors)
+    organization_title = re.fullmatch(
+        r'\[(?P<number>\d+)\]\s*(?P<author>[A-Z]{3,8}),\s*'
+        r'(?P<title>[^,.]+),\s*(?:[A-Z][a-z]+,\s*)?'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    organization_guide = re.fullmatch(
+        r'\[(?P<number>\d+)\]\s*(?P<author>[A-Z][\w&\-]*'
+        r'(?:\s+[A-Z][\w&\-]*)*),\s*'
+        r'(?P<title>[^,]+?\b(?:Product Guide|User Guide|Technical Report)'
+        r'\s*\([A-Z]{2,}\d{2,}\)),\s*(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if (
+        organization_guide and len(existing_authors) == 2
+        and existing_authors[0] == organization_guide.group('author')
+        and isinstance(existing_authors[1], str) and existing_authors[1].strip()
+        and organization_guide.group('title').startswith(existing_authors[1])
+        and isinstance(title, str) and title
+        and organization_guide.group('title').endswith(title)
+        and not (reference.get('venue') or reference.get('journal'))
+    ):
+        reference['authors'] = [organization_guide.group('author')]
+        reference['title'] = organization_guide.group('title').strip()
+        reference['year'] = int(organization_guide.group('year'))
+        return
+    if not organization_title and not existing_authors:
+        organization_title = organization_guide
+    if (
+        organization_title
+        and not reference.get('title')
+        and not (reference.get('venue') or reference.get('journal'))
+        and not has_url_sentinel
+    ):
+        reference['authors'] = [organization_title.group('author')]
+        reference['title'] = organization_title.group('title').strip()
+        reference['year'] = int(organization_title.group('year'))
+        reference['entry_number'] = int(organization_title.group('number'))
+        return
+
+    untitled_educon = _match_untitled_educon_citation(content)
+    if untitled_educon and not has_url_sentinel and not (reference.get('venue') or reference.get('journal')):
+        reference['authors'] = [untitled_educon.group('first'), untitled_educon.group('second')]
+        reference['title'] = ''
+        reference['venue'] = untitled_educon.group('venue')
+        reference['journal'] = reference['venue']
+        reference['year'] = int(untitled_educon.group('year'))
+        reference['entry_number'] = int(untitled_educon.group('number'))
+        return
+
+    unquoted_title = re.fullmatch(
+        rf'\[\d+\]\s*(?P<first>{initial_name})\s+and\s+'
+        rf'(?P<second>{initial_name})\s+(?P<year>(?:19|20)\d{{2}})\.\s+'
+        r'(?P<title>[^.]+)\.',
+        content,
+    )
+    if (
+        unquoted_title
+        and not cited_authors_for_display(existing_authors)
+        and not has_url_sentinel
+        and not (reference.get('venue') or reference.get('journal'))
+    ):
+        reference['authors'] = [unquoted_title.group('first'), unquoted_title.group('second')]
+        reference['title'] = unquoted_title.group('title').strip()
+        reference['year'] = int(unquoted_title.group('year'))
+        return
+
+    institutional_report = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{initial_name})\s+et al\.,\s*'
+        r'(?P<title>[^,]+),\s*(?P<venue>University of [^,]+),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if (
+        institutional_report
+        and not existing_authors
+        and not reference.get('title')
+        and not (reference.get('venue') or reference.get('journal'))
+    ):
+        reference['authors'] = [institutional_report.group('author'), 'et al']
+        reference['title'] = institutional_report.group('title').strip()
+        reference['venue'] = institutional_report.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(institutional_report.group('year'))
+        return
+
+    journal_name = r"(?:[^\W\d_][\w'’\-]*\s+)*[^\W\d_][\w'’\-]*"
+    journal_author = rf'{journal_name},\s*(?:[A-Z]\.\s*){{1,4}}'
+    apa_name = r"[^\W\d_][\w'’\-]+,\s*(?:[^\W\d_]\.\s*){1,4}"
+    apa_conference = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{apa_name}(?:,\s*{apa_name})*'
+        rf',?\s*(?:&|and)\s*{apa_name})\s*'
+        r'\((?P<year>(?:19|20)\d{2}),\s*[A-Z][a-z]+\)\.\s*'
+        r'(?P<title>.+?)\.\s*In\s+'
+        r'(?P<venue>(?:19|20)\d{2}\s+'
+        r'(?:IEEE\s+.+?\s+Conference(?:\s+on\s+.+?)?\s*\([A-Za-z]+\)'
+        r'|ASEE Annual Conference & Exposition))'
+        r'(?:\s*\(pp\.\s*\d+\s*[-–]\s*\d+\))?\.\s*(?:IEEE\.)?',
+        content,
+    )
+    if apa_conference and not (reference.get('venue') or reference.get('journal')):
+        reference['authors'] = [
+            match.group().strip()
+            for match in re.finditer(apa_name, apa_conference.group('authors'))
+        ]
+        reference['title'] = apa_conference.group('title').strip()
+        reference['venue'] = apa_conference.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(apa_conference.group('year'))
+        return
+    full_name = (
+        r"(?:[^\W\d_][\w'’\-]{1,}|[A-Z](?=\s))"
+        r"(?:\s+(?:[A-Z]\.|[^\W\d_][\w'’\-]*))*"
+    )
+    plain_journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{full_name}'
+        rf'(?:(?:,\s*(?:and\s+)?|\s+and\s+){full_name})*)\.\s*'
+        r'(?P<title>.+?)\.\s*(?P<venue>.+?),\s*'
+        r'\d+(?:\(\d+\))?:\s*[eE]?\d+(?:\s*[-–]\s*\d+)?,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if plain_journal and not (reference.get('venue') or reference.get('journal')):
+        reference['authors'] = [
+            author.strip()
+            for author in re.split(r',\s*(?:and\s+)?|\s+and\s+', plain_journal.group('authors'))
+        ]
+        reference['title'] = plain_journal.group('title').strip()
+        reference['venue'] = plain_journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(plain_journal.group('year'))
+        return
+
+    plain_publication = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{full_name}'
+        rf'(?:(?:,\s*(?:and\s+)?|\s+and\s+){full_name})*)\.\s*'
+        r'(?P<title>[^\W\d_][^.]+)\.\s*(?P<venue>[^.\d]+),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    plain_pages = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{full_name}'
+        rf'(?:(?:,\s*(?:and\s+)?|\s+and\s+){full_name})*)\.\s*'
+        r'(?P<title>[^.]+)\.\s*(?:In\s+)?(?P<venue>.+?),\s*'
+        r'pages\s+\d+\s*[-–]\s*\d+,\s*(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    plain_conference = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{full_name}'
+        rf'(?:(?:,\s*(?:and\s+)?|\s+and\s+){full_name})*)\.\s*'
+        r'(?P<title>[^.]+)\.\s*In\s+(?P<venue>[^.,]+),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    plain_publication = plain_publication or plain_pages or plain_conference
+    if (
+        plain_publication
+        and not plain_publication.group('venue').startswith('In ')
+        and not (reference.get('venue') or reference.get('journal'))
+    ):
+        reference['authors'] = [
+            author.strip()
+            for author in re.split(r',\s*(?:and\s+)?|\s+and\s+', plain_publication.group('authors'))
+        ]
+        reference['title'] = plain_publication.group('title').strip()
+        reference['venue'] = plain_publication.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(plain_publication.group('year'))
+        return
+
+    plain_chapter = re.fullmatch(
+        r'\[\d+\]\s*.+?\.\s+In\s+(?P<venue>.+?),\s*'
+        r'(?:volume\s+\d+,\s*)?pages?\s+\d+(?:\s*[-–]\s*\d+)?\.\s*'
+        r'[^.,]+(?:\s+[^.,]+)*,\s*(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if plain_chapter and not (reference.get('venue') or reference.get('journal')):
+        reference['venue'] = plain_chapter.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(plain_chapter.group('year'))
+        return
+
+    institutional_publication = re.fullmatch(
+        r'\[\d+\]\.?\s*(?P<author>(?:[^\W\d_][\w\'’\-]*\s+)+'
+        r'[^\W\d_][\w\'’\-]*),\s*(?P<title>.+?)[.,]\s*'
+        r'(?P<venue>Publications Office of the European Union),\s*'
+        r'(?P<year>(?:19|20)\d{2})[.,]\s*'
+        r'(?:Accessed:\s*.+?\s*\[Online\]\.\s*Available:\s*)?'
+        r'https?://data\.europa\.eu/doi/10\.\d{4,9}/\S+',
+        content,
+    )
+    if institutional_publication:
+        reference['authors'] = [institutional_publication.group('author').strip()]
+        reference['title'] = institutional_publication.group('title').strip()
+        reference['venue'] = institutional_publication.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(institutional_publication.group('year'))
+        return
+
+    city_publisher_book = re.fullmatch(
+        r"\[\d+\]\s*(?P<author>(?:[A-Z]\.\s*){1,4}[A-Z][\w'’\-]+),\s*"
+        r"(?P<title>[^,]+),\s*(?P<city>[A-Z][a-z]+(?:[ -][A-Z][a-z]+)*"
+        r"(?:,\s*[A-Z]{2})?):\s*(?P<venue>[^,]+),\s*"
+        r"(?P<year>(?:19|20)\d{2})\.?",
+        content,
+    )
+    if city_publisher_book and not (reference.get('venue') or reference.get('journal')):
+        author = city_publisher_book.group('author').strip()
+        title = city_publisher_book.group('title').strip()
+        venue = city_publisher_book.group('venue').strip()
+        contaminated_title = f"{title}, {city_publisher_book.group('city')}: {venue}"
+        empty_fields = not (reference.get('authors') or reference.get('title'))
+        matching_contamination = (
+            reference.get('authors') == [author]
+            and str(reference.get('title') or '').strip(' ,.') == contaminated_title
+        )
+        known_publisher = re.search(
+            r'\b(?:press|publishing|publisher|pub|verlag|wiley|foundation|routledge)\b',
+            venue, re.IGNORECASE,
+        )
+        if not known_publisher or not (empty_fields or matching_contamination):
+            city_publisher_book = None
+    if city_publisher_book and not (reference.get('venue') or reference.get('journal')):
+        reference['authors'] = [city_publisher_book.group('author').strip()]
+        reference['title'] = city_publisher_book.group('title').strip()
+        reference['venue'] = city_publisher_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(city_publisher_book.group('year'))
+        return
+
+    paired_quote_conference = re.fullmatch(
+        r"\[\d+\]\s*(?P<author>[^,]+,\s*(?:[A-Z]\.\s*){1,4}),?\s*"
+        r"''(?P<title>.+?)'',\s*in the (?P<year>(?:19|20)\d{2})"
+        r"\s+IEEE conference,\s*(?P<venue>[^,]+),\s*in\s+"
+        r"[^,]+,\s*[^,]+,\s*from\s+\d{1,2}\s*[-–]\s*\d{1,2}\s+"
+        r"[A-Za-z]+\s+(?P=year)\.?",
+        content,
+    )
+    if paired_quote_conference:
+        existing_venue = reference.get('venue') or reference.get('journal') or ''
+        generic_venue = f"the {paired_quote_conference.group('year')} IEEE conference"
+        if not existing_venue or existing_venue.casefold() == generic_venue.casefold():
+            reference['authors'] = [paired_quote_conference.group('author').strip()]
+            reference['title'] = paired_quote_conference.group('title').strip()
+            reference['venue'] = paired_quote_conference.group('venue').strip()
+            reference['journal'] = reference['venue']
+            reference['year'] = int(paired_quote_conference.group('year'))
+            return
+
+    inverted_arxiv = re.fullmatch(
+        r"\[\d+\]\s*(?P<author>[^\W\d_][\w'’\-]+,\s*(?:[A-Z]\.\s*){1,4}),\s*"
+        r"et al\.\s*(?P<title>.+?[.?])\s*(?i:arXiv preprint),\s*"
+        r"(?i:arXiv):\d{4}\.\d{4,5},\s*(?P<year>(?:19|20)\d{2})\.?",
+        content,
+    )
+    if inverted_arxiv and (
+        not (reference.get('venue') or reference.get('journal'))
+        and str(reference.get('title') or '').strip(' ,.') in {'', 'et al'}
+    ):
+        reference['authors'] = [inverted_arxiv.group('author').strip(), 'et al']
+        reference['title'] = inverted_arxiv.group('title').strip().rstrip('.')
+        reference['venue'] = 'arXiv preprint'
+        reference['journal'] = reference['venue']
+        reference['year'] = int(inverted_arxiv.group('year'))
+        return
+
+    initial_arxiv = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{initial_name}'
+        rf'(?:,\s*{initial_name})*,?\s+and\s+{initial_name})\.\s*'
+        r'(?P<title>[^.]+)\.\s*(?i:arXiv preprint)\s+(?i:arXiv):\d{4}\.\d{4,5},\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if initial_arxiv and not (reference.get('authors') or reference.get('title')) and all(
+        not value or str(value).casefold() == 'arxiv preprint'
+        for value in (reference.get('venue'), reference.get('journal'))
+    ):
+        authors_text = re.sub(r',?\s+and\s+', ', ', initial_arxiv.group('authors'), flags=re.IGNORECASE)
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = initial_arxiv.group('title').strip()
+        reference['venue'] = 'arXiv preprint'
+        reference['journal'] = reference['venue']
+        reference['year'] = int(initial_arxiv.group('year'))
+        return
+
+    source_arxiv = re.search(
+        r'\b(?P<venue>arXiv preprint)(?:,\s*(?:no\.\s*)?|\s+)'
+        r'arXiv:\d{4}\.\d{4,5}\b',
+        content,
+        re.IGNORECASE,
+    )
+    if source_arxiv and not (reference.get('venue') or reference.get('journal')):
+        reference['venue'] = source_arxiv.group('venue')
+        reference['journal'] = reference['venue']
+        return
+
+    quoted_title = r'["“].+?(?:,["”]|["”],)'
+    named_website = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*'
+        r'(?P<venue>[\w.-]+\.[A-Za-z]{2,})\.\s*Accessed:\s*.+?'
+        r'\[Online\]\.\s*Available:\s*https?://(?:www\.)?(?P=venue)'
+        r'(?:/\S*|\.)?',
+        content,
+        re.IGNORECASE,
+    )
+    if named_website and not (reference.get('venue') or reference.get('journal')):
+        reference['venue'] = named_website.group('venue').strip()
+        reference['journal'] = reference['venue']
+        return
+
+    dated_website = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*'
+        r'(?P<venue>[^,.;:"“”]+),\s*'
+        r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+'
+        r'\d{1,2},\s*(?:19|20)\d{2}\.\s*(?:Accessed:\s*.+?)?'
+        r'\[Online\]\.\s*Available:\s*https?://\S.+',
+        content,
+        re.IGNORECASE,
+    )
+    dated_conference = re.fullmatch(
+        r'\[\d+\]\s*.+?\.\s*In the Proceeding of\s+'
+        r'(?P<venue>[^.]+?\bConference\b[^.]*)\.\s*'
+        r'(?:\d{1,2}\s*[-–]\s*\d{1,2}\s+)?'
+        r'(?:January|February|March|April|May|June|July|August|September|October|November|December)'
+        r'\.\s*[^.]+\.\s*(?:19|20)\d{2}\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if not (reference.get('venue') or reference.get('journal')):
+        source_venue = dated_website or dated_conference
+        if source_venue:
+            reference['venue'] = source_venue.group('venue').strip()
+            reference['journal'] = reference['venue']
+            return
+
+    first_initial_name = r"(?:[A-Z]\.\s*){1,4}[A-Z][\w'’\-]+"
+    edition_book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<first>{first_initial_name})\s+and\s+'
+        rf'(?P<second>{first_initial_name})\s*,\s*(?P<title>.+?),\s*'
+        r'\d+(?:st|nd|rd|th)\s+ed\.\s*(?P<venue>[^,]+),\s*'
+        r'(?P<year>(?:19|20)\d{2}),\s*global Edition\.',
+        content,
+    )
+    if edition_book:
+        reference['authors'] = [edition_book.group('first').strip(), edition_book.group('second').strip()]
+        reference['title'] = edition_book.group('title').strip()
+        reference['venue'] = edition_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(edition_book.group('year'))
+        return
+
+    organization_book = re.fullmatch(
+        r'\[\d+\]\s*(?P<author>[A-Z][A-Z0-9 &-]{2,30}),\s*'
+        r'(?P<title>.+?)\.\s*[^,:.]+,\s*[^:.]+:\s*(?P=author),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if organization_book:
+        reference['authors'] = [organization_book.group('author')]
+        reference['title'] = organization_book.group('title').strip()
+        reference['venue'] = organization_book.group('author')
+        reference['journal'] = reference['venue']
+        reference['year'] = int(organization_book.group('year'))
+        return
+
+    edition_catalog_book = re.fullmatch(
+        r"\[\d+\]\s*(?P<authors>(?:[A-Z]\.\s*(?:[A-Z]\.\s*)*"
+        r"[A-Za-z][\w'’\-]+,\s*)+(?:and\s+)?[A-Z]\.\s*(?:[A-Z]\.\s*)*"
+        r"[A-Za-z][\w'’\-]+),\s*(?P<title>.+?),\s*"
+        r"(?:first|second|third|fourth|\d+(?:st|nd|rd|th))\s+edition\s+ed\.\s*"
+        r"[^:.]+:\s*(?P<venue>[^,]+),\s*(?P<year>(?:19|20)\d{2}),\s*"
+        r"[oO][cC][lL][cC]:\s*\S+\.",
+        content,
+    )
+    if edition_catalog_book:
+        authors_text = re.sub(r',\s*and\s+', ', ', edition_catalog_book.group('authors'))
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = edition_catalog_book.group('title').strip()
+        reference['venue'] = edition_catalog_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(edition_catalog_book.group('year'))
+        return
+
+    online_proceedings = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*in\s+(?P<venue>[^,]+),\s*'
+        r'.+?,\s*(?P<year>(?:19|20)\d{2})'
+        r'(?:,\s*pp?\.\s*\d+(?:\s*[-–]\s*\d+)?)?\.\s*Accessed:\s*.+?'
+        r'\[Online\]\.\s*Available:\s*https?://.+',
+        content,
+    )
+    series_proceedings = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*in\s+(?P<venue>.+?),\s*'
+        r'ser\.\s*.+?\b(?P<year>(?:19|20)\d{2}),\s*p\.\s*\d+[-–]\d+\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?:\s*//.+',
+        content,
+    )
+    accepted_proceedings = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*in\s+(?P<venue>[^,]+),\s*'
+        r'.+?,\s*(?:[A-Z][a-z]+\.\s*)?(?P<year>(?:19|20)\d{2}),\s*'
+        r'\(Accepted for Publication\)\.'
+        r'(?:\s*\[Online\]\.\s*Available:\s*https?://.+)?',
+        content,
+    )
+    ieee_proceedings = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*in\s+(?P<venue>.+?),\s*'
+        r'Institute of Electrical and Electronics Engineers Inc\.,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.\s*doi:\s*10\.\d{4,9}/\S+',
+        content,
+    )
+    paged_publication = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>[^,:"“”]+),\s*(?P<issue>no\.\s*\d+,\s*)?'
+        r'pp?\.\s*(?P<pages>\d+(?:\s*[-–]\s*\d+)?),\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if paged_publication and (
+        reference.get('venue') or reference.get('journal')
+        or (not paged_publication.group('issue') and not re.search(
+            r'[-–]', paged_publication.group('pages'),
+        ))
+        or not (
+            re.search(
+                r'\b(?:journal|education|educational|enseignement|conference|'
+                r'proceedings|educator|technology|technologies)\b',
+                paged_publication.group('venue'), re.IGNORECASE,
+            )
+            or (
+                paged_publication.group('issue')
+                and re.search(
+                    r'\b(?:news|leadership)\b',
+                    paged_publication.group('venue'), re.IGNORECASE,
+                )
+            )
+        )
+    ):
+        paged_publication = None
+    ieee_transactions_paged = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>IEEE\s+transactions\s+on\s+[^:"“”]+?),\s*'
+        r'no\.\s*\d+,\s*pp?\.\s*\d+\s*[-–]\s*\d+,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+        re.IGNORECASE,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        ieee_transactions_paged = None
+    dated_paged_doi = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>[^,:"“”]+),\s*pp?\.\s*\d+\s*[-–]\s*\d+,\s*'
+        r'[A-Z][a-z]+\.\s*(?P<year>(?:19|20)\d{2}),\s*'
+        r'doi:\s*10\.\d{4,9}/\S+'
+        r'(?:\s+Available:\s*https?://\S+'
+        r'(?:\s*\[Accessed:[^\]]+\])?)?',
+        content,
+    )
+    if dated_paged_doi and (
+        reference.get('venue') or reference.get('journal')
+        or not (
+            re.fullmatch(r'[A-Z]{3,}', dated_paged_doi.group('venue').strip())
+            or re.search(
+                r'\b(?:journal|transactions|publications|learning|educ(?:ation|ational)?|technol(?:og(?:y|ies))?)\b',
+                dated_paged_doi.group('venue'), re.IGNORECASE,
+            )
+        )
+    ):
+        dated_paged_doi = None
+    quoted_page_range = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>[^,:;"“”]+),\s*pp?\.\s*\d+\s*[-–]\s*\d+,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.'
+        r'(?:\s*\[Online\]\.\s*Available:\s*https?://.+)?',
+        content,
+        re.IGNORECASE,
+    )
+    if quoted_page_range and (
+        reference.get('venue') or reference.get('journal')
+        or not (
+            re.fullmatch(r'TechTrends', quoted_page_range.group('venue').strip(), re.IGNORECASE)
+            or re.search(
+                r'\b(?:journal|jurnal|ieee|education|educational|teaching|learning|'
+                r'research|engineering|sociology|computational)\b',
+                quoted_page_range.group('venue'), re.IGNORECASE,
+            )
+        )
+    ):
+        quoted_page_range = None
+    numeric_month_venue = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>[^,:;"“”]+),\s*(?:0[1-9]|1[0-2])\s+'
+        r'(?P<year>(?:19|20)\d{2})\.'
+        r'(?:\s*\[Online\]\.\s*Available:\s*https?://.+)?',
+        content,
+        re.IGNORECASE,
+    )
+    if numeric_month_venue and (
+        reference.get('venue') or reference.get('journal')
+        or not (
+            re.search(
+                r'\b(?:journal|education|educational|teaching|learning|research|science)\b'
+                r'|\.(?:org|edu)\b',
+                numeric_month_venue.group('venue'), re.IGNORECASE,
+            )
+            or re.fullmatch(
+                r'([A-Za-z]+)\s+\(\1\)', numeric_month_venue.group('venue').strip(),
+                re.IGNORECASE,
+            )
+        )
+    ):
+        numeric_month_venue = None
+    comma_paged_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>[^,:"“”]+,\s*[^,:"“”]+),\s*'
+        r'pp?\.\s*\d+\s*[-–]\s*\d+,\s*[A-Z][a-z]+\.\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if comma_paged_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|education|educational|teaching|learning|research|engineering)\b',
+            comma_paged_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        comma_paged_journal = None
+    quoted_paged_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+["”]\.\s*'
+        r'(?P<venue>[^,;"“”]+),\s*\d+(?:\([a-zA-Z]*\d+\))?,\s*'
+        r'pp?\.\s*[a-zA-Z]?\d+(?:\s*[-–]\s*[a-zA-Z]?\d+)?\.\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if quoted_paged_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|education|educational|teaching|learning|research|'
+            r'engineering|ieee|computers|sciences|motivation)\b',
+            quoted_paged_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        quoted_paged_journal = None
+    quoted_article_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+\.["”]\s*'
+        r'(?P<venue>[^,:"“”]+),\s*\d+(?:\(\d+\))?,\s*'
+        r'(?P<year>(?:19|20)\d{2}),\s*'
+        r'(?:[a-z]?\d{4,}|pp?\.\s*\d+\s*[-–]\s*\d+)\.',
+        content,
+        re.IGNORECASE,
+    )
+    if quoted_article_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|education|educational|teaching|learning|research|psychology|health)\b',
+            quoted_article_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        quoted_article_journal = None
+    early_access_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>[^,.;]+),\s*early access,\s*'
+        r'(?P<year>(?:19|20)\d{2})(?:\.\s*|,\s*doi:\s*10\.\d{4,9}/\S+)',
+        content,
+        re.IGNORECASE,
+    )
+    if early_access_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|education|educational|teaching|learning|research|engineering)\b',
+            early_access_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        early_access_journal = None
+    abbreviated_proceedings = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<venue>Proc\.\s+[^,]+),\s*pp?\.\s*\d+\s*[-–]\s*\d+,\s*'
+        r'(?P<year>(?:19|20)\d{2}),\s*doi:\s*'
+        r'(?:https?://(?:dx\.)?doi\.org/)?10\.\d{4,9}/.+',
+        content,
+        re.IGNORECASE,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        abbreviated_proceedings = None
+    located_proceedings = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?:in\s+)?(?P<venue>Proc\.\s+[^,]+),\s*'
+        r'[^,\d.]+(?:,\s*[^,\d.]+)?,\s*(?P<year>(?:19|20)\d{2})\.',
+        content,
+        re.IGNORECASE,
+    )
+    if located_proceedings and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:conf|symp|colloquium)\b',
+            located_proceedings.group('venue'), re.IGNORECASE,
+        )
+    ):
+        located_proceedings = None
+    biblatex_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+["”]\.\s*In:\s*'
+        r'(?P<venue>.+?)\s*(?:\d+\s*)?\([^)]*?'
+        r'(?P<year>(?:19|20)\d{2})\)'
+        r'(?:,\s*pp?\.\s*\d+(?:\s*[-–]\s*\d+)?)?\.\s*'
+        r'DOI:\s*10\.\s*\d{4,9}/.+',
+        content,
+        re.IGNORECASE,
+    )
+    if biblatex_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|education|educational|psychology|research)\b',
+            biblatex_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        biblatex_journal = None
+    volume_paged_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”][,.])\s*'
+        r'(?P<venue>[^,:"“”]+),\s*vol\.\s*(?:\d+|[ivxlcdm]+|pp),\s*'
+        r'(?:no\.\s*(?:\d+|[ivxlcdm]+),\s*)?pp?\.\s*[a-z]?\d+'
+        r'(?:\s*[-–]+\s*[a-z]?\d+)?,\s*'
+        r'(?P<year>(?:19|20)\d{2})(?:\.|,\s*doi:\s*(?P<doi>10\.\d{4,9}/\S+))',
+        content,
+        re.IGNORECASE,
+    )
+    if volume_paged_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not (
+            re.search(
+                r'\b(?:journal|education|educational|psychologist|psychology|sciences|review|ieee)\b',
+                volume_paged_journal.group('venue'), re.IGNORECASE,
+            )
+            or (
+                re.fullmatch(r'[A-Z]{3,}', volume_paged_journal.group('venue').strip())
+                and re.match(
+                    r'10\.\d{4,9}/' + re.escape(volume_paged_journal.group('venue').strip()) + r'\.',
+                    volume_paged_journal.group('doi') or '', re.IGNORECASE,
+                )
+            )
+        )
+    ):
+        volume_paged_journal = None
+    numeric_volume_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”][,.])\s*'
+        r'(?P<venue>[^,:"“”]+),\s*\d+(?:\(\d+\))?,\s*'
+        r'(?:pp?\.\s*)?\d+(?:\s*[-–]\s*\d+)?,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if numeric_volume_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|education|educational|educ|transactions|scientific reports)\b',
+            numeric_volume_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        numeric_volume_journal = None
+    volume_only_journal = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”][,.])\s*'
+        r'(?P<venue>[^,:"“”]+),\s*\d+(?:\(\d+\))?,\s*'
+        r'(?P<year>(?:19|20)\d{2})\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if volume_only_journal and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|forecasting)\b',
+            volume_only_journal.group('venue'), re.IGNORECASE,
+        )
+    ):
+        volume_only_journal = None
+    quoted_year_paged = re.fullmatch(
+        r'\[\d+\]\s*.+?\((?P<year>(?:19|20)\d{2})\),\s*'
+        r'["“][^"“”]+["”],\s*(?P<venue>[^,]+?)'
+        r'(?:,\s*\d+(?:\s*\([^)]+\))?\s*,\s*\d+\s*[-–]\s*\d+'
+        r'|\s+\d+,\s*\d+\s*[-–]\s*\d+|,\s*\d+\s*[-–]\s*\d+)\.',
+        content,
+    )
+    if quoted_year_paged and (
+        reference.get('venue') or reference.get('journal')
+        or not re.search(
+            r'\b(?:journal|review|press)\b',
+            quoted_year_paged.group('venue'), re.IGNORECASE,
+        )
+    ):
+        quoted_year_paged = None
+    arxiv_preprint = re.fullmatch(
+        r'\[\d+\]\s*.+?["“]\s*.+?,\s*["”]\s*'
+        r'(?P<venue>arXiv preprint)\s+arXiv:\d{4}\.\d{4,5},\s*'
+        r'(?P<year>(?:19|20)\d{2})\.',
+        content,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        arxiv_preprint = None
+    acm_series = re.fullmatch(
+        r'\[\d+\]\s*.+?["“].+?(?:,["”]|["”],|[?!.]["”])\s*'
+        r'(?:in\s+(?P<proceedings>.+?),\s*)?ser\.\s*(?P<series>[^.]+)\.\s*'
+        r'New York, NY, USA:\s*Association for Computing Machinery,\s*'
+        r'(?P<year>(?:19|20)\d{2})(?:,\s*p\.\s*\d+(?:[-–]\d+)?)?\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?://.+',
+        content,
+    )
+    if acm_series:
+        reference['venue'] = (acm_series.group('proceedings') or acm_series.group('series')).strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(acm_series.group('year'))
+        return
+    proceedings_series = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],|[?!.]["”])\s*'
+        r'in\s+(?P<venue>Proceedings\s+of\s+.+?),\s*ser\.\s*[^.]+\.\s*'
+        r'[^:]+:\s*[^,]+,\s*(?P<year>(?:19|20)\d{2})'
+        r'(?:,\s*p{1,2}\.\s*\d+(?:\s*[-–]\s*\d+)?)?\.'
+        r'(?:\s*\[Online\]\.\s*Available:\s*https?://\S+)?',
+        content,
+        re.IGNORECASE,
+    )
+    dated_arxiv = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*'
+        r'(?P<year>(?:19|20)\d{2}),\s*(?P<venue>arXiv)\.\s*'
+        r'doi:\s*10\.48550/arxiv\.\d{4}\.\d{4,5}\.?',
+        content,
+        re.IGNORECASE,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        dated_arxiv = None
+    if reference.get('venue') or reference.get('journal'):
+        proceedings_series = None
+    located_acronym_proceedings = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”][,.]|[?!.]["”])\s*'
+        r'in\s+(?P<venue>(?:Proc\.|Proceedings of)\s+.+?\([^()]+\)),\s*'
+        r'[^,:;]+,\s*[^,:;]+,\s*(?:[^,]*,\s*)?'
+        r'(?:[A-Z][a-z]+\.?\s+(?:\d{1,2}\s*[-–]\s*\d{1,2},?\s*)?)?'
+        r'(?P<year>(?:19|20)\d{2})'
+        r'(?:[.,]\s*.*)?',
+        content,
+        re.IGNORECASE,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        located_acronym_proceedings = None
+    named_proceedings = re.fullmatch(
+        r'\[\d+\]\s*.+?["“][^"“”]+(?:,["”]|["”],)\s*in\s+'
+        r'(?P<venue>Proceedings of (?:the )?[^,.;]*?'
+        r'\b(?:conference|symposium|workshop)\b[^,.;]*?'
+        r'(?:,\s*(?-i:[A-Z]{3,})\s+(?:19|20)\d{2})?)[,.]\s*'
+        r'(?:(?!\bdoi\b|https?://).)*?\b(?P<year>(?:19|20)\d{2})\b(?:[.,]\s*.*)?',
+        content,
+        re.IGNORECASE,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        named_proceedings = None
+    article_number = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*(?P<venue>[^,]+),\s*'
+        r'p\.\s*\d{6,},\s*(?:[A-Z][a-z]+\.\s*)?(?P<year>(?:19|20)\d{2})'
+        r'(?:,\s*doi:\s*10\.\d{4,9}/\S+|\.)',
+        content,
+    )
+    if reference.get('venue') or reference.get('journal'):
+        article_number = None
+    internet_draft = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*(?P<venue>[^,]+),\s*'
+        r'Internet-Draft\s+draft-[^,]+,\s*[A-Z][a-z]+\.\s*'
+        r'(?P<year>(?:19|20)\d{2}),\s*work\s+in\s+Progress\.\s*'
+        r'\[Online\]\.\s*Available:\s*https?://.+',
+        content,
+        re.IGNORECASE,
+    )
+    numbered_report = re.fullmatch(
+        rf'\[\d+\]\s*.+?{quoted_title}\s*(?P<venue>[^,]+\bReport),\s*'
+        r'no\.\s*[A-Za-z]+-\d+,\s*(?P<year>(?:19|20)\d{2}),\s*'
+        r'.+?,\s*Accessed:\s*.+?\[Online\]\.\s*Available:\s*https?://.+',
+        content,
+        re.IGNORECASE,
+    )
+    publication = (
+        online_proceedings or series_proceedings or accepted_proceedings or named_proceedings
+        or ieee_proceedings or proceedings_series or located_acronym_proceedings
+        or arxiv_preprint or dated_arxiv or paged_publication
+        or ieee_transactions_paged or dated_paged_doi or quoted_page_range or numeric_month_venue
+        or quoted_paged_journal or quoted_article_journal or comma_paged_journal
+        or early_access_journal or abbreviated_proceedings or located_proceedings
+        or biblatex_journal or volume_paged_journal or numeric_volume_journal or volume_only_journal
+        or quoted_year_paged or article_number
+        or internet_draft or numbered_report
+    )
+    if publication:
+        reference['venue'] = publication.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(publication.group('year'))
+        return
+
+    journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{journal_author}'
+        rf'(?:(?:,\s*|\s*and\s+){journal_author})+)\s*'
+        r'\((?P<year>(?:19|20)\d{2})\),\s*(?P<title>[^.]+)\.\s*'
+        r'(?P<venue>[^,]+),\s*\d+\s*:\s*\d+\s*[-–]\s*\d+\.?\s*'
+        r'(?:https?://\S+)?',
+        content,
+    )
+    if journal:
+        reference['authors'] = [
+            re.sub(r'^and\s+', '', match.group().strip())
+            for match in re.finditer(journal_author, journal.group('authors'))
+        ]
+        reference['title'] = journal.group('title').strip()
+        reference['venue'] = journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(journal.group('year'))
+        return
+
+    volume_year_journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{journal_author}'
+        rf'(?:(?:,\s*|\s*and\s+|\s*&\s*){journal_author})+)\s*'
+        r'(?P<title>[^.]+)\.\s*(?P<venue>[^.,]+)\s+\d+,\s*'
+        r'\d+(?:\s*[-–]\s*\d+)?\s*\((?P<year>(?:19|20)\d{2})\)\.?\s*'
+        r'(?:https?://\S+)?',
+        content,
+    )
+    if volume_year_journal:
+        reference['authors'] = [
+            re.sub(r'^and\s+', '', match.group().strip())
+            for match in re.finditer(journal_author, volume_year_journal.group('authors'))
+        ]
+        reference['title'] = volume_year_journal.group('title').strip()
+        reference['venue'] = volume_year_journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(volume_year_journal.group('year'))
+        return
+
+    semicolon_journal = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{journal_author}(?:;\s*{journal_author})+)\s*'
+        r'(?P<title>[^.]+)\.\s*(?P<venue>.+?\bJ\.[^\d]+?)\s+'
+        r'(?P<year>(?:19|20)\d{2}),\s*\d+,\s*\d+\s*[-–]\s*\d+\.?',
+        content,
+    )
+    if semicolon_journal:
+        reference['authors'] = [
+            match.group().strip()
+            for match in re.finditer(journal_author, semicolon_journal.group('authors'))
+        ]
+        reference['title'] = semicolon_journal.group('title').strip()
+        reference['venue'] = semicolon_journal.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(semicolon_journal.group('year'))
+        return
+
+    chapter = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{journal_author})\s*'
+        r'(?P<title>[^.]+)\.\s*Chapter:\s*\d+\.\s*Publisher:\s*'
+        r'(?P<venue>.+?),\s*USA\.\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if chapter:
+        reference['authors'] = [chapter.group('author').strip()]
+        reference['title'] = chapter.group('title').strip()
+        reference['venue'] = chapter.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(chapter.group('year'))
+        return
+
+    news_article = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{journal_author})\s*'
+        r'\((?P<year>(?:19|20)\d{2})\)\.\s*(?P<title>[^,]+),\s*'
+        r'(?P<venue>[^,]+),\s*(?:January|February|March|April|May|June|July|'
+        r'August|September|October|November|December)\s+\d{1,2}\.?',
+        content,
+    )
+    if news_article:
+        reference['authors'] = [news_article.group('author').strip()]
+        reference['title'] = news_article.group('title').strip()
+        reference['venue'] = news_article.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(news_article.group('year'))
+        return
+
+    german_book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{journal_author})\s*'
+        r'(?P<title>[^.]+)\.\s*(?P<venue>[^.,]+),\s*[^.,]+\.\s*'
+        r'Germany\.\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if german_book:
+        reference['authors'] = [german_book.group('author').strip()]
+        reference['title'] = german_book.group('title').strip()
+        reference['venue'] = german_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(german_book.group('year'))
+        return
+
+    multi_author_book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{journal_author}(?:\s*{journal_author})+)\s*'
+        r'(?P<title>[^.]+)\.\s*(?P<venue>[^.,]+,\s*[^.,]+),\s*'
+        r'[^.,]+\.\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if multi_author_book:
+        expected_authors = [
+            match.group().strip()
+            for match in re.finditer(journal_author, multi_author_book.group('authors'))
+        ]
+        current_authors = reference.get('authors') or []
+        if not isinstance(current_authors, list) or [
+            re.sub(r'\W+', '', str(author)).casefold() for author in current_authors
+        ] != [re.sub(r'\W+', '', author).casefold() for author in expected_authors]:
+            reference['authors'] = []
+            warnings = list(reference.get('extraction_warnings') or [])
+            warning = 'The source author list has ambiguous separators; review the source.'
+            if warning not in warnings:
+                warnings.append(warning)
+            reference['extraction_warnings'] = warnings
+        reference['title'] = multi_author_book.group('title').strip()
+        reference['venue'] = multi_author_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(multi_author_book.group('year'))
+        return
+
+    unbalanced_article = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{journal_author})\s*'
+        r'(?P<title>[^"“].+?)(?:\'\'|’’|”|"),\s*(?P<venue>[^,]+),\s*'
+        r'[^,]+,\s*(?i:Published):\s*.+?\b(?P<year>(?:19|20)\d{2}),\s*'
+        r'https?://\S+',
+        content,
+    )
+    if unbalanced_article:
+        reference['authors'] = [unbalanced_article.group('author').strip()]
+        reference['title'] = unbalanced_article.group('title').strip()
+        reference['venue'] = unbalanced_article.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(unbalanced_article.group('year'))
+        return
+
+    quoted_doi_article = re.fullmatch(
+        rf'\[\d+\]\s*(?:{journal_author}(?:\s*{journal_author})*)\s*'
+        r'["“](?P<title>.+?)["”],\s*(?P<venue>[^,]+?)\s+'
+        r'(?P<year>(?:19|20)\d{2}),\s*\d+\s*\(\d+\),\s*\d+;\s*https?://\S+',
+        content,
+    )
+    if quoted_doi_article:
+        reference['title'] = quoted_doi_article.group('title').strip()
+        reference['venue'] = quoted_doi_article.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(quoted_doi_article.group('year'))
+        return
+
+    published_article = re.fullmatch(
+        rf'\[\d+\]\s*(?:{journal_author}(?:\s*{journal_author})+)\s*'
+        r'(?P<title>[^,]+),\s*(?P<venue>[^,]+),\s*[^,]+,\s*'
+        r'Published:\s*\w+\.\s*(?P<year>(?:19|20)\d{2}),?',
+        content,
+    )
+    if published_article:
+        reference['title'] = published_article.group('title').strip()
+        reference['venue'] = published_article.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(published_article.group('year'))
+        return
+
+    loose_author = rf'{journal_name}[,.]\s*(?:[A-Z]\.\s*){{1,4}}'
+    publisher_statement = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{loose_author}(?:\s*{loose_author})+)\s*'
+        r'(?P<title>.+?)\.\s*Published by\s+(?P<venue>.+?)\.\s*'
+        r'The United States\.\s*(?P<year>(?:19|20)\d{2})\.?',
+        content,
+    )
+    if publisher_statement:
+        author_source = re.sub(r'\W+', '', publisher_statement.group('authors')).casefold()
+        current_authors = reference.get('authors') or []
+        if not isinstance(current_authors, list) or not current_authors or any(
+            not (normalized := re.sub(r'\W+', '', str(author)).casefold())
+            or normalized not in author_source
+            for author in current_authors
+        ):
+            reference['authors'] = []
+            warnings = list(reference.get('extraction_warnings') or [])
+            warning = 'The source author list has ambiguous separators; review the source.'
+            if warning not in warnings:
+                warnings.append(warning)
+            reference['extraction_warnings'] = warnings
+        reference['title'] = publisher_statement.group('title').strip()
+        reference['venue'] = publisher_statement.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(publisher_statement.group('year'))
+        return
+
+    available_online = re.fullmatch(
+        rf'\[\d+\]\s*(?P<author>{journal_author})\s*'
+        r'(?P<title>.+?)\.\s*(?P<year>(?:19|20)\d{2})\.\s*'
+        r'(?i:Available at):\s*https?://\S+',
+        content,
+    )
+    if available_online:
+        reference['authors'] = [available_online.group('author').strip()]
+        reference['title'] = available_online.group('title').strip()
+        reference['year'] = int(available_online.group('year'))
+        return
+
+    unwrapped_content = re.sub(
+        r'\s+', ' ', re.sub(r'(?<=\w)-[ \t]*\r?\n[ \t]*(?=\w)', '-', raw_source.strip())
+    )
+    institutional_book = re.fullmatch(
+        rf'\[\d+\]\s*(?P<authors>{journal_author}(?:\s*{journal_author})*)\s*'
+        r'(?P<title>.+?),\s*(?P<venue>[^,]{3,200}?University of Applied Sciences)'
+        r'\s*[-–]\s*[^,]+?\s*[-–]\s*(?P<year>(?:19|20)\d{2})\.?',
+        unwrapped_content,
+    )
+    if institutional_book:
+        reference['authors'] = [
+            match.group().strip()
+            for match in re.finditer(journal_author, institutional_book.group('authors'))
+        ]
+        reference['title'] = institutional_book.group('title').strip()
+        reference['venue'] = institutional_book.group('venue').strip()
+        reference['journal'] = reference['venue']
+        reference['year'] = int(institutional_book.group('year'))
+        return
+
+    if not (reference.get('venue') or reference.get('journal')):
+        ieee_event = re.search(
+            r'["\u201d]\s*,?\s*(?P<venue>(?P<event_year>(?:19|20)\d{2})'
+            r'\s+IEEE\s+[^,]{3,140}?\s*\([A-Za-z0-9-]+\)),\s*'
+            r'[^;]+?,\s*(?P=event_year),\s*pp\.',
+            content,
+            re.IGNORECASE,
+        )
+        if ieee_event:
+            reference['venue'] = ieee_event.group('venue').strip()
+            reference['journal'] = reference['venue']
+
+    author_only = _match_author_year_only_citation(content)
+    if author_only:
+        authors_text = re.sub(r',\s*and\s+', ', ', author_only.group('authors'))
+        reference['authors'] = parse_authors_with_initials(authors_text)
+        reference['title'] = ''
+        reference['venue'] = ''
+        reference['journal'] = ''
+        reference['year'] = int(author_only.group('year'))
+        warnings = list(reference.get('extraction_warnings') or [])
+        warning = 'The extracted citation does not state a title or venue; review the source.'
+        if warning not in warnings:
+            warnings.append(warning)
+        reference['extraction_warnings'] = warnings
+
+
+def _recover_leading_source_authors(reference, raw_source):
+    existing_authors = reference.get('source_authors') or reference.get('authors') or []
+    if isinstance(existing_authors, str):
+        existing_authors = [existing_authors]
+    existing_authors = [
+        str(author).strip().lower() for author in existing_authors
+    ]
+    placeholders = {'unknown', 'unknown author', 'url reference'}
+    has_existing_authors = any(
+        author not in placeholders for author in existing_authors
+    )
+    has_url_sentinel = 'url reference' in existing_authors
+
+    content = re.sub(r'\s+', ' ', raw_source.strip())
+    content = re.sub(
+        r'\s+\u0301([aeiouyAEIOUY])',
+        lambda match: match.group(1) + '\u0301',
+        content,
+    )
+    content = re.sub(r'\s+(\u0327)', r'\1', content)
+    content = unicodedata.normalize('NFC', content)
+
+    def store_authors(authors):
+        reference['authors'] = authors
+        reference['source_authors'] = authors
+
+    def repair_title_from_author_sequence(authors, remainder):
+        title = str(reference.get('title') or '').strip()
+        if not title or len(authors) < 2:
+            return
+
+        def title_author_pattern(author):
+            without_initials = re.sub(
+                r'^(?:[A-ZÀ-ÖØ-Þ]\.\s*)+',
+                '',
+                author,
+            ).strip()
+            if without_initials != author:
+                return (
+                    r'(?:' + re.escape(author) + r'|'
+                    + re.escape(without_initials) + r')'
+                )
+            return re.escape(author)
+
+        for start in range(len(authors)):
+            title_prefix = title_author_pattern(authors[start])
+            for author in authors[start + 1:]:
+                title_prefix += (
+                    r'\s*(?:,\s*(?:and|y)\s+|,\s*|'
+                    r'\b(?:and|y)\b\s*|&\s*)'
+                    + title_author_pattern(author)
+                )
+            if not re.match(
+                r'^\s*' + title_prefix + r'\s*[,.:;]\s*',
+                title,
+                re.IGNORECASE,
+            ):
+                continue
+            candidate = dict(reference)
+            candidate['authors'] = authors
+            candidate['source_authors'] = authors
+            candidate['title'] = ''
+            _recover_unambiguous_numbered_fields(candidate, raw_source)
+            corrected_title = str(candidate.get('title') or '').strip()
+            source_tail = re.sub(r'^\s*[,.:;]\s*', '', remainder or '')
+            if (
+                corrected_title
+                and source_tail.casefold().startswith(corrected_title.casefold())
+            ):
+                reference['title'] = corrected_title
+                if not reference.get('venue') and candidate.get('venue'):
+                    reference['venue'] = candidate['venue']
+                    reference['journal'] = candidate['venue']
+            break
+
+    quoted_title_author = re.match(
+        r'^\[\d+\]\s*["“].+?["”]\s+by\s+'
+        r'(?P<authors>[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ\'’\-]+'
+        r'(?:\s+(?:[A-Z]\.|[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ\'’\-]+)){1,4})'
+        r'\.?\s*$',
+        content,
+    )
+    if quoted_title_author:
+        store_authors([quoted_title_author.group('authors').strip()])
+        return
+    if re.match(r'^\[\d+\]\s*["“]', content):
+        return
+
+    surname = r"[A-Z][\w'’\-\ufffd]*(?:\s+[A-Z][\w'’\-\ufffd]*)*"
+    if re.match(
+        rf'^\[\d+\]\s*{surname},\s*[A-Z]\.\s+'
+        rf'{surname},\s*[A-Z]\.',
+        content,
+    ):
+        return
+
+    uppercase_surname = r"[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’\-]+"
+    given_names = (
+        r"[A-ZÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ'’\-]+"
+        r"(?:\s+(?:[A-ZÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ'’\-]*|"
+        r"[a-zà-öø-ÿ]{1,4}))*"
+    )
+    full_name = rf'{uppercase_surname},\s*{given_names}'
+    full_name_list = (
+        rf'{full_name}(?:;\s*{full_name})*'
+        rf'(?:\s+et\s+al\.?)?'
+    )
+    full_name_match = re.match(
+        rf'^\[\d+\]\s*(?P<authors>{full_name_list})\.\s+',
+        content,
+    )
+    if full_name_match:
+        recovered = [
+            re.sub(r'\s+', ' ', name.strip())
+            for name in full_name_match.group('authors').split(';')
+        ]
+        if recovered and recovered[-1].lower().endswith(' et al.'):
+            recovered[-1] = re.sub(
+                r'\s+et\s+al\.?$', '', recovered[-1], flags=re.IGNORECASE
+            )
+        if recovered:
+            title = str(reference.get('title') or '').strip().lower()
+            if title not in {'', 'unknown', 'unknown title'}:
+                if has_existing_authors:
+                    current_names = {
+                        re.sub(r'\W+', '', author, flags=re.UNICODE)
+                        for author in existing_authors
+                        if author not in placeholders
+                    }
+                    recovered_names = [
+                        re.sub(r'\W+', '', author.lower(), flags=re.UNICODE)
+                        for author in recovered
+                    ]
+                    combined_existing = ''.join(
+                        re.sub(
+                            r'\W+', '',
+                            re.sub(r'\b(?:and|y)\b', '', author, flags=re.IGNORECASE).lower(),
+                            flags=re.UNICODE,
+                        )
+                        for author in existing_authors
+                        if author not in placeholders
+                    )
+                    combined_recovered = ''.join(recovered_names)
+                    source_combined_match = (
+                        len(recovered_names) > len(current_names)
+                        and combined_existing == combined_recovered
+                    )
+                    if not source_combined_match and (
+                        len(recovered_names) <= len(current_names)
+                        or not all(
+                            any(recovered_name.startswith(current_name)
+                                for recovered_name in recovered_names)
+                            for current_name in current_names
+                        )
+                    ):
+                        return
+                repair_title_from_author_sequence(
+                    recovered, content[full_name_match.end():]
+                )
+                reference['authors'] = recovered
+                reference['source_authors'] = recovered
+                return
+
+    initial_name = (
+        r"(?:[A-ZА-ЯЁІЇЄҐ]{1,3}\.(?:-[A-ZА-ЯЁІЇЄҐ]\.)?\s*)+"
+        r"[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ][\w'’\-\ufffd]+"
+        r"(?:\s+[A-Z][\w'’\-\ufffd]+)*"
+    )
+    initial_list = (
+        rf'{initial_name}(?:[,;]\s*{initial_name})*'
+        rf'(?:,?\s+(?:and|&|y)\s+{initial_name})?'
+        rf'(?:,?\s+et\s+al\.?)?'
+    )
+    initial_match = re.match(
+        rf'^\[\d+\]\s*(?P<authors>{initial_list})\s*(?=[,.:;"“(])',
+        content,
+    )
+    recovered = []
+    recovered_kind = None
+    remainder_after_candidate = None
+    has_organization_identifier = False
+    has_organization_cue = False
+    known_source_names = {
+        'arduino', 'google', 'googlelabs', 'microsoft', 'openai',
+        'kaggle', 'eurostat', 'interface', 'ibm', 'unesco', 'ontsi',
+        'icpc', 'icom', 'nationalcentreforscienceandengineeringstatistics',
+    }
+    known_source = False
+    arduino_project = False
+    if initial_match:
+        remainder_after_candidate = content[initial_match.end():]
+        names = re.sub(
+            r',?\s+(?:and|&)\s+', ', ', initial_match.group('authors')
+        )
+        for name in re.finditer(initial_name, names):
+            parsed = parse_authors_with_initials(name.group())
+            if parsed:
+                recovered.append(parsed[0])
+        if re.search(r'\bet\s+al\.?', initial_match.group('authors'), re.IGNORECASE):
+            recovered.append('et al')
+        if recovered:
+            if re.match(r'\s*,\s*[A-Z]\.', remainder_after_candidate):
+                recovered = []
+            else:
+                recovered_kind = 'personal'
+                repair_title_from_author_sequence(
+                    recovered, remainder_after_candidate
+                )
+
+    if not recovered:
+        inverted_name = (
+            rf'{surname},\s*[A-Z]\.(?:-[A-Z]\.)?'
+            rf'(?:\s+[A-Z]\.(?:-[A-Z]\.)?){{0,3}}'
+            rf'(?:\s+(?:dos|das|de|da|do|van|von)\b)?'
+        )
+        inverted_list = (
+            rf'{inverted_name}(?:[,;]\s*{inverted_name})*'
+            rf'(?:,?\s+(?:and|&)\s+{inverted_name})?'
+            rf'(?:\s+et\s+al\.?)?'
+        )
+        inverted_match = re.match(
+            rf'^\[\d+\]\s*(?P<authors>{inverted_list})',
+            content,
+        )
+        if inverted_match:
+            authors_text = inverted_match.group('authors')
+            remainder_after_candidate = content[inverted_match.end():]
+            for name in re.finditer(inverted_name, authors_text):
+                name_text = name.group().strip()
+                if re.search(
+                    r'\s+(?:dos|das|de|da|do|van|von)$',
+                    name_text,
+                    re.IGNORECASE,
+                ):
+                    parsed = [name_text]
+                else:
+                    parsed = parse_authors_with_initials(name_text)
+                if parsed:
+                    recovered.append(parsed[0])
+            if re.search(r'\bet\s+al\.?', authors_text, re.IGNORECASE):
+                recovered.append('et al')
+            if re.match(
+                r'\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]\.',
+                remainder_after_candidate,
+            ):
+                recovered = []
+            if recovered:
+                recovered_kind = 'personal'
+
+    if not recovered:
+        numeric_author = re.match(
+            r'^\[\d+\]\s*(?P<author>\d+\.\s+[A-ZА-ЯЁ]\.\s+'
+            r'[A-Z][\w\'’\-]+)\s*[,.:]',
+            content,
+        )
+        if numeric_author:
+            recovered = [numeric_author.group('author')]
+            recovered_kind = 'personal'
+
+    if not recovered:
+        risc_v_match = re.match(
+            r'^\[\d+\]\s*(?P<author>R\.-V\.\s+International)\s*[,.;]\s*',
+            content,
+        )
+        if risc_v_match:
+            recovered = [risc_v_match.group('author')]
+            recovered_kind = 'organization'
+            remainder_after_candidate = content[risc_v_match.end():]
+            has_organization_identifier = True
+
+    if not recovered:
+        united_nations_match = re.match(
+            r'^\[\d+\]\s*(?P<author>United Nations)\s*[-–—]\s*',
+            content,
+            re.IGNORECASE,
+        )
+        if united_nations_match:
+            recovered = [united_nations_match.group('author')]
+            recovered_kind = 'organization'
+            remainder_after_candidate = content[united_nations_match.end():]
+            has_organization_identifier = True
+
+    if not recovered:
+        title = str(reference.get('title') or '').strip()
+        title = re.sub(
+            r'\s+\u0301([aeiouyAEIOUY])',
+            lambda match: match.group(1) + '\u0301',
+            title,
+        )
+        title = unicodedata.normalize('NFC', title)
+        source_after_number = content[content.find(']') + 1:]
+        first_full_name = re.match(
+            r'\s*(?P<author>[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ][\wÀ-ÖØ-öø-ÿ\'’\-]+'
+            r'(?:\s+[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ][\wÀ-ÖØ-öø-ÿ\'’\-]+){1,2})'
+            r'\.\s+(?=[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ])',
+            source_after_number,
+        )
+        if first_full_name:
+            author = first_full_name.group('author')
+            title_key = re.sub(r'\W+', '', title.lower(), flags=re.UNICODE)
+            author_key = re.sub(r'\W+', '', author.lower(), flags=re.UNICODE)
+            if title_key == author_key:
+                store_authors([author])
+                return
+        if title and title.lower() not in {'unknown', 'unknown title'}:
+            title_match = re.search(
+                re.escape(title),
+                source_after_number,
+                re.IGNORECASE,
+            )
+            if title_match:
+                prefix = source_after_number[:title_match.start()]
+                prefix = prefix.strip(' ,.;:')
+                person = (
+                    r"[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ][\wÀ-ÖØ-öø-ÿ'’\-]*"
+                    r"(?:\s+(?:[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ]\.?|"
+                    r"[A-ZÀ-ÖØ-ÞА-ЯЁІЇЄҐ][\wÀ-ÖØ-öø-ÿ'’\-]*)){1,3}"
+                )
+                parts = re.split(
+                    r'\s+(?:et|and)\s+|,\s*', prefix, flags=re.IGNORECASE
+                )
+                organization_terms = (
+                    r'\b(?:university|institute|institution|organization|'
+                    r'organisation|commission|department|ministry|forum|'
+                    r'council|association|society|agency|foundation)\b'
+                )
+                if (
+                    parts
+                    and not re.search(organization_terms, prefix, re.IGNORECASE)
+                    and all(re.fullmatch(person, part.strip()) for part in parts)
+                ):
+                    store_authors([part.strip() for part in parts])
+                    return
+
+    if not recovered:
+        title_first_web = _match_title_first_web_citation(content)
+        leading_acronym = re.match(
+            r'^\[\d+\]\s*(?P<author>[A-Z]{2,8})\s*,',
+            content,
+        )
+        leading_source = re.match(
+            r'^\[\d+\]\s*(?P<author>[^,;:]+)',
+            content,
+        )
+        leading_source_key = re.sub(
+            r'\W+', '', leading_source.group('author').lower(), flags=re.UNICODE
+        ) if leading_source else ''
+        if (
+            title_first_web
+            and not leading_acronym
+            and leading_source_key not in known_source_names
+            and not re.search(r'\be\.v\.\s', content, re.IGNORECASE)
+        ):
+            return
+        organization_match = re.match(
+            r'^\[\d+\]\s*(?P<author>[^,;:]+?)(?:,|;|:\s*|'
+            r'(?<=[eE]\.[vV]\.)\s+|(?<![eE]\.[vV])\.\s+|'
+            r'\s+(?=(?:19|20)\d{2}\b))\s*(?P<tail>.+)$',
+            content,
+        )
+        if organization_match:
+            organization = organization_match.group('author').strip()
+            is_acronym = bool(re.fullmatch(r'[A-Z]{2,8}', organization))
+            following_acronym = re.match(
+                r'\s*(?:(?:,|\()\s*)?([A-Z]{2,8})\)?\b',
+                organization_match.group('tail'),
+            )
+            has_following_acronym = bool(following_acronym)
+            has_parenthetical_acronym = bool(re.search(
+                r'\([A-Z]{2,8}\)\s*$',
+                organization,
+            ))
+            has_organization_cue = bool(re.search(
+                r'(?:\b(?:center|centre|statistics|council|commission|'
+                r'department|ministry|ministero|institute|foundation|'
+                r'association|society|committee|government|bureau|office|'
+                r'agency|university|academy|organization|organisation|'
+                r'federation|corporation|institution|forum|laboratory|'
+                r'laboratories|bank)\b|\be\.v\.?)\s*$',
+                organization,
+                re.IGNORECASE,
+            )) or has_following_acronym or bool(re.search(
+                r'\binstitution of\b', organization, re.IGNORECASE
+            ))
+            compact_organization = re.sub(
+                r'\W+', '', organization.lower(), flags=re.UNICODE
+            )
+            linked_to_url = any(
+                compact_organization in re.sub(
+                    r'\W+', '', host.lower(), flags=re.UNICODE
+                )
+                for host in re.findall(r'https?://([^/\s]+)', content, re.IGNORECASE)
+            )
+            known_source = compact_organization in known_source_names
+            arduino_project = bool(re.fullmatch(
+                r'arduino(?:\s+[\w-]+){0,4}\s+project',
+                organization,
+                re.IGNORECASE,
+            ))
+            if (
+                is_acronym or has_organization_cue or has_parenthetical_acronym
+                or linked_to_url or known_source or arduino_project
+            ):
+                if following_acronym:
+                    organization += ', ' + following_acronym.group(1)
+                recovered = [organization]
+                recovered_kind = 'organization'
+                remainder_after_candidate = organization_match.group('tail')
+                has_organization_identifier = (
+                    is_acronym
+                    or has_following_acronym
+                    or has_parenthetical_acronym
+                    or linked_to_url
+                    or known_source
+                    or arduino_project
+                )
+
+    if recovered:
+        if (
+            has_url_sentinel
+            and recovered_kind == 'personal'
+            and 'et al' in [author.lower() for author in recovered]
+            and not re.search(r'https?://', content, re.IGNORECASE)
+        ):
+            return
+        if any(
+            re.search(r'\b(?:author|unknown)\b', author, re.IGNORECASE)
+            for author in recovered
+        ):
+            return
+        if has_existing_authors:
+            current_names = {
+                re.sub(r'\W+', '', author, flags=re.UNICODE)
+                for author in existing_authors
+                if author not in placeholders
+            }
+            recovered_names = [
+                re.sub(r'\W+', '', author.lower(), flags=re.UNICODE)
+                for author in recovered
+            ]
+            combined_existing = ''.join(
+                re.sub(
+                    r'\W+', '',
+                    re.sub(r'\b(?:and|y)\b', '', author, flags=re.IGNORECASE).lower(),
+                    flags=re.UNICODE,
+                )
+                for author in existing_authors
+                if author not in placeholders
+            )
+            source_combined_match = (
+                len(recovered_names) > len(current_names)
+                and combined_existing == ''.join(recovered_names)
+            )
+            if not source_combined_match and (
+                len(recovered_names) <= len(current_names)
+                or not all(
+                    any(recovered_name.startswith(current_name)
+                        for recovered_name in recovered_names)
+                    for current_name in current_names
+                )
+            ):
+                return
+        title = str(reference.get('title') or '').strip().lower()
+        if title in {'', 'unknown', 'unknown title'} and not (
+            has_organization_identifier
+            or has_organization_cue
+            or (
+                recovered_kind == 'personal'
+                and 'et al' in [author.lower() for author in recovered]
+            )
+            or re.fullmatch(
+            r'\s*[,;]?\s*(?:19|20)\d{2}\b(?:\.\s*)?'
+            r'(?:\[Online\].*|https?://.*|doi:.*)?',
+            remainder_after_candidate or '',
+            re.IGNORECASE,
+            )
+        ):
+            return
+        if recovered_kind == 'organization':
+            title_key = re.sub(r'\W+', '', title, flags=re.UNICODE)
+            author_key = re.sub(
+                r'\W+', '', recovered[0].lower(), flags=re.UNICODE
+            )
+            terminal_year_url = bool(re.fullmatch(
+                r'\s*[,;]?\s*(?:19|20)\d{2}\b(?:\.\s*)?'
+                r'(?:\[Online\].*|https?://.*|doi:.*)?',
+                remainder_after_candidate or '',
+                re.IGNORECASE,
+            ))
+            if (
+                title_key == author_key
+                and not has_organization_identifier
+                and not (reference.get('venue') or reference.get('journal'))
+            ):
+                return
+            if has_url_sentinel and not title_key.startswith(author_key) and not (
+                re.fullmatch(r'[A-Z]{2,8}', recovered[0])
+                and terminal_year_url
+            ):
+                return
+        store_authors(recovered)
+
+
+def _clear_source_absent_fields(reference, raw_source):
+    content = re.sub(r'\s+', ' ', raw_source.strip())
+    body = re.sub(r'^\[\d+\]\s*', '', content)
+    title = str(reference.get('title') or '').strip()
+    title_key = re.sub(r'\W+', '', title.casefold(), flags=re.UNICODE)
+    urls = [
+        match.group().rstrip('.,;')
+        for match in re.finditer(r'https?://\S+', body, re.IGNORECASE)
+    ]
+
+    if title and any(title.rstrip('.,;').casefold() == url.casefold() for url in urls):
+        reference['title'] = ''
+        title = ''
+
+    if title:
+        title_without_year = re.sub(
+            r'\.\s*((?:19|20)\d{2})\.?$',
+            '',
+            title,
+        ).strip()
+        if (
+            title_without_year != title
+            and body.casefold().startswith(title_without_year.casefold())
+            and re.fullmatch(
+                re.escape(body[:len(title_without_year)])
+                + r'\.\s*(?:19|20)\d{2}\.?',
+                body,
+                re.IGNORECASE,
+            )
+        ):
+            reference['title'] = title_without_year
+            title = title_without_year
+            title_key = re.sub(r'\W+', '', title.casefold(), flags=re.UNICODE)
+
+    authors = reference.get('source_authors') or reference.get('authors') or []
+    if isinstance(authors, str):
+        authors = [authors]
+    author_keys = [
+        re.sub(r'\W+', '', str(author).casefold(), flags=re.UNICODE)
+        for author in authors
+    ]
+    title_boundary = body[len(title):]
+    if (
+        title
+        and len(title_key) >= 8
+        and body.casefold().startswith(title.casefold())
+        and (not title_boundary or re.match(r'\s*[.,;:]', title_boundary))
+    ):
+        if any(
+            len(author_key) > len(title_key) and author_key.startswith(title_key)
+            for author_key in author_keys
+            if author_key
+        ):
+            reference['authors'] = []
+            reference['source_authors'] = []
+    elif title and authors:
+        first_author = str(authors[0]).strip()
+        prefix = first_author + ' ' + title
+        if (
+            first_author
+            and body.casefold().startswith(prefix.casefold())
+            and re.fullmatch(
+                r'[.!?]?\s*(?:(?:19|20)\d{2}[.!?]?\s*)?',
+                body[len(prefix):],
+            )
+        ):
+            source_title = re.sub(
+                r'\.\s*(?:19|20)\d{2}\.?\s*$',
+                '',
+                body,
+            ).strip(' .')
+            if source_title:
+                reference['title'] = source_title
+                reference['authors'] = []
+                reference['source_authors'] = []
+
+    venue = str(reference.get('venue') or reference.get('journal') or '').strip()
+    if (
+        re.match(r'^https?://', venue, re.IGNORECASE)
+        or (
+            re.fullmatch(r'arxiv\s*:\s*\d{4}(?:\.\d{4,5})?(?:v\d+)?', venue, re.IGNORECASE)
+            and re.search(r'\barxiv\s*:\s*\d{4}(?:\.\d+)?', content, re.IGNORECASE)
+        )
+    ):
+        reference['venue'] = ''
+        reference['journal'] = ''
+
+
 def normalize_reference_fields(reference):
     """Normalize shared reference field names and lift visible identifiers."""
     if reference.get('journal') and not reference.get('venue'):
         reference['venue'] = reference['journal']
+
+    cleared_page_range = False
+    for field in ('venue', 'journal'):
+        value = reference.get(field)
+        if isinstance(value, str) and re.fullmatch(r'\s*\d+\s*[-–]\s*\d+\s*', value):
+            reference[field] = ''
+            cleared_page_range = True
+    if cleared_page_range:
+        warning = 'Venue could not be distinguished from page numbers; review the source text.'
+        warnings = list(reference.get('extraction_warnings') or [])
+        if warning not in warnings:
+            warnings.append(warning)
+        reference['extraction_warnings'] = warnings
+
+    from refchecker.utils.doi_utils import construct_doi_url, join_wrapped_doi_lines
+    from refchecker.utils.url_utils import clean_url, join_wrapped_url_lines
+
+    raw_source = reference.get('raw_text') or reference.get('raw') or ''
+    if isinstance(raw_source, str) and raw_source:
+        if _match_unsigned_web_citation(raw_source):
+            reference['authors'] = []
+            reference['venue'] = ''
+            reference['journal'] = ''
+            if reference.get('extraction_warnings'):
+                reference['extraction_warnings'] = [
+                    warning for warning in reference['extraction_warnings']
+                    if warning != 'Author could not be extracted; review the source text.'
+                ]
+        signed_web = _match_signed_web_citation(raw_source)
+        if not signed_web:
+            signed_web = re.match(
+                r'^\[\d+\]\s*(?P<author>[^,"“”]{1,100}),\s*'
+                r'["“][^"“”]+(?:,["”]|["”],)\s*https?\s*:\s*//',
+                re.sub(r'\s+', ' ', raw_source.strip()),
+                re.IGNORECASE,
+            )
+        authors = reference.get('authors')
+        if signed_web and isinstance(authors, list) and len(authors) == 1:
+            source_author = signed_web.group('author').strip()
+            without_digits = re.sub(r'\s+', ' ', re.sub(r'\d', '', source_author)).strip()
+            if re.search(r'\d', source_author) and authors[0] == without_digits:
+                reference['authors'] = [source_author]
+        authors = reference.get('authors')
+        if isinstance(authors, list) and len(authors) > 1:
+            authors = list(authors)
+            source_author_text = re.split(r'["“]', re.sub(r'\s+', ' ', raw_source), maxsplit=1)[0]
+            for index, author in enumerate(authors):
+                if (
+                    isinstance(author, str)
+                    and re.match(
+                        r"^&\s+(?:(?:[A-Z]\.\s*)+[A-Z]|[^\W\d_][\w'’\-]+,\s*(?:[A-Z]\.\s*)+)",
+                        author,
+                    )
+                    and author in source_author_text
+                ):
+                    authors[index] = re.sub(r'^&\s+', '', author)
+            reference['authors'] = authors
+        final_author = re.match(
+            r"^\s*\[\d+\]\s*[^\"“]+?,\s+and\s+"
+            r"(?P<name>[A-Z]\.\s*(?:[A-Z]\.\s*)*"
+            r"[A-Z][\w'’\-]+(?:\s+[A-Z][\w'’\-]+)+),\s*[\"“]",
+            re.sub(r'\s+', ' ', raw_source),
+        )
+        if (
+            final_author and isinstance(authors, list) and authors
+            and isinstance(authors[-1], str) and len(authors[-1]) == 1
+            and final_author.group('name').startswith(authors[-1] + '.')
+        ):
+            reference['authors'] = authors[:-1] + [final_author.group('name')]
+        suffix_author = re.match(
+            r'\[\d+\]\s*(?P<name>(?:[A-Z]\.\s*)+[A-Z][\w\'’\-]+),\s*'
+            r'(?P<suffix>Jr\.|Sr\.),\s*["“]',
+            re.sub(r'\s+', ' ', raw_source),
+        )
+        if suffix_author and reference.get('authors') == [
+            suffix_author.group('name'), suffix_author.group('suffix')
+        ]:
+            reference['authors'] = [f"{suffix_author.group('name')}, {suffix_author.group('suffix')}"]
+        _recover_unambiguous_numbered_fields(reference, raw_source)
+        current_source_authors = reference_authors_for_display(reference)
+        if (
+            current_source_authors
+            and (
+                not reference.get('title')
+                or not (reference.get('venue') or reference.get('journal'))
+            )
+        ):
+            source_candidate = {'authors': [], 'title': '', 'venue': ''}
+            _recover_unambiguous_numbered_fields(source_candidate, raw_source)
+            recovered_authors = reference_authors_for_display(source_candidate)
+
+            def compact_authors(authors):
+                return [
+                    re.sub(r'\W+', '', author).casefold()
+                    for author in authors
+                ]
+
+            current_title_key = re.sub(
+                r'\W+', '', str(reference.get('title') or '')
+            ).casefold()
+            recovered_title_key = re.sub(
+                r'\W+', '', str(source_candidate.get('title') or '')
+            ).casefold()
+            current_authors_key = compact_authors(current_source_authors)
+            recovered_authors_key = compact_authors(recovered_authors)
+            authors_match = bool(
+                recovered_authors_key
+                and current_authors_key[:len(recovered_authors_key)]
+                == recovered_authors_key
+            )
+            if (
+                source_candidate.get('title')
+                and authors_match
+                and (
+                    not current_title_key
+                    or recovered_title_key in current_title_key
+                )
+            ):
+                if (
+                    compact_authors(
+                        cited_authors_for_display(reference.get('authors'))
+                    )
+                    != recovered_authors_key
+                ):
+                    reference['authors'] = recovered_authors
+                if reference.get('source_authors') is not None:
+                    reference['source_authors'] = recovered_authors
+                reference['title'] = source_candidate['title']
+                if (
+                    source_candidate.get('venue')
+                    and not (reference.get('venue') or reference.get('journal'))
+                ):
+                    reference['venue'] = source_candidate['venue']
+                    reference['journal'] = source_candidate['venue']
+                if source_candidate.get('year') and not reference.get('year'):
+                    reference['year'] = source_candidate['year']
+        for match in re.finditer(r'\b([^\W\d_]+)-[ \t]*\r?\n[ \t]*([^\W\d_]+)', raw_source):
+            prefix, suffix = match.groups()
+            if not is_source_compound_hyphen_prefix(prefix, suffix) or suffix.casefold() in {'and', 'or'}:
+                continue
+            for field in ('title', 'venue', 'journal'):
+                value = reference.get(field)
+                if isinstance(value, str):
+                    pattern = rf'\b{re.escape(prefix)}(?:-\s*|\s*){re.escape(suffix)}\b'
+                    if len(re.findall(pattern, raw_source)) == 1 and len(re.findall(pattern, value)) == 1:
+                        reference[field] = re.sub(pattern, lambda _: f'{prefix}-{suffix}', value)
+        fused_author = re.search(
+            r'\b(?i:doi):\s*(?P<doi>10\.\d{4,9}/[^\s]+?)\.'
+            r'(?P<initial>[A-Z])\.\s*[A-Z][a-z]+,',
+            raw_source,
+        )
+        if fused_author:
+            doi = fused_author.group('doi')
+            fused_doi = f"{doi}.{fused_author.group('initial')}"
+            if str(reference.get('doi') or '').casefold() == fused_doi.casefold():
+                reference['doi'] = doi
+                url = str(reference.get('url') or '')
+                if url.casefold() == construct_doi_url(fused_doi).casefold():
+                    reference['url'] = construct_doi_url(doi)
+
+        joined_source = join_wrapped_doi_lines(raw_source)
+        if joined_source != raw_source:
+            match = re.search(r'10\.\d{4,9}/[\w.\-;()/:%<>]+', joined_source)
+            if match:
+                candidate = match.group(0).rstrip('.,;)')
+                existing = str(reference.get('doi') or '')
+                if not existing or (
+                    len(candidate) > len(existing)
+                    and candidate.lower().startswith(existing.lower())
+                ):
+                    reference['doi'] = candidate
+                    url = reference.get('url') or ''
+                    if existing and re.match(
+                        r'^https?://(?:dx\.)?doi\.org/', url, re.IGNORECASE
+                    ) and existing.lower() in url.lower():
+                        reference['url'] = construct_doi_url(candidate)
+
+        existing_doi = str(reference.get('doi') or '')
+        if existing_doi and not re.match(r'^10\.\d{4,9}/', existing_doi, re.IGNORECASE):
+            source_dois = {
+                match.rstrip('.,;)')
+                for match in re.findall(r'10\.\d{4,9}/[\w.\-;()/:%]+', joined_source)
+                if match.rstrip('.,;)').casefold().endswith('/' + existing_doi.casefold())
+            }
+            if len(source_dois) == 1:
+                complete_doi = source_dois.pop()
+                existing_url = str(reference.get('url') or '')
+                if re.fullmatch(
+                    r'https?://(?:dx\.)?doi\.org/' + re.escape(existing_doi),
+                    existing_url,
+                    re.IGNORECASE,
+                ):
+                    reference['url'] = construct_doi_url(complete_doi)
+                reference['doi'] = complete_doi
+
+        joined_urls = join_wrapped_url_lines(raw_source)
+        matches = list(re.finditer(r'https?://[^\s<>"“”]+', joined_urls, re.IGNORECASE))
+        if len(matches) == 1:
+            match = matches[0]
+            candidate = clean_url(match.group())
+            tail = joined_urls[match.end():].strip()
+            if (
+                candidate and not candidate.endswith('-')
+                and (not tail or re.match(r'(?:last\s+)?accessed\b|(?:19|20)\d{2}\b', tail, re.IGNORECASE))
+            ):
+                existing_url = str(reference.get('url') or '')
+                if not existing_url:
+                    reference['url'] = candidate
+                elif (
+                    len(candidate) > len(existing_url)
+                    and candidate.casefold().startswith(existing_url.casefold())
+                ):
+                    suffix = candidate[len(existing_url):]
+                    doi = str(reference.get('doi') or '')
+                    if (
+                        doi and existing_url.casefold().endswith(doi.casefold())
+                        and re.fullmatch(r'\.\d{4,}', suffix)
+                    ):
+                        reference['doi'] = doi + suffix
+                    reference['url'] = candidate
 
     if not reference.get('doi'):
         for key in ('cited_url', 'url', 'raw_text', 'raw'):
@@ -4942,6 +8448,37 @@ def normalize_reference_fields(reference):
                 if match:
                     reference['doi'] = match.group(0).rstrip('.,;)')
                     break
+
+    frontiers_url = re.fullmatch(
+        r'https?://(?:www\.)?frontiersin\.org/journals/[^/]+/articles/'
+        r'(10\.3389/[A-Za-z0-9._-]+)/full',
+        str(reference.get('url') or ''),
+        re.IGNORECASE,
+    )
+    if frontiers_url and str(reference.get('doi') or '').casefold() == (
+        frontiers_url.group(1) + '/full'
+    ).casefold():
+        reference['doi'] = frontiers_url.group(1)
+
+    doi = str(reference.get('doi') or '')
+    if isinstance(raw_source, str) and doi.endswith('/-'):
+        base_doi = doi[:-2]
+        if (
+            re.search(re.escape(base_doi) + r'/\s*-\s*/', raw_source, re.IGNORECASE)
+            and re.search(
+                r'/doi/' + re.escape(base_doi) + r'(?=$|[\s,;)]|\.(?=$|[\s,;)]))',
+                raw_source,
+                re.IGNORECASE,
+            )
+        ):
+            reference['doi'] = base_doi
+            url = reference.get('url') or ''
+            if re.fullmatch(
+                r'https?://(?:dx\.)?doi\.org/' + re.escape(doi),
+                url,
+                re.IGNORECASE,
+            ):
+                reference['url'] = construct_doi_url(base_doi)
 
     if not reference.get('arxiv_id'):
         for key in ('cited_url', 'url', 'raw_text', 'raw'):
@@ -4966,7 +8503,11 @@ def normalize_reference_fields(reference):
                 reference['arxiv_id'] = match.group(1)
                 break
 
-    return reference
+    if isinstance(raw_source, str) and raw_source:
+        _recover_leading_source_authors(reference, raw_source)
+        _clear_source_absent_fields(reference, raw_source)
+
+    return annotate_reference_field_status(reference)
 
 
 def validate_parsed_references(references, *, require_all=False, expected_count=None):

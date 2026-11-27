@@ -12,6 +12,8 @@ import re
 import logging
 from typing import List, Dict, Any, Optional
 
+from refchecker.utils.text_utils import is_acronym_hyphen_prefix
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +69,9 @@ def _is_syllable_break(before_word: str, after_word: str) -> bool:
     # Convert to lowercase for analysis
     before_lower = before_word.lower()
     after_lower = after_word.lower()
+
+    if is_acronym_hyphen_prefix(before_word):
+        return False
     
     # Common patterns that indicate syllable breaks (should remove hyphen)
     syllable_break_patterns = [
@@ -198,10 +203,19 @@ def extract_book_citation_fields(
     content = _handle_hyphenated_line_breaks(content)
     content = re.sub(r'\s+', ' ', content.strip())
     content = re.sub(r'^\s*\[\d+\]\s*', '', content)
+    content = re.sub(r',\s*tex\.(?:key|timestamp):.*$', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'\s*\(cited on pages?\s+[\d, -]+\)\.?$', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'\.\s*pp?\.\s*[\d,– -]+\.?$', '', content, flags=re.IGNORECASE)
+    content = re.sub(
+        r'\s*\(original work published\s+(?:19|20|1[0-8])\d{2}\)\.?$',
+        '',
+        content,
+        flags=re.IGNORECASE,
+    )
 
     author_name = (
-        r'(?:[A-Z]\.\s*)+[A-Z][A-Za-z\'-]+'
-        r'(?:\s+[A-Z][A-Za-z\'-]+)*'
+        r'(?:[A-Z]\.\s*)+(?:St\.\s*)?[^\W\d_][\w\'-]+'
+        r'(?:\s+[^\W\d_][\w\'-]+)*'
     )
     author_list = (
         rf'{author_name}(?:,\s*{author_name})*'
@@ -216,6 +230,14 @@ def extract_book_citation_fields(
         return None
 
     details = author_match.group('details')
+    if re.search(r'["\u201c\u201d]', details) or re.match(
+        r'(?:(?:and|y|et)\s+)?(?:[A-Z]\.\s*)+[^\W\d_]',
+        details,
+        re.IGNORECASE,
+    ):
+        return None
+    if re.search(r'\b(?:ISBN|ISSN|pp\.)', details, re.IGNORECASE):
+        return None
     details = re.sub(
         r'\s*\[Online\]\.\s*Available:\s*https?://\S+.*$',
         '',
@@ -223,27 +245,77 @@ def extract_book_citation_fields(
         flags=re.IGNORECASE,
     )
     details = re.sub(r'\s+doi\s*:.*$', '', details, flags=re.IGNORECASE)
-    publication_matches = list(re.finditer(
-        r'\.\s+(?=[A-Z][^:\n]{1,70}:\s+.+,\s*'
+    location_match = re.search(
+        r'\.\s*(?=[^.,:]{2,60},\s*(?:[A-Z]{2,3}|(?:[A-Z]\.){1,3}|'
+        r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)(?:,\s*[A-Z][A-Za-z .]+)?:\s*.+,\s*'
+        r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
+        r'(?:19|20)\d{2}\.?\s*$)',
+        details,
+    )
+    publication_matches = [location_match] if location_match else list(re.finditer(
+        r'\.\s*(?=[A-Z][^:\n]{1,70}:\s*.+,\s*'
         r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
         r'(?:19|20)\d{2}\.?\s*$)',
         details,
     ))
     if not publication_matches:
         publication_matches = list(re.finditer(
-            r'\.\s+(?=[^.]{3,100},\s*'
+            r'\.\s*(?=[^.]{3,100},\s*'
             r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*)?'
             r'(?:19|20)\d{2}\.?\s*$)',
             details,
         ))
     if not publication_matches:
-        return None
+        publication_matches = list(re.finditer(
+            r'\.\s*(?=[^.]{3,100},?\s+(?:Inc|Ltd|LLC|Co)\.,\s*'
+            r'(?:19|20)\d{2}\.?\s*$)',
+            details,
+        ))
+    if not publication_matches:
+        comma_book = re.fullmatch(
+            r'(?P<title>.+?),\s*(?P<publisher>[^,.]*\b(?:press|publishing|'
+            r'publisher|verlag)\b[^,.]*),\s*(?:19|20)\d{2}\.?',
+            details,
+            flags=re.IGNORECASE,
+        )
+        if comma_book:
+            return {
+                'authors': author_match.group('authors').strip(),
+                'title': clean_title(comma_book.group('title')),
+                'publisher': comma_book.group('publisher').strip(),
+            }
+        title_only = re.fullmatch(
+            r'(?P<title>[^,]+),\s*(?:19|20)\d{2}\.?',
+            details,
+        )
+        if not title_only:
+            return None
+        title = clean_title(title_only.group('title'))
+        if not title or re.match(
+            r'^(?:conference|journal|proceedings|workshop|symposium)\b',
+            title,
+            re.IGNORECASE,
+        ):
+            return None
+        return {'authors': author_match.group('authors').strip(), 'title': title, 'publisher': ''}
 
     publication_match = publication_matches[-1]
     title = details[:publication_match.start()].strip()
+    title = re.sub(
+        r',\s*(?:[A-Z]\.\s*)+[^\W\d_][\w\'-]+,\s*trans\.?$',
+        '',
+        title,
+        flags=re.IGNORECASE,
+    )
     title_year = re.search(r'\b((?:19|20)\d{2})$', title)
     title = re.sub(
         r',\s*(?:\d+(?:st|nd|rd|th)\s+ed\.?|ser\.).*$',
+        '',
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r'[,.]\s*\d+(?:st|nd|rd|th)\s+(?:[A-Za-z]+\s+){0,3}ed\.?$',
         '',
         title,
         flags=re.IGNORECASE,
@@ -425,7 +497,9 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         Dictionary with parsed entry data
     """
     from refchecker.utils.text_utils import parse_authors_with_initials, clean_title
-    from refchecker.utils.doi_utils import construct_doi_url, is_valid_doi_format
+    from refchecker.utils.doi_utils import (
+        construct_doi_url, is_valid_doi_format, join_wrapped_doi_lines,
+    )
     
     # Initialize default values
     title = ""
@@ -438,7 +512,7 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     # Normalize whitespace and remove line breaks
     # Handle hyphenated words split across lines with intelligence to distinguish
     # between syllable breaks (remove hyphen) and compound words (keep hyphen)
-    content = _handle_hyphenated_line_breaks(content)
+    content = _handle_hyphenated_line_breaks(join_wrapped_doi_lines(content))
     # Then normalize all other whitespace
     content = re.sub(r'\s+', ' ', content.strip())
 
@@ -496,7 +570,10 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
     
     # 3. Extract DOI 
     # Handle DOIs that may be split across lines or have spaces
-    doi_match = re.search(r'DOI\s*:\s*(10\.\d+/[^\s.]+(?:\.\s*\d+)*)', content, re.IGNORECASE)
+    doi_match = re.search(
+        r'DOI\s*:\s*(10\.\d+/[^\s.]+(?:\.(?:[^\s.]+|\s*\d+))*)',
+        content, re.IGNORECASE,
+    )
     if doi_match:
         doi = doi_match.group(1)
         # Clean up DOI - remove spaces and trailing periods
@@ -665,7 +742,15 @@ def parse_biblatex_entry_content(entry_num: str, content: str) -> Dict[str, Any]
         r'([A-Z][^.]*(?:Conference|Workshop|Journal|Proceedings)[^.]*)',  # Conference/journal names
     ]
     
-    for pattern in journal_patterns:
+    quoted_venue = re.search(
+        r'["\u201d]\s*,?\s*([^,]+?),\s*vol(?:ume)?\.?\s*\d',
+        content,
+        re.IGNORECASE,
+    )
+    if quoted_venue:
+        journal = quoted_venue.group(1).strip(" ,")
+
+    for pattern in journal_patterns if not journal else []:
         journal_match = re.search(pattern, content)
         if journal_match:
             potential_journal = journal_match.group(1).strip()

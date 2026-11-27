@@ -657,6 +657,10 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
     })
   const displayVenue = displayReferenceValue(reference.venue)
   const displayYear = displayReferenceValue(reference.year)
+  const authorsForDisplay = reference.field_extraction_status?.authors
+    ? (Array.isArray(reference.authors) ? reference.authors : [reference.authors])
+        .filter(author => !['', 'unknown', 'unknown author', 'url reference'].includes(String(author || '').trim().toLowerCase()))
+    : reference.authors
 
   return (
     <div
@@ -687,7 +691,7 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
               className="font-bold flex-1"
               style={{ color: 'var(--color-text-primary)' }}
             >
-              {reference.title || reference.cited_url || 'Unknown Title'}
+              {reference.title || reference.cited_url || (reference.extraction_warnings?.length || reference.extraction_field_messages?.length ? 'Reference requires review' : 'Unknown Title')}
             </div>
 
             {/* Export button */}
@@ -734,6 +738,14 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
               )}
             </div>
           </div>
+
+          {(reference.extraction_warnings?.length > 0 || reference.extraction_field_messages?.length > 0) && (
+            <div className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+              {reference.extraction_warnings?.join(' ')}
+              {reference.extraction_field_messages?.map(message => <div key={message}>{message}</div>)}
+              {(reference.extraction_warnings?.length > 0 || reference.field_extraction_status?.title) && reference.raw_text && <div>{reference.raw_text}</div>}
+            </div>
+          )}
 
           {/* Citation-signal pill — always on its own line below the title.
               R37: co-locates the two distinct citation signals.
@@ -823,9 +835,9 @@ const ReferenceCard = memo(function ReferenceCard({ reference, index, displayInd
                   profile links when the enrichment payload has them.
                   Falls back to a plain comma-joined string when no
                   enrichment is available (extractor-only refs). */}
-              {normalizeAuthors(reference.authors).length > 0 && (
+              {normalizeAuthors(authorsForDisplay).length > 0 && (
                 <AuthorsLine
-                  authors={reference.authors}
+                  authors={authorsForDisplay}
                   enrichedAuthors={reference.enrichment?.authors}
                   paperTitle={reference.title}
                   paperYear={reference.year}

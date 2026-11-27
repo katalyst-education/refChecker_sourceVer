@@ -35,6 +35,7 @@ from backend.reference_status import classify_verification_result
 from refchecker.utils.text_utils import (
     extract_latex_references,
     normalize_reference_fields,
+    reference_authors_for_display,
 )
 from refchecker.utils.url_utils import extract_arxiv_id_from_url, construct_semantic_scholar_url
 from backend.reference_urls import build_authoritative_urls
@@ -1677,7 +1678,7 @@ class ProgressRefChecker:
         return {
             "index": index,
             "title": reference.get('title') or reference.get('cited_url') or reference.get('url') or 'Unknown',
-            "authors": reference.get('authors', []),
+            "authors": reference_authors_for_display(reference) if reference.get('source_authors') else reference.get('authors', []),
             "year": reference.get('year'),
             "venue": reference.get('venue'),
             "cited_url": reference.get('cited_url') or reference.get('url'),
@@ -2638,6 +2639,9 @@ class ProgressRefChecker:
                 if references:
                     cache_bibliography(self.cache_dir, paper_source, references, bibliography_cache_identity)
 
+            from refchecker.utils.text_utils import finalize_reference_fields
+            references = finalize_reference_fields(references)
+
             # Citation context attachment runs on BOTH cache-hit and
             # cache-miss paths so the UI always shows the inline "cited
             # in: …" sentence per ref. Before v0.7.37 this whole block
@@ -2796,7 +2800,7 @@ class ProgressRefChecker:
                     {
                         "index": idx,
                         "title": ref.get("title") or ref.get("cited_url") or ref.get("url") or "Unknown Title",
-                        "authors": ref.get("authors", []),
+                        "authors": reference_authors_for_display(ref) if ref.get("source_authors") else ref.get("authors", []),
                         "year": ref.get("year"),
                         "venue": ref.get("venue"),
                         "cited_url": ref.get("cited_url") or ref.get("url")
@@ -3362,6 +3366,7 @@ class ProgressRefChecker:
     ) -> List[Dict[str, Any]]:
         """Extract references using the same pipeline/order as the CLI."""
         self._last_reference_parse_error = None
+        self._last_reference_parser_method = None
         try:
             cli_checker = _make_cli_checker(self.llm, self.extraction_mode)
 
@@ -3480,6 +3485,23 @@ class ProgressRefChecker:
             raise
 
     async def _extract_references_from_pdf(
+        self,
+        pdf_path: str,
+        paper_text: str,
+        *,
+        bibliography_text: Optional[str] = None,
+        full_text: Optional[str] = None,
+        failure_message: Optional[str] = None,
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        from refchecker.utils.text_utils import finalize_reference_fields
+
+        references, method = await self._extract_references_from_pdf_impl(
+            pdf_path, paper_text, bibliography_text=bibliography_text,
+            full_text=full_text, failure_message=failure_message,
+        )
+        return finalize_reference_fields(references), method
+
+    async def _extract_references_from_pdf_impl(
         self,
         pdf_path: str,
         paper_text: str,
@@ -3619,7 +3641,7 @@ class ProgressRefChecker:
                 'grobid',
             )
         if grobid_error is not None:
-            raise grobid_error
+            logger.warning("GROBID unavailable; local reference extraction returned no entries: %s", grobid_error)
         return [], self._last_reference_parser_method
 
     def _extract_pdf_text_scoped(self, pdf_path: str) -> str:
@@ -4306,7 +4328,7 @@ class ProgressRefChecker:
                 result = {
                     "index": idx + 1,
                     "title": reference.get('title') or reference.get('cited_url') or reference.get('url') or 'Unknown',
-                    "authors": reference.get('authors', []),
+                    "authors": reference_authors_for_display(reference) if reference.get('source_authors') else reference.get('authors', []),
                     "year": reference.get('year'),
                     "venue": reference.get('venue'),
                     "cited_url": reference.get('cited_url') or reference.get('url'),
@@ -4330,7 +4352,7 @@ class ProgressRefChecker:
                 result = {
                     "index": idx + 1,
                     "title": reference.get('title', 'Unknown'),
-                    "authors": reference.get('authors', []),
+                    "authors": reference_authors_for_display(reference) if reference.get('source_authors') else reference.get('authors', []),
                     "year": reference.get('year'),
                     "venue": reference.get('venue'),
                     "cited_url": reference.get('url'),

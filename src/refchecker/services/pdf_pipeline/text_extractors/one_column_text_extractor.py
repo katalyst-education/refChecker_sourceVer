@@ -13,6 +13,11 @@ from ..models import (
     build_extraction_diagnostics,
 )
 from .base_text_extractor import BaseTextExtractor
+from .common_helpers import (
+    identifier_line_continues,
+    merge_drawn_identifier_fragments,
+    restore_drawn_identifier_underscores,
+)
 from .paper_helpers import (
     REPEATED_TEXT_MIN_FRACTION,
     paper_clean_text,
@@ -46,13 +51,38 @@ def extract_text_units_from_chars(page) -> list[str]:
     """
     raw = page.get_text("rawdict")
     chars = []
+    drawings = None
 
     for block in raw.get("blocks", []):
         if block.get("type") != 0:
             continue
 
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
+        previous_url_wrapped = False
+        for line in merge_drawn_identifier_fragments(block.get("lines", []), page):
+            spans = line.get("spans", [])
+            line_text = "".join(
+                char.get("c", "") for span in spans for char in span.get("chars", [])
+            )
+            if (
+                (previous_url_wrapped or re.search(
+                    r"https?://|10\.\d{4,9}/", line_text, re.IGNORECASE
+                ))
+                and any(
+                    len(span.get("chars", [])) == 1
+                    and span["chars"][0].get("c") == " "
+                    for span in spans
+                )
+            ):
+                if drawings is None:
+                    drawings = page.get_drawings()
+                spans = restore_drawn_identifier_underscores(
+                    spans, drawings, continuation=previous_url_wrapped,
+                )
+            repaired_text = "".join(
+                char.get("c", "") for span in spans for char in span.get("chars", [])
+            )
+            previous_url_wrapped = identifier_line_continues(repaired_text, previous_url_wrapped)
+            for span in spans:
                 size = float(span.get("size", 10))
 
                 for char in span.get("chars", []):
@@ -173,6 +203,35 @@ def extract_page_text_units(page) -> list[str]:
         count > reconstructed_words[word]
         for word, count in native_words.items()
     ):
+        if re.search(r"https?://|10\.\d{4,9}/", native_text, re.IGNORECASE):
+            raw = page.get_text("dict")
+            drawings = None
+            for block in raw.get("blocks", []):
+                previous_url_wrapped = False
+                for line in merge_drawn_identifier_fragments(block.get("lines", []), page):
+                    spans = line.get("spans", [])
+                    original = line.get(
+                        "_source_text", "".join(span.get("text", "") for span in spans)
+                    )
+                    if (
+                        (previous_url_wrapped or re.search(
+                            r"https?://|10\.\d{4,9}/", original, re.IGNORECASE
+                        ))
+                        and (line.get("_source_text") or any(span.get("text") == " " for span in spans))
+                        and native_text.count(original) == 1
+                    ):
+                        if drawings is None:
+                            drawings = page.get_drawings()
+                        corrected = "".join(
+                            span.get("text", "")
+                            for span in restore_drawn_identifier_underscores(
+                                spans, drawings, continuation=previous_url_wrapped,
+                            )
+                        )
+                        native_text = native_text.replace(original, corrected, 1)
+                    else:
+                        corrected = original
+                    previous_url_wrapped = identifier_line_continues(corrected, previous_url_wrapped)
         native_text = paper_clean_text_preserve_lines(native_text)
         return [native_text] if native_text else text_units
 

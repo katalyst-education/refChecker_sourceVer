@@ -16,6 +16,11 @@ from typing import Any, Dict, Iterable, List, Optional
 from backend.reference_status import classify_verification_result
 from backend.reference_urls import build_authoritative_urls
 from refchecker.utils.reference_suggestions import suppress_redundant_arxiv_suggestions
+from refchecker.utils.text_utils import (
+    annotate_reference_field_status,
+    reference_field_status_messages,
+    reference_authors_for_display,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -100,7 +105,7 @@ def project_verification_result(
     work.  The returned mapping contains all verification-derived display
     fields and can therefore replace a prior projection wholesale.
     """
-    cited = dict(reference or {})
+    cited = annotate_reference_field_status(dict(reference or {}))
     findings = findings or []
     status, sanitized = classify_verification_result(cited, verified_data, findings, verified_url)
     formatted_errors, formatted_warnings, formatted_infos, formatted_suggestions = _format_findings(sanitized)
@@ -135,11 +140,18 @@ def project_verification_result(
     doi = str(cited_doi).strip().lower() or str(external_ids.get("DOI") or verified.get("doi") or "").strip().lower()
     arxiv_id = str(cited_arxiv).strip().lower() or str(external_ids.get("ArXiv") or verified.get("arxiv_id") or "").strip().lower()
     pmid = str(cited_pmid).strip() or str(external_ids.get("PubMed") or verified.get("pmid") or "").strip()
+    cited_title = cited.get("title") or (
+        "" if cited.get("extraction_warnings")
+        else cited.get("cited_url") or cited.get("url") or "Unknown Title"
+    )
+    if "title" in cited.get("field_extraction_status", {}):
+        cited_title = ""
 
     result: Dict[str, Any] = {
         "index": cited.get("index") if index is None else index,
-        "title": cited.get("title") or cited.get("cited_url") or cited.get("url") or "Unknown Title",
-        "authors": display_authors or cited.get("authors", []),
+        "title": cited_title,
+        "authors": cited.get("source_authors") and reference_authors_for_display(cited)
+        or display_authors or cited.get("authors", []),
         "year": cited.get("year") or None,
         "venue": cited.get("venue"),
         "cited_url": cited.get("cited_url") or cited.get("url"),
@@ -176,6 +188,10 @@ def project_verification_result(
         "citation_contexts": cited.get("citation_contexts") or [],
         "citation_context": cited.get("citation_context"),
         "citation_count": cited.get("citation_count") or 0,
+        "raw_text": cited.get("raw_text"),
+        "extraction_warnings": cited.get("extraction_warnings") or [],
+        "field_extraction_status": cited.get("field_extraction_status") or {},
+        "extraction_field_messages": reference_field_status_messages(cited),
     }
     for source_key, destination_key in (
         ("title", "verified_title"), ("authors", "verified_authors"),

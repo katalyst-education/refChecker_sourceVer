@@ -223,7 +223,10 @@ def test_bulk_pdf_uses_structured_bibliography_and_keeps_body_separate():
             extraction_batcher=batcher,
         )
 
-    assert references == [{'title': 'Parsed structured reference'}]
+    assert references == [{
+        'title': 'Parsed structured reference',
+        'field_extraction_status': {'authors': 'uncertain', 'venue': 'uncertain'},
+    }]
     assert len(batcher.calls) == 1
     assert batcher.calls[0].strip() == bibliography
     assert checker.last_paper_text.strip() == body_text.strip()
@@ -272,7 +275,10 @@ def test_bulk_source_bibliography_keeps_priority_over_pdf_pipeline():
             extraction_batcher=batcher,
         )
 
-    assert references == [{'title': 'Source bibliography reference'}]
+    assert references == [{
+        'title': 'Source bibliography reference',
+        'field_extraction_status': {'authors': 'uncertain', 'venue': 'uncertain'},
+    }]
     assert batcher.calls == ['@article{source, title={Source bibliography}}']
     checker.pdf_processor.extract_document.assert_not_called()
     checker.download_pdf.assert_not_called()
@@ -327,7 +333,10 @@ def test_bulk_pdf_pipeline_failure_uses_legacy_text_and_preserves_body():
             extraction_batcher=batcher,
         )
 
-    assert references == [{'title': 'Legacy reference'}]
+    assert references == [{
+        'title': 'Legacy reference',
+        'field_extraction_status': {'authors': 'uncertain', 'venue': 'uncertain'},
+    }]
     assert len(batcher.calls) == 1
     assert batcher.calls[0].strip() == bibliography
     assert checker.last_paper_text.strip() == body_text.strip()
@@ -347,7 +356,10 @@ def test_parse_references_bulk_uses_llm_before_structured_parsers():
 
     references = parse_references_bulk(checker, bibliography_text, batcher)
 
-    assert references == [{'title': 'LLM Extracted'}]
+    assert references == [{
+        'title': 'LLM Extracted',
+        'field_extraction_status': {'authors': 'uncertain', 'venue': 'uncertain'},
+    }]
     assert batcher.calls == [bibliography_text]
     assert checker.used_regex_extraction is False
 

@@ -110,3 +110,46 @@ def test_resolved_catalogue_metadata_conflict_is_informational():
     assert result["errors"] == []
     assert result["warnings"] == []
     assert result["infos"][0]["info_type"] == "metadata_conflict"
+
+
+def test_projection_preserves_incomplete_extraction_for_review():
+    cited = {
+        "title": "",
+        "authors": [],
+        "url": "https://example.org/reference",
+        "raw_text": "[1] A. Jones, Conference on Testing, 2021.",
+        "extraction_warnings": ["Reference fields could not be fully extracted."],
+    }
+
+    result = project_verification_result(cited, None, [], None, enrich_enabled=False)
+
+    assert result["title"] == ""
+    assert result["raw_text"] == cited["raw_text"]
+    assert result["extraction_warnings"] == cited["extraction_warnings"]
+
+
+def test_projection_distinguishes_source_absence_from_uncertain_extraction():
+    absent = {
+        "title": "", "authors": ["T. Collins", "R. Getz"],
+        "raw_text": "[15] T. Collins, R. Getz, 2018.",
+    }
+    uncertain = {
+        "title": "Unknown Title", "authors": ["Unknown Author"],
+        "raw_text": "[1] A. Smith, 2021. An incomplete",
+    }
+
+    absent_result = project_verification_result(absent, None, [], None, enrich_enabled=False)
+    uncertain_result = project_verification_result(uncertain, None, [], None, enrich_enabled=False)
+
+    assert absent_result["title"] == ""
+    assert absent_result["field_extraction_status"] == {"title": "absent", "venue": "absent"}
+    assert absent_result["extraction_field_messages"] == [
+        "Title not stated in the extracted citation; review the source.",
+        "Venue not stated in the extracted citation; review the source.",
+    ]
+    assert uncertain_result["title"] == ""
+    assert uncertain_result["field_extraction_status"] == {
+        "authors": "uncertain", "title": "uncertain", "venue": "uncertain",
+    }
+    assert "Title could not be determined; review the source citation." in uncertain_result["extraction_field_messages"]
+    assert uncertain_result["raw_text"] == uncertain["raw_text"]

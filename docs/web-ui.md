@@ -10,6 +10,27 @@ The Web UI provides a real-time interface for checking references in single pape
 
 - If an extraction LLM provider is configured, RefChecker uses it for higher-quality extraction from PDFs and unusual bibliography formats.
 - If no extraction LLM is configured, PDF extraction can fall back to GROBID.
+- If GROBID and an LLM are unavailable, local PDF text extraction and
+  deterministic parsing remain available. When individual numbered references
+  cannot be structured confidently, their source text is retained for review
+  rather than inventing missing fields.
+- Missing author, title and venue fields are marked as uncertain unless a
+  complete author-and-year-only citation, title-less IEEE EDUCON citation, or a narrowly structured web
+  citation establishes that a field is absent from the extracted citation. These
+  indicators do not prove that the PDF text extraction captured everything;
+  review the preserved source text and PDF. The CLI and bulk path use the
+  same field indicators.
+- Repeated-author dashes are expanded only when the immediately preceding
+  numbered citation supplies a complete matching author list; otherwise the
+  author is marked uncertain and the original citation remains available.
+- When a URL-reference sentinel is retained for verification routing, a
+  separately recovered `source_authors` list supplies the cited names for
+  display in the Web UI, CLI and bulk reports.
+- A single source-printed HTTP URL can be retained, or a truncated matching
+  prefix completed, even when other reference fields could not be parsed.
+  This does not establish that the URL works.
+- For URL and DOI lines, local PDF extraction can recover underscores drawn as
+  separate vector strokes when their positions match the extracted spaces.
 - Hallucination checks use a separate hallucination LLM selection when one is configured. The hallucination provider must be web-search capable: OpenAI, Anthropic, Google, or Azure.
 - Local vLLM and LM Studio can be selected for extraction, but they are not offered for hallucination checks because local models cannot perform live web search. LM Studio configurations expose reasoning effort, maximum output tokens, loaded-model context length, and generation timeout; `none` reasoning is recommended for extraction.
 

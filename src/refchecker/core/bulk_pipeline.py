@@ -445,6 +445,14 @@ def _print_bulk_reference_block(error_entry: Dict[str, Any], ref_idx: int, total
 
 def _print_bulk_reference_block_unlocked(error_entry: Dict[str, Any], ref_idx: int, total_refs: int) -> None:
     """Print a bulk reference block while the caller holds _PRINT_LOCK."""
+    from refchecker.utils.text_utils import (
+        annotate_reference_field_status, reference_authors_for_display,
+        format_authors_for_display, reference_field_status_messages,
+    )
+
+    reference = error_entry.get('original_reference') or {}
+    field_status = annotate_reference_field_status(dict(reference)).get('field_extraction_status', {}) if reference else {}
+    field_messages = reference_field_status_messages(reference) if reference else []
     ref_title = error_entry.get('ref_title', 'Untitled')
     ref_authors = error_entry.get('ref_authors_cited', '')
     ref_year = display_reference_value(error_entry.get('ref_year_cited', ''))
@@ -453,7 +461,15 @@ def _print_bulk_reference_block_unlocked(error_entry: Dict[str, Any], ref_idx: i
     ref_verified_url = error_entry.get('ref_verified_url', '')
 
     # Reference header with simple [n] index
-    _safe_print(f'   [{ref_idx}] {ref_title}')
+    _safe_print(f'   [{ref_idx}] {"Reference requires review" if "title" in field_status else ref_title}')
+    for warning in reference.get('extraction_warnings') or []:
+        _safe_print(f'       {warning}')
+    for message in field_messages:
+        _safe_print(f'       {message}')
+    if (reference.get('extraction_warnings') or 'title' in field_status) and reference.get('raw_text'):
+        _safe_print(f'       {reference["raw_text"]}')
+    if 'authors' in field_status or reference.get('source_authors'):
+        ref_authors = format_authors_for_display(reference_authors_for_display(reference))
     if ref_authors:
         _safe_print(f'       {ref_authors}')
     if ref_venue:
@@ -821,6 +837,8 @@ def _process_bulk_paper_job(
             bibliography = extract_bibliography_bulk(checker, paper, debug_mode=debug_mode, extraction_batcher=extraction_batcher)
             cache_bibliography(checker.cache_dir, job.input_spec, bibliography, llm_cache_identity)
             phase_times['extract_bib'] = time.perf_counter() - _t
+        from refchecker.utils.text_utils import finalize_reference_fields
+        bibliography = finalize_reference_fields(bibliography)
         if checker.fatal_error:
             return _build_bulk_result(checker, job, paper_id, title, start_time, source_url=source_url), []
 
@@ -945,6 +963,13 @@ def _reset_worker_state(checker: Any) -> None:
 
 
 def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extraction_batcher: BulkLLMExtractionBatcher) -> List[Dict[str, Any]]:
+    from refchecker.utils.text_utils import finalize_reference_fields
+
+    references = _extract_bibliography_bulk_impl(checker, paper, debug_mode, extraction_batcher)
+    return finalize_reference_fields(references)
+
+
+def _extract_bibliography_bulk_impl(checker: Any, paper: Any, debug_mode: bool, extraction_batcher: BulkLLMExtractionBatcher) -> List[Dict[str, Any]]:
     paper_id = paper.get_short_id()
     logger.debug('Bulk extracting bibliography for paper %s: %s', paper_id, getattr(paper, 'title', ''))
     text = ''
@@ -1196,6 +1221,13 @@ def extract_bibliography_bulk(checker: Any, paper: Any, debug_mode: bool, extrac
 
 
 def parse_references_bulk(checker: Any, bibliography_text: str, extraction_batcher: BulkLLMExtractionBatcher) -> List[Dict[str, Any]]:
+    from refchecker.utils.text_utils import finalize_reference_fields
+
+    references = _parse_references_bulk_impl(checker, bibliography_text, extraction_batcher)
+    return finalize_reference_fields(references)
+
+
+def _parse_references_bulk_impl(checker: Any, bibliography_text: str, extraction_batcher: BulkLLMExtractionBatcher) -> List[Dict[str, Any]]:
     if not bibliography_text:
         _set_reference_extraction_fatal(
             checker,

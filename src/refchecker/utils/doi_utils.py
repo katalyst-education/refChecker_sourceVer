@@ -9,6 +9,35 @@ import re
 from typing import Any, Mapping, Optional
 
 
+def join_wrapped_doi_lines(text: str) -> str:
+    """Conservatively rejoin DOI fragments separated by PDF line breaks."""
+    hyphen_or_slash = (
+        r'(\b10\.\d{4,9}/[^\s]*[-/])'
+        r'(?:[ \t]*\r?\n[ \t]*(?!accessed\b|available\b|https?\b|doi\b)'
+        r'(?=[a-z0-9])|[ \t]+(?=\d))'
+    )
+    period_or_fragment = (
+        r'(\b10\.\d{4,9}/[^\s]*'
+        r'(?:\d\.|[a-z]\.(?=[ \t]*\r?\n[ \t]*\d{4}\.\d+)'
+        r'|(?<=[.\-])\d{1,2}|(?<=/)j\.[a-z]{1,3}))'
+        r'[ \t]*\r?\n[ \t]*'
+        r'(?!(?:19|20)\d{2}[.,;)]?(?:\s|$))'
+        r'(?=(?:\d{3,}(?:[-.]\d+)*|[a-z]+\.\d{4}(?:\.\d+)+)'
+        r'(?:[.,;)]?(?:\s|$)))'
+    )
+    terminal_numeric_suffix = (
+        r'(\bdoi:\s*10\.\d{4,9}/[^\s]*[a-z]\.)'
+        r'[ \t]*\r?\n[ \t]*(?=\d{5,}\.[ \t]*(?:\r?\n)?\s*$)'
+    )
+    while True:
+        joined = re.sub(hyphen_or_slash, r'\1', text, flags=re.IGNORECASE)
+        joined = re.sub(period_or_fragment, r'\1', joined, flags=re.IGNORECASE)
+        joined = re.sub(terminal_numeric_suffix, r'\1', joined, flags=re.IGNORECASE)
+        if joined == text:
+            return text
+        text = joined
+
+
 def extract_doi_from_url(url: str) -> Optional[str]:
     """
     Extract DOI from a URL using comprehensive pattern matching.

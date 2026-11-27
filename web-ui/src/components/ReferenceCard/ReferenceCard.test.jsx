@@ -30,6 +30,51 @@ vi.mock('../../utils/tauriBridge', async () => {
 })
 
 describe('ReferenceCard', () => {
+  it('distinguishes source-absent fields from uncertain extraction', () => {
+    const reference = {
+      status: 'unverified',
+      title: '',
+      authors: ['Unknown Author'],
+      raw_text: '[1] A. Smith, 2021. An incomplete',
+      field_extraction_status: { authors: 'uncertain', title: 'uncertain', venue: 'absent' },
+      extraction_field_messages: [
+        'Authors could not be determined; review the source citation.',
+        'Title could not be determined; review the source citation.',
+        'Venue not stated in the extracted citation; review the source.',
+      ],
+      errors: [],
+      warnings: [],
+      suggestions: [],
+    }
+
+    render(<ReferenceCard reference={reference} index={0} />)
+
+    expect(screen.getByText('Reference requires review')).toBeTruthy()
+    expect(screen.getByText(reference.extraction_field_messages[1])).toBeTruthy()
+    expect(screen.getByText(reference.extraction_field_messages[2])).toBeTruthy()
+    expect(screen.queryByText('Unknown Author')).toBeNull()
+    expect(screen.getByText(reference.raw_text)).toBeTruthy()
+  })
+
+  it('shows the source and uncertainty for an incompletely extracted reference', () => {
+    const reference = {
+      status: 'unverified',
+      title: '',
+      authors: [],
+      raw_text: '[1] A. Jones, Conference on Testing, 2021.',
+      extraction_warnings: ['Reference fields could not be fully extracted.'],
+      errors: [],
+      warnings: [],
+      suggestions: [],
+    }
+
+    render(<ReferenceCard reference={reference} index={0} />)
+
+    expect(screen.getByText('Reference requires review')).toBeTruthy()
+    expect(screen.getByText(reference.raw_text)).toBeTruthy()
+    expect(screen.getByText(reference.extraction_warnings[0])).toBeTruthy()
+  })
+
   it('does not show a spinner for final unverified refs after completion', () => {
     const subreason = 'Paper not found by any checker; no match in Semantic Scholar, CrossRef, OpenAlex'
     const reference = {

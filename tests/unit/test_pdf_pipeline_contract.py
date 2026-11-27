@@ -21,7 +21,10 @@ from refchecker.services.pdf_pipeline.text_extractors import (
 )
 from refchecker.services.pdf_pipeline.text_extractors import paper_helpers
 from refchecker.services.pdf_pipeline.text_extractors.common_helpers import (
+    identifier_line_continues,
     join_spans_with_position_spacing,
+    merge_drawn_identifier_fragments,
+    restore_drawn_identifier_underscores,
 )
 from refchecker.services.pdf_pipeline.text_extractors.fallback_text_extractor import (
     FallbackTextExtractor,
@@ -40,6 +43,242 @@ from refchecker.services.pdf_pipeline.text_extractors.two_column_text_extractor 
 
 
 BODY_TEXT = "The extraction contract preserves each body sentence. " * 50
+
+
+@pytest.mark.parametrize("raw_chars", [False, True])
+def test_drawn_underscore_restored_only_for_matching_identifier_span(raw_chars):
+    def span(text, x0, x1):
+        result = {"bbox": (x0, 0, x1, 10), "origin": (x0, 8), "size": 10}
+        if raw_chars:
+            result["chars"] = [{"c": char} for char in text]
+        else:
+            result["text"] = text
+        return result
+
+    spans = [span("https://example.org/a", 0, 30), span(" ", 30, 34), span("b", 34, 39)]
+    stroke = {
+        "type": "s", "width": 0.5,
+        "items": [("l", Mock(x=30, y=9), Mock(x=34, y=9))],
+    }
+
+    repaired = restore_drawn_identifier_underscores(spans, [stroke])
+
+    assert (repaired[1]["chars"][0]["c"] if raw_chars else repaired[1]["text"]) == "_"
+    assert (spans[1]["chars"][0]["c"] if raw_chars else spans[1]["text"]) == " "
+    assert restore_drawn_identifier_underscores(spans, []) == spans
+    wide_stroke = dict(stroke, items=[("l", Mock(x=25, y=9), Mock(x=40, y=9))])
+    assert restore_drawn_identifier_underscores(spans, [wide_stroke]) == spans
+
+
+def test_drawn_space_is_not_changed_in_normal_prose():
+    spans = [
+        {"text": "ordinary", "bbox": (0, 0, 30, 10), "origin": (0, 8), "size": 10},
+        {"text": " ", "bbox": (30, 0, 34, 10), "origin": (30, 8), "size": 10},
+        {"text": "words", "bbox": (34, 0, 50, 10), "origin": (34, 8), "size": 10},
+    ]
+    stroke = {
+        "type": "s", "width": 0.5,
+        "items": [("l", Mock(x=30, y=9), Mock(x=34, y=9))],
+    }
+
+    assert restore_drawn_identifier_underscores(spans, [stroke]) == spans
+
+
+def test_drawn_underscore_in_title_before_identifier_is_restored():
+    spans = [
+        {"text": "A", "bbox": (0, 0, 4, 10), "origin": (0, 8), "size": 10},
+        {"text": " ", "bbox": (4, 0, 8, 10), "origin": (4, 8), "size": 10},
+        {"text": "title https://example.org", "bbox": (8, 0, 90, 10), "origin": (8, 8), "size": 10},
+    ]
+    stroke = {
+        "type": "s", "width": 0.5,
+        "items": [("l", Mock(x=4, y=9), Mock(x=8, y=9))],
+    }
+
+    repaired = restore_drawn_identifier_underscores(spans, [stroke])
+    assert repaired[1]["text"] == "_"
+
+
+def test_drawn_underscore_in_identifier_continuation_is_restored():
+    spans = [
+        {"text": "nella+Scuola", "bbox": (0, 0, 30, 10), "origin": (0, 8), "size": 10},
+        {"text": " ", "bbox": (30, 0, 34, 10), "origin": (30, 8), "size": 10},
+        {"text": "09", "bbox": (34, 0, 42, 10), "origin": (34, 8), "size": 10},
+    ]
+    stroke = {
+        "type": "s", "width": 0.5,
+        "items": [("l", Mock(x=30, y=9), Mock(x=34, y=9))],
+    }
+
+    assert restore_drawn_identifier_underscores(spans, [stroke]) == spans
+    repaired = restore_drawn_identifier_underscores(spans, [stroke], continuation=True)
+    assert repaired[1]["text"] == "_"
+
+
+def test_identifier_context_survives_multiple_wrapped_lines():
+    lines = [
+        "https://research-",
+        "and-innovation.ec.europa.eu/strategy/strategy-research-and-",
+        "innovation/democracy-and-rights/gender-equality-research-and-",
+    ]
+    continuation = False
+    for line in lines:
+        continuation = identifier_line_continues(line, continuation)
+        assert continuation
+    assert not identifier_line_continues("ordinary prose here", continuation)
+    assert not identifier_line_continues("ending-with-hyphen-", False)
+
+    text = "\n".join(lines + ["innovation_en"])
+    assert paper_helpers.fix_broken_line_hyphenation(text) == text
+    assembled = []
+    for line in text.splitlines():
+        paper_helpers.append_text_line(assembled, line)
+    assert "\n".join(assembled) == text
+
+
+@pytest.mark.parametrize("raw_chars", [False, True])
+def test_split_identifier_fragments_require_contiguous_baseline_strokes(raw_chars):
+    def span(value, x0, x1, baseline):
+        result = {
+            "bbox": (x0, baseline - 8, x1, baseline + 2),
+            "origin": (x0, baseline), "size": 10,
+        }
+        if raw_chars:
+            result["chars"] = [{"c": char} for char in value]
+        else:
+            result["text"] = value
+        return result
+
+    lines = [
+        {"bbox": (0, 0, 30, 10), "spans": [span("https://example.org/", 0, 30, 8)]},
+        {"bbox": (0, 10, 30, 20), "spans": [span("file2024", 0, 30, 18)]},
+        {"bbox": (38, 10, 65, 20), "spans": [span("1.pdf", 38, 65, 18)]},
+    ]
+    strokes = [
+        {"type": "s", "width": 0.5,
+         "items": [("l", Mock(x=start, y=19), Mock(x=end, y=19))]}
+        for start, end in ((30, 34), (34, 38))
+    ]
+    page = Mock()
+    page.get_drawings.return_value = strokes
+
+    merged = merge_drawn_identifier_fragments(lines, page)
+
+    assert len(merged) == 2
+    spans = merged[1]["spans"]
+    value = "".join(
+        "".join(char["c"] for char in span["chars"]) if raw_chars else span["text"]
+        for span in spans
+    )
+    assert value == "file2024__1.pdf"
+    assert merged[1]["_source_text"] == "file2024\n1.pdf"
+    page.get_drawings.return_value = strokes[:1]
+    assert merge_drawn_identifier_fragments(lines, page) == lines
+    page.get_drawings.return_value = strokes + strokes[:1]
+    assert merge_drawn_identifier_fragments(lines, page) == lines
+    non_url = [dict(lines[0], spans=[span("ordinary prose/", 0, 30, 8)]), *lines[1:]]
+    page.get_drawings.reset_mock()
+    assert merge_drawn_identifier_fragments(non_url, page) == non_url
+    page.get_drawings.assert_not_called()
+
+
+def test_two_column_block_bounds_ignore_empty_lines(monkeypatch):
+    right_text = "A right-column reference continuation."
+    left_text = "A left-column reference."
+    blocks = [
+        {
+            "type": 0, "bbox": (40, 100, 550, 210),
+            "lines": [
+                {"bbox": (320, 100, 550, 110), "spans": [
+                    {"text": right_text, "bbox": (320, 100, 550, 110), "size": 10}
+                ]},
+                {"bbox": (40, 200, 42, 210), "spans": [
+                    {"text": " ", "bbox": (40, 200, 42, 210), "size": 10}
+                ]},
+            ],
+        },
+        {
+            "type": 0, "bbox": (40, 150, 280, 160),
+            "lines": [{"bbox": (40, 150, 280, 160), "spans": [
+                {"text": left_text, "bbox": (40, 150, 280, 160), "size": 10}
+            ]}],
+        },
+    ]
+    page = Mock()
+    page.rect.width = 600
+    page.rect.height = 800
+    page.get_text.return_value = {"blocks": blocks}
+    document = Mock()
+    document.__iter__ = Mock(return_value=iter([page]))
+    monkeypatch.setattr(two_column_module.pymupdf, "open", lambda _: document)
+
+    pages = two_column_module.extract_blocks_from_two_column_pdf(Path("example.pdf"))
+
+    assert [block["text"] for block in pages[0]["blocks"]] == [left_text, right_text]
+    assert pages[0]["blocks"][1]["x0"] == 320
+
+
+def test_two_column_keeps_adjacent_year_after_citation_title(monkeypatch):
+    def block(text, box):
+        return {
+            "type": 0, "bbox": box,
+            "lines": [{"bbox": box, "spans": [{
+                "text": text, "bbox": box, "size": 8, "font": "Example", "flags": 0,
+            }]}],
+        }
+
+    source = [
+        block('[3] ABET, "Criteria for Accrediting Engineering Programs, 2019-2020,"',
+              (315, 700, 563, 709)),
+        block("2020.", (330, 710, 348, 718)),
+        block("2021.", (330, 750, 348, 758)),
+    ]
+    page = Mock()
+    page.rect.width = 612
+    page.rect.height = 792
+    page.get_text.return_value = {"blocks": source}
+    document = Mock()
+    document.__iter__ = Mock(return_value=iter([page]))
+    monkeypatch.setattr(two_column_module.pymupdf, "open", lambda _: document)
+
+    pages = two_column_module.extract_blocks_from_two_column_pdf(Path("example.pdf"))
+
+    assert pages[0]["blocks"][0]["text"].endswith('\n2020.')
+    assert "2021." not in pages[0]["blocks"][0]["text"]
+
+
+@pytest.mark.parametrize(("preceding", "expected"), [
+    ("[4] N. Fouad et al., Why Women Leave Engineering, University of Wisconsin-Milwaukee,", True),
+    ("Previous reference continuation.\n[4] J. Piaget, The Psychology of Intelligence. London: Routledge,", True),
+    ("Previous reference continuation.\nDiscussion mentions [4],", False),
+    ("This discussion mentions [4],", False),
+    ("[4] A. Author, A completed citation.", False),
+])
+def test_two_column_keeps_adjacent_year_after_unquoted_citation(monkeypatch, preceding, expected):
+    def block(text, box):
+        return {
+            "type": 0, "bbox": box,
+            "lines": [{"bbox": box, "spans": [{
+                "text": line, "bbox": box, "size": 10, "font": "Example", "flags": 0,
+            }]} for line in text.splitlines()],
+        }
+
+    page = Mock()
+    page.rect.width = 612
+    page.rect.height = 792
+    page.get_text.return_value = {"blocks": [
+        block(preceding, (72, 71, 286, 97)),
+        block("2011.", (72, 105, 97, 119)),
+    ]}
+    document = Mock()
+    document.__iter__ = Mock(return_value=iter([page]))
+    monkeypatch.setattr(two_column_module.pymupdf, "open", lambda _: document)
+
+    pages = two_column_module.extract_blocks_from_two_column_pdf(Path("example.pdf"))
+
+    assert pages[0]["blocks"][0]["text"].endswith("\n2011.") is expected
+
+
 BIBLIOGRAPHY = (
     "[1] Alice Smith. First Reference Title. 2024.\n"
     "[2] Bob Jones. Second Reference Title. 2023."
@@ -130,6 +369,26 @@ def test_span_joining_preserves_spaces_and_avoids_breaking_urls_or_punctuation()
     ]
     assert join_spans_with_position_spacing(spans, clean) == "UNESCO, Education"
 
+    separate_spaces = [
+        {"text": "10.1007/978-3-030-34350-7_37.", "bbox": (0, 0, 80, 8), "size": 8},
+        {"text": " ", "bbox": (80, 0, 83, 8), "size": 8},
+        {"text": "pp.", "bbox": (83, 0, 90, 8), "size": 8},
+        {"text": " ", "bbox": (90, 0, 93, 8), "size": 8},
+        {"text": "383-393.", "bbox": (93, 0, 110, 8), "size": 8},
+    ]
+    doi_line = join_spans_with_position_spacing(separate_spaces, clean)
+    assert doi_line == "10.1007/978-3-030-34350-7_37. pp. 383-393."
+
+    from refchecker.core.refchecker import ArxivReferenceChecker
+
+    checker = ArxivReferenceChecker(llm_config={"disabled": True})
+    ref = checker._parse_quoted_numbered_references([
+        '[1] A. Smith, "Learning methods," Journal of Testing, 2020, DOI: '
+        + doi_line
+    ])[0]
+    assert ref["doi"] == "10.1007/978-3-030-34350-7_37"
+    assert ref["url"] == "https://doi.org/10.1007/978-3-030-34350-7_37"
+
     tightly_spaced_words = [
         {"text": "Project", "bbox": (0, 0, 25, 8), "size": 8},
         {"text": "Based", "bbox": (26, 0, 48, 8), "size": 8},
@@ -203,6 +462,22 @@ def test_reference_split_keeps_appendices_out_of_bibliography():
     assert "Appendix A: Additional proof" not in bibliography
     assert full_text.index("[2] Bob Jones") < full_text.index("Appendix A")
     assert body_without_references.index("Appendix A") < len(body_without_references)
+
+
+def test_appendix_heading_on_next_page_does_not_merge_into_last_reference():
+    parts = [
+        "Paper body.\nReferences\n"
+        "[1] Alice Smith. First reference. 2024.\n"
+        "[2] Bob Jones. Second reference. https://doi.org/10.1111/example"
+    ]
+    paper_helpers.append_page_text(
+        parts, "Appendix A. Keyword Lexicon\nSupplemental explanatory text."
+    )
+
+    body, bibliography, _ = split_text_and_references("\n\n".join(parts))
+
+    assert bibliography.endswith("https://doi.org/10.1111/example")
+    assert "Appendix A. Keyword Lexicon" in body
 
 
 @pytest.mark.parametrize(
@@ -550,6 +825,72 @@ def test_one_column_page_falls_back_to_native_text_when_character_text_loses_tok
     )
 
     assert "978" in pages[0]["blocks"][0]["text"]
+
+
+def test_one_column_native_fallback_restores_drawn_url_underscore(monkeypatch):
+    class Page:
+        def get_text(self, mode):
+            if mode == "text":
+                return "https://example.org/a b missing"
+            assert mode == "dict"
+            return {"blocks": [{"lines": [{"spans": [
+                {"text": "https://example.org/a", "bbox": (0, 0, 30, 10), "origin": (0, 8), "size": 10},
+                {"text": " ", "bbox": (30, 0, 34, 10), "origin": (30, 8), "size": 10},
+                {"text": "b missing", "bbox": (34, 0, 70, 10), "origin": (34, 8), "size": 10},
+            ]}]}]}
+
+        def get_drawings(self):
+            return [{
+                "type": "s", "width": 0.5,
+                "items": [("l", Mock(x=30, y=9), Mock(x=34, y=9))],
+            }]
+
+    monkeypatch.setattr(
+        one_column_module, "extract_text_units_from_chars",
+        lambda _page: ["https://example.org/a_b"],
+    )
+
+    assert one_column_module.extract_page_text_units(Page()) == [
+        "https://example.org/a_b missing"
+    ]
+
+
+def test_one_column_native_fallback_restores_split_identifier_strokes(monkeypatch):
+    def span(value, x0, x1, baseline):
+        return {
+            "text": value, "bbox": (x0, baseline - 8, x1, baseline + 2),
+            "origin": (x0, baseline), "size": 10,
+        }
+
+    class Page:
+        def get_text(self, mode):
+            if mode == "text":
+                return "https://example.org/\nfile2024\n1 .pdf, missing"
+            assert mode == "dict"
+            return {"blocks": [{"lines": [
+                {"bbox": (0, 0, 30, 10), "spans": [span("https://example.org/", 0, 30, 8)]},
+                {"bbox": (0, 10, 30, 20), "spans": [span("file2024", 0, 30, 18)]},
+                {"bbox": (38, 10, 65, 20), "spans": [
+                    span("1", 38, 42, 18), span(" ", 42, 46, 18),
+                    span(".pdf, missing", 46, 65, 18),
+                ]},
+            ]}]}
+
+        def get_drawings(self):
+            return [
+                {"type": "s", "width": 0.5,
+                 "items": [("l", Mock(x=start, y=19), Mock(x=end, y=19))]}
+                for start, end in ((30, 34), (34, 38), (42, 46))
+            ]
+
+    monkeypatch.setattr(
+        one_column_module, "extract_text_units_from_chars",
+        lambda _page: ["https://example.org/file2024__1_.pdf"],
+    )
+
+    assert one_column_module.extract_page_text_units(Page()) == [
+        "https://example.org/\nfile2024__1_.pdf, missing"
+    ]
 
 
 def test_character_reconstruction_preserves_source_order_for_overlapping_glyphs():
@@ -1281,6 +1622,23 @@ def test_paper_text_normalization_preserves_multilingual_names_and_case():
 
 
 def test_fix_broken_line_hyphenation_compound_titles_and_coordination():
+    assert paper_helpers.fix_broken_line_hyphenation("IoT-\neducation") == "IoT-education"
+    assert paper_helpers.fix_broken_line_hyphenation("AI-\npowered") == "AI-powered"
+    assert paper_helpers.fix_broken_line_hyphenation("McGet-\ntrick") == "McGettrick"
+    assert paper_helpers.fix_broken_line_hyphenation("university-\nindustry") == "university-industry"
+    assert paper_helpers.fix_broken_line_hyphenation("univers-\nity") == "university"
+    lines = []
+    paper_helpers.append_text_line(lines, '"IoT-')
+    paper_helpers.append_text_line(lines, 'education policies"')
+    assert "\n".join(lines) == '"IoT-\neducation policies"'
+    lines = []
+    paper_helpers.append_text_line(lines, "student self-")
+    paper_helpers.append_text_line(lines, "assessment")
+    assert "\n".join(lines) == "student self-\nassessment"
+    lines = []
+    paper_helpers.append_text_line(lines, "university-")
+    paper_helpers.append_text_line(lines, "industry partnerships")
+    assert "\n".join(lines) == "university-\nindustry partnerships"
     assert (
         paper_helpers.fix_broken_line_hyphenation("A Fully-\nOpen Index")
         == "A Fully-Open Index"
@@ -1301,6 +1659,14 @@ def test_fix_broken_line_hyphenation_compound_titles_and_coordination():
         paper_helpers.fix_broken_line_hyphenation("differ- ent")
         == "different"
     )
+
+
+def test_fix_broken_line_hyphenation_preserves_url_continuation_blocks():
+    relative_url = "stories/news/article/eroeffnet-\ngroessten-makerspace/"
+    schemeless_url = "www.science.apa.at/power-\nsearch/17012929664440812974"
+    assert paper_helpers.fix_broken_line_hyphenation(relative_url) == relative_url
+    assert paper_helpers.fix_broken_line_hyphenation(schemeless_url) == schemeless_url
+    assert paper_helpers.fix_broken_line_hyphenation("a/b/this differ-\nent") == "a/b/this different"
 
 
 def test_real_two_column_pdf_preserves_references_across_columns_and_pages(

@@ -7,6 +7,9 @@ import requests
 from ..config import GROBID_METADATA_TIMEOUT, GROBID_URL
 from ..models import build_extraction_diagnostics
 from refchecker.utils.reference_patterns import AUTHOR_YEAR_ENTRY_START_RE
+from refchecker.utils.text_utils import (
+    is_source_compound_hyphen_prefix,
+)
 from .common_helpers import (
     normalize_unicode_basic,
     normalize_for_repetition,
@@ -73,6 +76,14 @@ def fix_broken_line_hyphenation(text: str) -> str:
         before = match.group(1)
         after = match.group(2)
 
+        prefix = text[:match.start()]
+        if re.search(
+            r"(?:https?://\S*|www\.\S*|(?:doi\s*:\s*)?10\.\d{4,9}/\S*|"
+            r"(?:[A-Za-z0-9._~%+\-]+/){2,}[A-Za-z0-9._~%+\-]*)"
+            r"(?:\r?\n\S+)*$", prefix, re.IGNORECASE,
+        ):
+            return f"{before}-\n{after}" if "\n" in match.group(0) else f"{before}- {after}"
+
         before_lower = before.lower()
         after_lower = after.lower()
 
@@ -80,7 +91,8 @@ def fix_broken_line_hyphenation(text: str) -> str:
             return f"{before}- {after}"
 
         if (
-            before_lower in KEEP_HYPHEN_FIRST_PARTS
+            is_source_compound_hyphen_prefix(before, after)
+            or before_lower in KEEP_HYPHEN_FIRST_PARTS
             or after_lower in KEEP_HYPHEN_SECOND_PARTS
         ):
             return f"{before}-{after}"
@@ -502,6 +514,10 @@ def should_merge_hyphenated_linebreak(previous: str, current: str) -> bool:
     if first_word[:1].isupper():
         return False
 
+    last_word_match = re.search(r"\b([^\W\d_]+)-$", previous, flags=re.UNICODE)
+    if last_word_match and is_source_compound_hyphen_prefix(last_word_match.group(1), first_word):
+        return False
+
     return True
 
 
@@ -523,6 +539,10 @@ def append_text_line(lines: list[str], text: str) -> None:
         and should_merge_hyphenated_linebreak(
             previous_lines[-1],
             current_lines[0],
+        )
+        and not re.search(
+            r"(?:https?://\S*|www\.\S*|10\.\d{4,9}/\S*)(?:\n\S+)*-$",
+            "\n".join(lines), re.IGNORECASE,
         )
     ):
         previous_lines[-1] = previous_lines[-1].rstrip()[:-1] + current_lines[0]
@@ -617,7 +637,7 @@ def append_page_text(parts: list[str], page_text: str) -> None:
     if not first_line:
         return
 
-    if REFERENCE_START_RE.match(first_line):
+    if REFERENCE_START_RE.match(first_line) or POST_BIBLIOGRAPHY_SECTION_RE.fullmatch(first_line):
         parts.append(page_text)
         return
 

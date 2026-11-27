@@ -10,7 +10,12 @@ from ..models import (
     build_extraction_diagnostics,
 )
 from .base_text_extractor import BaseTextExtractor
-from .common_helpers import join_spans_with_position_spacing
+from .common_helpers import (
+    identifier_line_continues,
+    join_spans_with_position_spacing,
+    merge_drawn_identifier_fragments,
+    restore_drawn_identifier_underscores,
+)
 from .paper_helpers import (
     REPEATED_TEXT_MIN_FRACTION,
     paper_clean_text,
@@ -56,6 +61,7 @@ def extract_blocks_from_two_column_pdf(pdf_path: Path) -> list[dict]:
 
         raw = page.get_text("dict")
         blocks = []
+        drawings = None
 
         for block in raw.get("blocks", []):
             if block.get("type") != 0:
@@ -64,12 +70,28 @@ def extract_blocks_from_two_column_pdf(pdf_path: Path) -> list[dict]:
             x0, y0, x1, y1 = block["bbox"]
 
             block_lines = []
+            text_line_bounds = []
             font_sizes = []
             font_names = []
             flags = []
+            previous_url_wrapped = False
 
-            for line in block.get("lines", []):
+            for line in merge_drawn_identifier_fragments(block.get("lines", []), page):
                 spans = line.get("spans", [])
+                line_text_raw = "".join(span.get("text", "") for span in spans)
+                if (
+                    (previous_url_wrapped or re.search(
+                        r"https?://|10\.\d{4,9}/", line_text_raw, re.IGNORECASE
+                    ))
+                    and any(span.get("text") == " " for span in spans)
+                ):
+                    if drawings is None:
+                        drawings = page.get_drawings()
+                    spans = restore_drawn_identifier_underscores(
+                        spans, drawings, continuation=previous_url_wrapped,
+                    )
+                repaired_text = "".join(span.get("text", "") for span in spans)
+                previous_url_wrapped = identifier_line_continues(repaired_text, previous_url_wrapped)
 
                 for span in spans:
                     span_text = paper_clean_text(span.get("text", ""))
@@ -88,11 +110,33 @@ def extract_blocks_from_two_column_pdf(pdf_path: Path) -> list[dict]:
 
                 if line_text:
                     block_lines.append(line_text)
+                    text_line_bounds.append(line["bbox"])
 
             text = paper_clean_text_preserve_lines("\n".join(block_lines))
 
             if paper_is_probably_junk(text):
+                if blocks and re.fullmatch(r"(?:19|20)\d{2}\.", text):
+                    previous = blocks[-1]
+                    gap = float(y0) - previous["y1"]
+                    if (
+                        (
+                            re.search(r'\[\d+\].*["\u201d]\s*,?$', previous["text"], re.DOTALL)
+                            or re.match(r'\s*\[\d+\].*,\s*$', previous["text"], re.DOTALL)
+                            or re.search(r'(?m)^[ \t]*\[\d+\][^\n]*,[ \t]*\Z', previous["text"])
+                        )
+                        and 0 <= gap <= max(previous["avg_font_size"], 1)
+                        and previous["x0"] <= float(x0) <= previous["x1"]
+                    ):
+                        previous["text"] += "\n" + text
+                        previous["y1"] = round(float(y1), 2)
+                        previous["height"] = round(previous["y1"] - previous["y0"], 2)
                 continue
+
+            if text_line_bounds:
+                x0 = min(bounds[0] for bounds in text_line_bounds)
+                y0 = min(bounds[1] for bounds in text_line_bounds)
+                x1 = max(bounds[2] for bounds in text_line_bounds)
+                y1 = max(bounds[3] for bounds in text_line_bounds)
 
             if font_sizes:
                 max_font_size = max(font_sizes)
