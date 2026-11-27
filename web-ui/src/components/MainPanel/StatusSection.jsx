@@ -59,7 +59,7 @@ function buildCitationViewerSpans(citationTarget) {
 }
 
 // Raster page-image overlay for preview and search.
-function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount, onClose }) {
+function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount, onClose, onPreviewError }) {
   // Seeded from the parent's prefetched probe when available so the overlay
   // opens directly in its final layout instead of rendering the fit-to-height
   // single image first and then jumping to the full-width multi-page column.
@@ -360,6 +360,7 @@ function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount,
                   src={`${API_BASE}/api/preview/${checkId}/page/${i}`}
                   alt={`Page ${i + 1} of ${pageCount}`}
                   loading="lazy"
+                  onError={onPreviewError}
                   style={{ display: 'block', width: '100%', height: 'auto' }}
                   className="rounded-lg shadow-2xl bg-white"
                 />
@@ -388,8 +389,11 @@ function ThumbnailOverlay({ checkId, previewUrl, thumbnailUrl, initialPageCount,
               style={imgStyle}
               className="rounded-lg shadow-2xl"
               onError={(e) => {
-                if (previewUrl && thumbnailUrl && e.target.src !== thumbnailUrl) {
-                  e.target.src = thumbnailUrl
+                const image = e.currentTarget
+                if (thumbnailUrl && image.getAttribute('src') !== thumbnailUrl) {
+                  image.src = thumbnailUrl
+                } else {
+                  onPreviewError()
                 }
               }}
             />
@@ -796,7 +800,7 @@ export default function StatusSection() {
   const [thumbnailUrl, setThumbnailUrl] = useState(null)
   const [thumbnailError, setThumbnailError] = useState(false)
   const [thumbnailLoading, setThumbnailLoading] = useState(false)
-  const [showThumbnailOverlay, setShowThumbnailOverlay] = useState(false)
+  const [previewMode, setPreviewMode] = useState(null) // null | 'raster' | 'document'
   const [showShare, setShowShare] = useState(false)
   const [previewUrl, setPreviewUrl] = useState(null)
   // Prefetched page count for the thumbnail overlay. Probing it up-front lets
@@ -827,13 +831,33 @@ export default function StatusSection() {
   // Close thumbnail overlay on Escape key
   useEffect(() => {
     const handleEscape = (e) => {
-      if (e.key === 'Escape' && showThumbnailOverlay) {
-        setShowThumbnailOverlay(false)
+      if (e.key === 'Escape' && previewMode === 'raster') {
+        setPreviewMode(null)
       }
     }
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [showThumbnailOverlay])
+  }, [previewMode])
+
+  useEffect(() => {
+    if (previewMode !== 'document') return
+
+    let dismissTimer
+    const handleEscape = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      // DocumentViewer also listens on window. Let it consume Escape to
+      // close Find before deciding whether to dismiss the fallback.
+      clearTimeout(dismissTimer)
+      dismissTimer = setTimeout(() => {
+        if (!e.defaultPrevented) setPreviewMode(null)
+      }, 0)
+    }
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      window.removeEventListener('keydown', handleEscape)
+      clearTimeout(dismissTimer)
+    }
+  }, [previewMode])
 
   // Fetch thumbnail when check ID changes, and retry once a check completes.
   // For URL/PDF checks the first request can happen while the backend is still
@@ -845,7 +869,7 @@ export default function StatusSection() {
       setPreviewUrl(null)
       setPreviewPageCount(null)
       setThumbnailError(false)
-      setShowThumbnailOverlay(false)
+      setPreviewMode(null)
       return
     }
     
@@ -855,7 +879,7 @@ export default function StatusSection() {
     setPreviewPageCount(null)
     setThumbnailError(false)
     setThumbnailLoading(true)
-    setShowThumbnailOverlay(false)
+    setPreviewMode(null)
     
     // Set the thumbnail URL - let the img element handle loading
     const url = `${API_BASE}/api/thumbnail/${selectedCheckId}?phase=${thumbnailRetryPhase}`
@@ -979,7 +1003,7 @@ export default function StatusSection() {
           title="Click to enlarge"
           onClick={(e) => {
             e.stopPropagation()
-            setShowThumbnailOverlay(true)
+            setPreviewMode('raster')
           }}
           style={{
             ...thumbnailStyle,
@@ -1506,13 +1530,22 @@ export default function StatusSection() {
           When the backend reports page-count > 1 we render a vertical
           scroll list; otherwise we fall back to the single-image preview
           so text/HTML/etc. checks still get a usable overlay. */}
-      {showThumbnailOverlay && (previewUrl || thumbnailUrl) && (
+      {previewMode === 'raster' && (previewUrl || thumbnailUrl) && (
         <ThumbnailOverlay
           checkId={selectedCheckId}
           initialPageCount={previewPageCount}
           previewUrl={previewUrl}
           thumbnailUrl={thumbnailUrl}
-          onClose={() => { setShowThumbnailOverlay(false) }}
+          onClose={() => setPreviewMode(null)}
+          onPreviewError={() => setPreviewMode('document')}
+        />
+      )}
+      {previewMode === 'document' && (
+        <DocumentViewer
+          checkId={selectedCheckId}
+          sourceType={displaySourceType}
+          paperSource={displaySource || ''}
+          onClose={() => setPreviewMode(null)}
         />
       )}
 

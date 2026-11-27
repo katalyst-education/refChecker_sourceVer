@@ -15,7 +15,8 @@ Design rules:
     four formats can never drift apart.
   * Honesty: minor Semantic-Scholar year-mismatch warnings are downweighted
     (grouped as "minor notes"), while real errors are elevated. No
-    fabricated data — corrections come only from the stored `corrected_reference`.
+    fabricated data — corrections come only from verifier findings or the
+    stored `corrected_reference`.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import html
 import io
 import json
+import re
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 # Status / band colours are the RefChecker app's REAL design tokens
@@ -219,37 +221,123 @@ def _citation_line(authors: Any, year: Any, title: Any, venue: Any,
         title or "",
         venue or "",
         f"doi:{doi}" if doi else "",
-        url if (url and not doi) else "",
+        url or "",
     ]
     s = ". ".join(p for p in parts if p).strip()
     return s or None
 
 
-def _corrected_str(ref: Dict[str, Any]) -> Optional[str]:
-    """Render the stored corrected_reference (verified truth) as a citation line."""
-    cr = ref.get("corrected_reference")
-    if not isinstance(cr, dict):
-        return None
+_CORRECTION_FIELDS = ("title", "authors", "year", "venue", "doi", "url", "arxiv_id")
+_DOI_LINK = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.I)
+_ARXIV_LINK = re.compile(r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/", re.I)
+
+
+def _cited_ref_data(ref: Dict[str, Any]) -> Dict[str, Any]:
+    # Even a sparse snapshot is authoritative: the outer row can contain
+    # recovered authors and identifiers supplied by database lookups.
+    cited = ref.get("cited_metadata")
+    if not isinstance(cited, dict):
+        cited = ref.get("original_reference")
+    if not isinstance(cited, dict):
+        cited = ref
+    return {
+        **{field: cited.get(field) for field in _CORRECTION_FIELDS},
+        "venue": cited.get("venue") or cited.get("journal"),
+        "url": cited.get("cited_url") or cited.get("url"),
+    }
+
+
+def _correction_fields(ref: Dict[str, Any]) -> Dict[str, Any]:
+    """Read citation fields from stored, typed, or legacy evidence, in that order."""
+    typed: Dict[str, Any] = {}
+    legacy: Dict[str, Any] = {}
+    for issue in [*_as_list(ref.get("errors")), *_as_list(ref.get("warnings"))]:
+        for field in _CORRECTION_FIELDS:
+            value = issue.get(f"ref_{field}_correct")
+            if value not in (None, "", []):
+                typed[field] = value
+        kind = str(issue.get("error_type") or issue.get("warning_type") or "").lower()
+        field = "authors" if kind == "author" else kind
+        if field not in _CORRECTION_FIELDS:
+            continue
+        details = str(issue.get("error_details") or issue.get("warning_details") or "")
+        # A positional or membership finding is not a replacement author list.
+        if field == "authors" and re.search(
+            r"\b(?:author\s+\d+|first author|author list|cited list)\b", details, re.I,
+        ):
+            continue
+        actual = issue.get("actual_value")
+        if actual in (None, "", []):
+            match = re.search(r"\bcited:.*?\bactual:[ \t]*([^\r\n]+)", details, re.I | re.S)
+            actual = match.group(1).strip() if match else None
+        if actual not in (None, "", []):
+            legacy[field] = actual
+
+    fixes = {**legacy, **typed}
+    stored = _as_dict(ref.get("corrected_reference")) or {}
+    for field in _CORRECTION_FIELDS:
+        value = stored.get(field)
+        if field == "venue":
+            value = stored.get("journal") or value
+        elif field == "url":
+            value = value or stored.get("verified_url")
+        if value not in (None, "", []):
+            fixes[field] = value
+
+    if isinstance(fixes.get("authors"), str):
+        fixes["authors"] = [part.strip() for part in re.split(
+            r",\s*(?:and\s+)?|;\s*|\s+and\s+", fixes["authors"],
+        ) if part.strip()]
+    if fixes.get("doi"):
+        fixes["doi"] = _DOI_LINK.sub("", str(fixes["doi"]).strip())
+    return fixes
+
+
+def _apply_corrections(cited: Dict[str, Any], fixes: Dict[str, Any]) -> Dict[str, Any]:
+    data = {**cited, **fixes}
+    url = str(data.get("url") or "")
+    if not fixes.get("url"):
+        if fixes.get("arxiv_id") and (not url or _ARXIV_LINK.match(url)):
+            arxiv_id = re.sub(r"^arxiv:\s*", "", str(fixes["arxiv_id"]).strip(), flags=re.I)
+            data["url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        elif fixes.get("doi") and _DOI_LINK.match(url):
+            data["url"] = f"https://doi.org/{fixes['doi']}"
+    return data
+
+
+def _citation_data_str(data: Dict[str, Any], *, show_url: bool = False) -> Optional[str]:
     return _citation_line(
-        cr.get("authors"), cr.get("year"), cr.get("title"),
-        cr.get("journal") or cr.get("venue"), cr.get("doi"),
-        cr.get("url") or cr.get("verified_url"),
+        data.get("authors"), data.get("year"), data.get("title"),
+        data.get("venue"), data.get("doi"),
+        data.get("url") if show_url or not data.get("doi") else None,
     )
 
 
-def _cited_str(ref: Dict[str, Any]) -> Optional[str]:
-    """Render the ORIGINAL cited reference (the "was" side of a tracked change),
-    using only the values the author actually cited — same field order as
-    ``_corrected_str`` so a word-diff between the two reads as a clean tracked
-    change. Never falls back to verified/corrected fields (that would hide the
-    very change we are documenting)."""
-    if not isinstance(ref, dict):
-        return None
-    return _citation_line(
-        ref.get("authors"), ref.get("year"), ref.get("title"),
-        ref.get("venue") or ref.get("journal"), ref.get("doi"),
-        ref.get("cited_url") or ref.get("url"),
+def _doi_text(doi: Any) -> str:
+    return _DOI_LINK.sub("", str(doi or "").strip()).casefold()
+
+
+def _url_repeats_doi(data: Dict[str, Any]) -> bool:
+    url = str(data.get("url") or "")
+    return bool(_DOI_LINK.match(url) and _doi_text(url) == _doi_text(data.get("doi")))
+
+
+def _correction_lines(ref: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Render the cited and corrected sides of a report's tracked change."""
+    cited = _cited_ref_data(ref)
+    fixes = _correction_fields(ref)
+    if not fixes:
+        return _citation_data_str(cited), None
+    corrected = _apply_corrections(cited, fixes)
+    # If both URLs just repeat a DOI change, that change is already visible.
+    # Otherwise show both URL values so an independent link fix isn't lost.
+    redundant = (
+        _doi_text(cited.get("doi")) != _doi_text(corrected.get("doi"))
+        and _url_repeats_doi(cited) and _url_repeats_doi(corrected)
     )
+    show_url = cited.get("url") != corrected.get("url") and not redundant
+    return (_citation_data_str(cited, show_url=show_url),
+            _citation_data_str(corrected, show_url=show_url))
 
 
 def word_diff(a: Optional[str], b: Optional[str]) -> List[Dict[str, str]]:
@@ -432,28 +520,13 @@ CITATION_STYLES: Tuple[str, ...] = (
 
 
 def _style_ref_data(ref: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve the values to render for *ref*, preferring the verified
-    ``corrected_reference`` (no fabrication — only fields the verifier actually
-    confirmed) and falling back to the cited values otherwise."""
-    cr = ref.get("corrected_reference") if isinstance(ref, dict) else None
-    cr = cr if isinstance(cr, dict) else {}
-    title = cr.get("title") or ref.get("title") or ""
-    authors = cr.get("authors") or ref.get("authors") or []
-    year = cr.get("year") or ref.get("year") or ""
-    venue = cr.get("journal") or cr.get("venue") or ref.get("venue") or ref.get("journal") or ""
-    doi = cr.get("doi") or ref.get("verified_doi") or ref.get("doi") or ""
-    url = (cr.get("url") or cr.get("verified_url") or ref.get("verified_url")
-           or ref.get("cited_url") or ref.get("url") or "")
-    if not url and doi:
-        url = f"https://doi.org/{doi}"
-    return {
-        "title": str(title or "").strip(),
-        "authors": _authors_list(authors),
-        "year": str(year or "").strip(),
-        "venue": str(venue or "").strip(),
-        "doi": str(doi or "").strip(),
-        "url": str(url or "").strip(),
-    }
+    """Format the same corrected citation used by the report for a style."""
+    data = _apply_corrections(_cited_ref_data(ref), _correction_fields(ref))
+    result = {field: str(data.get(field) or "").strip()
+              for field in ("title", "year", "venue", "doi", "url")}
+    if not result["url"] and result["doi"]:
+        result["url"] = f"https://doi.org/{result['doi']}"
+    return {**result, "authors": _authors_list(data.get("authors"))}
 
 
 def _bibtex_key(ref: Dict[str, Any], index: int) -> str:
@@ -727,6 +800,7 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
             refs_err += 1
         if status == "warning":
             refs_warn += 1
+        cited, corrected = _correction_lines(ref) if corrections else (None, None)
         rows.append({
             "num": _ref_num(ref),
             "title": ref.get("title") or ref.get("cited_url") or "Untitled reference",
@@ -737,10 +811,8 @@ def _model(check: Dict[str, Any], *, corrections: bool, sections: Optional[Set[s
             "major": major,
             "minor": minor,
             "inline": bool(ref.get("is_inline_cited") or (ref.get("citation_contexts") or [])),
-            "corrected": _corrected_str(ref) if corrections else None,
-            # The original cited line — the "was" side of the tracked-change diff.
-            # Only meaningful when there's a correction to diff against.
-            "cited": _cited_str(ref) if corrections else None,
+            "corrected": corrected,
+            "cited": cited,
         })
 
     # Orphan / uncited detector: a bibliography entry never cited in the body.
@@ -1114,6 +1186,8 @@ def _md_for_model(m: Dict[str, Any], *, level: int = 1) -> str:
                 out.append(f"  - ⚠ warning: {d}")
             for d in r["minor"]:
                 out.append(f"  - minor note: {d}")
+            if r.get("corrected"):
+                out.append(f"  - ✎ was → should be: {_diff_markdown(r.get('cited'), r['corrected'])}")
         out.append("")
     out.append("---")
     out.append("_Generated by RefChecker. A verification aid, not a determination of misconduct._")
@@ -1205,6 +1279,10 @@ def _docx_blocks_for_model(m: Dict[str, Any]) -> List[str]:
                 blocks.append(_docx_para(f"   !  {d}", size=18, color="F59E0B", space_after=20))
             for d in r["minor"]:
                 blocks.append(_docx_para(f"   · {d} (minor)", size=18, color="9AA0AD", space_after=20))
+            if r.get("corrected"):
+                if r.get("cited"):
+                    blocks.append(_docx_para(f"   was: {r['cited']}", size=20, color="EF4146"))
+                blocks.append(_docx_para(f"   -> should be: {r['corrected']}", size=20, color="10A37F"))
     blocks.append(_docx_para("Generated by RefChecker — a verification aid, not a determination of misconduct.",
                              size=16, color="9AA0AD", italic=True))
     return blocks
@@ -1387,6 +1465,9 @@ def _pdf_html_for_model(m: Dict[str, Any], *, header: bool = True) -> str:
                 parts.append(f'<p style="margin:2px 0 2px 10pt;color:#ef4146;font-size:9pt">✗ {_e(detail)}</p>')
             for detail in row["major"]:
                 parts.append(f'<p style="margin:2px 0 2px 10pt;color:#f59e0b;font-size:9pt">! {_e(detail)}</p>')
+            if row.get("corrected"):
+                parts.append(f'<p style="margin:2px 0 2px 10pt;font-size:9pt">'
+                             f'was → should be: {_diff_html(row.get("cited"), row["corrected"])}</p>')
     if "references" in sec:
         parts.append(f'{heading}References</h2>')
         parts.append(f'<table style="width:100%;border-collapse:collapse">{"".join(rows)}</table>')
