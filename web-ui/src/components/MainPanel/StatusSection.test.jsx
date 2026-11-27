@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import DocumentViewer from './DocumentViewer'
 import StatusSection, { buildCitationViewerSpans } from './StatusSection'
 
 const historyState = vi.hoisted(() => ({
@@ -22,6 +23,13 @@ const historyState = vi.hoisted(() => ({
 vi.mock('../../utils/logger', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
+
+vi.mock('./NativePdfViewer', () => ({ default: () => null }))
+
+vi.mock('./DocumentViewer', async (importOriginal) => {
+  const { default: Viewer } = await importOriginal()
+  return { default: vi.fn((props) => <Viewer {...props} />) }
+})
 
 vi.mock('../../stores/useCheckStore', () => {
   const state = {
@@ -63,6 +71,11 @@ describe('StatusSection model display', () => {
     }
   })
 
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
   it('shows extraction model metadata', () => {
     render(<StatusSection />)
 
@@ -88,6 +101,74 @@ describe('StatusSection model display', () => {
 
     const retriedImage = screen.getByAltText('Paper thumbnail')
     expect(retriedImage.getAttribute('src')).toBe('/api/thumbnail/42?phase=completed')
+  })
+
+  const openPreview = (count) => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: url === '/api/preview/42/page-count',
+      json: async () => ({ count }),
+    })))
+    render(<StatusSection />)
+    const thumbnail = screen.getByAltText('Paper thumbnail')
+    fireEvent.load(thumbnail)
+    fireEvent.click(thumbnail)
+  }
+
+  it('replaces the raster preview with the document viewer if a page image fails', async () => {
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    openPreview(2)
+    const page = await screen.findByAltText('Page 2 of 2')
+    fireEvent.keyDown(document, { key: '+' })
+    expect(page.parentElement).toHaveStyle({ width: '113vw' })
+
+    fireEvent.error(page)
+
+    expect(screen.queryByAltText('Page 1 of 2')).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Passages in document' })).toBeInTheDocument()
+    expect(DocumentViewer.mock.lastCall[0]).toMatchObject({
+      checkId: 42, sourceType: 'url', paperSource: 'https://example.com/paper.pdf',
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Close', exact: true }))
+    expect(screen.queryByRole('dialog', { name: 'Passages in document' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByAltText('Paper thumbnail'))
+    expect(screen.getByAltText('Page 2 of 2')).toBeInTheDocument()
+  })
+
+  it('tries the thumbnail once before opening the document viewer if the single preview fails', async () => {
+    openPreview(0)
+    const image = await screen.findByAltText('Paper preview')
+    expect(image).toHaveAttribute('src', '/api/preview/42?phase=active')
+
+    fireEvent.error(image)
+    expect(image).toHaveAttribute('src', '/api/thumbnail/42?phase=active')
+    expect(screen.queryByRole('dialog', { name: 'Passages in document' })).not.toBeInTheDocument()
+
+    fireEvent.error(image)
+    expect(screen.queryByAltText('Paper preview')).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Passages in document' })).toBeInTheDocument()
+  })
+
+  it('closes Find before dismissing the fallback document viewer on Escape', async () => {
+    openPreview(0)
+    const image = await screen.findByAltText('Paper preview')
+    fireEvent.error(image)
+    fireEvent.error(image)
+    const viewer = screen.getByRole('dialog', { name: 'Passages in document' })
+
+    vi.useFakeTimers()
+    fireEvent.keyDown(viewer, { key: 'f', ctrlKey: true })
+    expect(screen.getByPlaceholderText('Find in document')).toBeInTheDocument()
+    fireEvent.keyDown(viewer, { key: 'Escape' })
+    act(() => vi.runAllTimers())
+    expect(screen.queryByPlaceholderText('Find in document')).not.toBeInTheDocument()
+    expect(viewer).toBeInTheDocument()
+
+    fireEvent.keyDown(viewer, { key: 'Escape' })
+    act(() => vi.runAllTimers())
+    expect(viewer).not.toBeInTheDocument()
   })
 })
 
