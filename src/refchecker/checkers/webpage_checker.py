@@ -1073,6 +1073,7 @@ class WebPageChecker:
         access_details = 'paper not verified; cited URL could not be accessed'
         if response is None:
             return None, [self._url_access_failure(access_details)], web_url
+        final_url = getattr(response, 'url', None) or web_url
         soup, access_finding = self._inspect_access_response(response, web_url)
         if access_finding:
             return None, [access_finding], web_url
@@ -1096,7 +1097,8 @@ class WebPageChecker:
                     '_matched_database': 'Web Page',
                     'web_metadata': {
                         'status_code': 403,
-                        'access_blocked': True
+                        'access_blocked': True,
+                        'final_url': final_url,
                     }
                 }
                 return verified_data, [], web_url
@@ -1120,6 +1122,7 @@ class WebPageChecker:
                         '_matched_database': 'PDF Document',
                         'web_metadata': {
                             'content_type': response.headers.get('content-type', ''),
+                            'final_url': final_url,
                             'status_code': response.status_code
                         }
                     }
@@ -1191,7 +1194,7 @@ class WebPageChecker:
                             'page_title': page_title,
                             'description': page_description,
                             'site_info': site_info,
-                            'final_url': response.url,
+                            'final_url': final_url,
                             'status_code': response.status_code
                         }
                     }
@@ -1211,7 +1214,7 @@ class WebPageChecker:
                             'page_title': page_title,
                             'description': page_description,
                             'site_info': site_info,
-                            'final_url': response.url,
+                            'final_url': final_url,
                             'status_code': response.status_code
                         }
                     }

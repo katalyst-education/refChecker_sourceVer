@@ -49,8 +49,9 @@ History:
    16 - verify DataCite DOIs and recognize Unicode author-list ellipses.
    17 - preserve bare numeric BibTeX fields; explicit cited years must not
         disappear or be replaced by an inferred preprint year.
+   18 - report a known arXiv copy as preprint evidence when the publication DOI is unverified.
 """
 
-VERIFICATION_LOGIC_VERSION = 17
+VERIFICATION_LOGIC_VERSION = 18
 
 __all__ = ["VERIFICATION_LOGIC_VERSION"]
