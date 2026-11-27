@@ -4,11 +4,15 @@ import base64
 import requests
 import re
 import logging
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urlsplit
 from typing import Dict, Optional, Tuple, List, Any
 from refchecker.utils.text_utils import strip_latex_commands
 
 logger = logging.getLogger(__name__)
+_GITHUB_REPOS_API = 'https://api.github.com/repos'
+_COMMIT_SHA = re.compile(r'[0-9a-fA-F]{40}')
+_MAX_REF_PREFIXES = 8  # At most 16 exact-ref requests per named blob URL.
+_MAX_TAG_HOPS = 3
 
 class GitHubChecker:
     """
@@ -65,7 +69,7 @@ class GitHubChecker:
         if not url:
             return None
         try:
-            parsed = urlparse(url.strip())
+            parsed = urlsplit(url.strip())
         except ValueError:
             return None
         if parsed.scheme not in {'http', 'https'} or parsed.netloc.lower() not in {'github.com', 'www.github.com'}:
@@ -73,24 +77,91 @@ class GitHubChecker:
         parts = parsed.path[1:].split('/')
         return parts if len(parts) >= 3 and parts[2].lower() == 'blob' else None
 
-    def extract_github_file_info(self, url: str) -> Optional[Tuple[str, str, str, str]]:
-        """Extract owner, repository, ref, and path from a GitHub blob URL.
-
-        The ref must occupy one URL segment (slash in a ref must be encoded).
-        Unescaped multi-segment refs are ambiguous with nested file paths.
-        """
+    def _parse_github_blob(self, url: str) -> Optional[Tuple[str, str, List[str]]]:
+        """Parse the repository and decoded segments, without guessing the ref boundary."""
         parts = self._github_blob_parts(url)
         if not parts or len(parts) < 5:
             return None
-        # Decode components before matching names; encode the file path again for the API.
-        owner, repo, _, git_ref, *path = map(unquote, parts)
+        owner, repo, _, *suffix = map(unquote, parts)
         if not re.fullmatch(r'[A-Za-z0-9-]+', owner) or not re.fullmatch(r'[A-Za-z0-9_.-]+', repo):
             return None
-        if repo in {'.', '..'} or not git_ref or any(
-            part in {'', '.', '..'} or '/' in part for part in path
+        if repo in {'.', '..'} or not suffix[0] or any(
+            part in {'', '.', '..'} or '/' in part for part in suffix[1:]
         ):
             return None
-        return owner, repo, git_ref, '/'.join(path)
+        return owner, repo, suffix
+
+    @staticmethod
+    def _valid_ref_name(name: str) -> bool:
+        # Git check-ref-format rules for a name under refs/heads/ or refs/tags/.
+        return not (
+            name == '@' or name.endswith('.') or '..' in name or '@{' in name
+            or re.search(r'[\x00-\x20\x7f~^:?*\[\\]', name)
+            or any(not part or part.startswith('.') or part.endswith('.lock') for part in name.split('/'))
+        )
+
+    def _resolve_blob_ref(self, api_url: str, suffix: List[str]) -> Optional[Tuple[str, str, str]]:
+        """Return the cited ref, file path, and commit SHA only for a unique interpretation."""
+        first = suffix[0]
+        if _COMMIT_SHA.fullmatch(first):
+            return first, '/'.join(suffix[1:]), first
+        # Exact heads/tags cannot rule out a short commit ID or the HEAD alias.
+        if first == 'HEAD' or re.fullmatch(r'[0-9a-fA-F]{4,39}', first):
+            return None
+
+        match = None
+        try:
+            for boundary in range(1, len(suffix)):
+                name = '/'.join(suffix[:boundary])
+                if not self._valid_ref_name(name):
+                    continue
+                # /git/ref is exact, unlike /git/matching-refs. A Contents 200 cannot
+                # tell which ref the citation denotes, so never use it for this decision.
+                for namespace in ('heads', 'tags'):
+                    response = requests.get(
+                        f'{api_url}/git/ref/{namespace}/{quote(name, safe="/")}',
+                        headers=self.base_headers, timeout=10, allow_redirects=False,
+                    )
+                    if response.status_code == 404:
+                        continue
+                    if response.status_code != 200 or match is not None:
+                        return None
+                    payload = response.json()
+                    if not isinstance(payload, dict) or payload.get('ref') != f'refs/{namespace}/{name}':
+                        return None
+                    match = name, '/'.join(suffix[boundary:]), payload.get('object')
+
+            if match is not None:
+                name, path, git_object = match
+                sha = self._ref_commit_sha(api_url, git_object)
+                if sha is not None:
+                    return name, path, sha
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug('GitHub blob ref lookup failed: %s', exc)
+        return None
+
+    def _ref_commit_sha(self, api_url: str, git_object: Any) -> Optional[str]:
+        # An annotated tag points to a tag object; pin Contents to its commit instead.
+        for hop in range(_MAX_TAG_HOPS + 1):
+            if not isinstance(git_object, dict):
+                return None
+            sha = git_object.get('sha')
+            if not isinstance(sha, str) or not _COMMIT_SHA.fullmatch(sha):
+                return None
+            if git_object.get('type') == 'commit':
+                return sha
+            if git_object.get('type') != 'tag' or hop == _MAX_TAG_HOPS:
+                return None
+            response = requests.get(
+                f'{api_url}/git/tags/{sha}', headers=self.base_headers, timeout=10, allow_redirects=False,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get('sha') != sha:
+                return None
+            git_object = payload.get('object')
+        return None
 
     def extract_github_owner_info(self, url: str) -> Optional[str]:
         """
@@ -168,9 +239,9 @@ class GitHubChecker:
             return None, [], None
         
         # Recognized blob URLs must not fall back to verifying the repository itself.
-        file_info = self.extract_github_file_info(github_url)
-        if file_info:
-            repo_info = file_info[:2]
+        blob = self._parse_github_blob(github_url)
+        if blob:
+            repo_info = blob[:2]
         elif self._github_blob_parts(github_url) is not None:
             return None, [{"error_type": "unverified", "error_details": "Invalid GitHub file URL"}], github_url
         else:
@@ -183,7 +254,7 @@ class GitHubChecker:
             return None, [{"error_type": "unverified", "error_details": "Invalid GitHub URL format"}], github_url
         
         owner, repo = repo_info
-        api_url = f'https://api.github.com/repos/{owner}/{repo}'
+        api_url = f'{_GITHUB_REPOS_API}/{owner}/{repo}'
         
         try:
             # Make API request
@@ -217,8 +288,20 @@ class GitHubChecker:
                 except (ValueError, IndexError):
                     pass
             
-            if file_info:
-                return self._verify_file_reference(reference, github_url, repo_data, file_info, creation_year)
+            if blob:
+                suffix = blob[2]
+                if len(suffix) - 1 > _MAX_REF_PREFIXES and not _COMMIT_SHA.fullmatch(suffix[0]):
+                    return None, [{
+                        'error_type': 'unverified',
+                        'error_details': 'GitHub file URL has too many possible ref boundaries; use a full commit SHA permalink.',
+                    }], github_url
+                resolved = self._resolve_blob_ref(api_url, suffix)
+                if resolved is None:
+                    return None, [{
+                        'error_type': 'unverified',
+                        'error_details': 'Could not resolve a unique GitHub file ref; use a full commit SHA permalink.',
+                    }], github_url
+                return self._verify_file_reference(reference, github_url, repo_data, repo_info, resolved, creation_year)
 
             # Create verified data structure
             verified_data = {
@@ -311,17 +394,19 @@ class GitHubChecker:
             reference: Dict[str, Any],
             github_url: str,
             repo_data: Dict[str, Any],
-            file_info: Tuple[str, str, str, str],
+            repo_info: Tuple[str, str],
+            resolved: Tuple[str, str, str],
             creation_year: Optional[int],
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
-        owner, repo, git_ref, path = file_info
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{quote(path, safe='/')}"
+        owner, repo = repo_info
+        git_ref, path, commit = resolved
         try:
             response = requests.get(
-                api_url,
+                f"{_GITHUB_REPOS_API}/{owner}/{repo}/contents/{quote(path, safe='/')}",
                 headers=self.base_headers,
-                params={'ref': git_ref},
+                params={'ref': commit},
                 timeout=10,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             return None, [{
@@ -341,10 +426,20 @@ class GitHubChecker:
             }], github_url
 
         payload = response.json()
+        if isinstance(payload, dict) and ('submodule_git_url' in payload or payload.get('type') == 'submodule'):
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': 'Cited GitHub path is a submodule, not a file',
+            }], github_url
         if not isinstance(payload, dict) or payload.get('type') != 'file':
             return None, [{
                 'error_type': 'unverified',
                 'error_details': 'Cited GitHub path is not a file',
+            }], github_url
+        if payload.get('path') != path:
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': 'GitHub did not return the exact cited file path',
             }], github_url
 
         content = ''
