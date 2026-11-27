@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
+import base64
 import requests
 import re
 import logging
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 from typing import Dict, Optional, Tuple, List, Any
 from refchecker.utils.text_utils import strip_latex_commands
 
@@ -60,6 +61,37 @@ class GitHubChecker:
         
         return None
 
+    def _github_blob_parts(self, url: str) -> Optional[List[str]]:
+        if not url:
+            return None
+        try:
+            parsed = urlparse(url.strip())
+        except ValueError:
+            return None
+        if parsed.scheme not in {'http', 'https'} or parsed.netloc.lower() not in {'github.com', 'www.github.com'}:
+            return None
+        parts = parsed.path[1:].split('/')
+        return parts if len(parts) >= 3 and parts[2].lower() == 'blob' else None
+
+    def extract_github_file_info(self, url: str) -> Optional[Tuple[str, str, str, str]]:
+        """Extract owner, repository, ref, and path from a GitHub blob URL.
+
+        The ref must occupy one URL segment (slash in a ref must be encoded).
+        Unescaped multi-segment refs are ambiguous with nested file paths.
+        """
+        parts = self._github_blob_parts(url)
+        if not parts or len(parts) < 5:
+            return None
+        # Decode components before matching names; encode the file path again for the API.
+        owner, repo, _, git_ref, *path = map(unquote, parts)
+        if not re.fullmatch(r'[A-Za-z0-9-]+', owner) or not re.fullmatch(r'[A-Za-z0-9_.-]+', repo):
+            return None
+        if repo in {'.', '..'} or not git_ref or any(
+            part in {'', '.', '..'} or '/' in part for part in path
+        ):
+            return None
+        return owner, repo, git_ref, '/'.join(path)
+
     def extract_github_owner_info(self, url: str) -> Optional[str]:
         """
         Extract an owner/organization name from a GitHub profile URL.
@@ -84,27 +116,27 @@ class GitHubChecker:
         return owner
 
     def is_github_reference_url(self, url: str) -> bool:
-        """Return True for GitHub repo URLs and root owner/org URLs."""
+        """Return True for GitHub repo or blob URLs and root owner/org URLs."""
         return (
-            self.extract_github_repo_info(url) is not None
+            self.is_github_url(url)
             or self.extract_github_owner_info(url) is not None
         )
     
     def is_github_url(self, url: str) -> bool:
         """
-        Check if URL is a GitHub repository URL
+        Check if URL is a GitHub repository or blob URL
         
         Args:
             url: URL to check
             
         Returns:
-            True if it's a GitHub repository URL
+            True if it's a GitHub repository or blob URL
         """
-        return self.extract_github_repo_info(url) is not None
+        return self._github_blob_parts(url) is not None or self.extract_github_repo_info(url) is not None
     
     def verify_reference(self, reference: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         """
-        Verify a GitHub repository or owner/organization reference
+        Verify a GitHub file, repository, or owner/organization reference
         
         Args:
             reference: Reference dictionary with title, authors, year, url, etc.
@@ -135,8 +167,14 @@ class GitHubChecker:
             logger.debug("No GitHub URL found in reference")
             return None, [], None
         
-        # Extract repository information
-        repo_info = self.extract_github_repo_info(github_url)
+        # Recognized blob URLs must not fall back to verifying the repository itself.
+        file_info = self.extract_github_file_info(github_url)
+        if file_info:
+            repo_info = file_info[:2]
+        elif self._github_blob_parts(github_url) is not None:
+            return None, [{"error_type": "unverified", "error_details": "Invalid GitHub file URL"}], github_url
+        else:
+            repo_info = self.extract_github_repo_info(github_url)
         if not repo_info:
             owner = self.extract_github_owner_info(github_url)
             if owner:
@@ -179,6 +217,9 @@ class GitHubChecker:
                 except (ValueError, IndexError):
                     pass
             
+            if file_info:
+                return self._verify_file_reference(reference, github_url, repo_data, file_info, creation_year)
+
             # Create verified data structure
             verified_data = {
                 'title': actual_description if actual_description else actual_name,
@@ -264,6 +305,134 @@ class GitHubChecker:
         except Exception as e:
             logger.error(f"Unexpected error verifying GitHub repository {owner}/{repo}: {e}")
             return None, [{"error_type": "unverified", "error_details": f"Unexpected error: {str(e)}"}], github_url
+
+    def _verify_file_reference(
+            self,
+            reference: Dict[str, Any],
+            github_url: str,
+            repo_data: Dict[str, Any],
+            file_info: Tuple[str, str, str, str],
+            creation_year: Optional[int],
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+        owner, repo, git_ref, path = file_info
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{quote(path, safe='/')}"
+        try:
+            response = requests.get(
+                api_url,
+                headers=self.base_headers,
+                params={'ref': git_ref},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': f'Could not fetch cited GitHub file: {exc}',
+            }], github_url
+
+        if response.status_code == 404:
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': 'Cited GitHub file was not found',
+            }], github_url
+        if response.status_code != 200:
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': f'GitHub file API error: {response.status_code}',
+            }], github_url
+
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get('type') != 'file':
+            return None, [{
+                'error_type': 'unverified',
+                'error_details': 'Cited GitHub path is not a file',
+            }], github_url
+
+        content = ''
+        if payload.get('encoding') == 'base64' and payload.get('content'):
+            try:
+                content = base64.b64decode(payload['content']).decode('utf-8', errors='replace')
+            except (ValueError, TypeError):
+                content = ''
+
+        actual_owner = repo_data.get('owner', {}).get('login', owner)
+        actual_owner_name = repo_data.get('owner', {}).get('name', actual_owner) or actual_owner
+        errors = []
+
+        cited_title = str(reference.get('title') or '').strip()
+        file_stem = path.rsplit('/', 1)[-1].rsplit('.', 1)[0]
+        identity = self._split_identifier_words(f'{repo} {file_stem}')
+        cited_identity = self._split_identifier_words(cited_title)
+        if cited_title and (not cited_identity or not cited_identity.issubset(identity)):
+            errors.append({
+                'warning_type': 'title',
+                'warning_details': f'Cited title does not match GitHub file identity: {repo}/{path}',
+            })
+
+        cited_authors = reference.get('authors') or []
+        if cited_authors:
+            author_str = ', '.join(cited_authors) if isinstance(cited_authors, list) else str(cited_authors)
+            if not self._check_file_author_match(author_str, actual_owner, actual_owner_name):
+                errors.append({
+                    'warning_type': 'author',
+                    'warning_details': (
+                        f'Author mismatch:\n       cited:  {author_str}\n'
+                        f'       actual: {actual_owner} ({actual_owner_name})'
+                    ),
+                })
+
+        cited_year = reference.get('year')
+        if cited_year and creation_year:
+            try:
+                if int(cited_year) < creation_year:
+                    errors.append({
+                        'warning_type': 'year',
+                        'warning_details': (
+                            f'Year mismatch:\n       cited:  {cited_year}\n'
+                            f'       actual: {creation_year}'
+                        ),
+                        'ref_year_correct': str(creation_year),
+                    })
+            except (TypeError, ValueError):
+                pass
+
+        verified_data = {
+            'title': cited_title or payload.get('name') or path,
+            'authors': [actual_owner_name],
+            'year': creation_year,
+            'venue': 'GitHub File',
+            'url': github_url,
+            '_matched_database': 'GitHub File',
+            'github_metadata': {
+                'owner': actual_owner,
+                'owner_name': actual_owner_name,
+                'repository': repo,
+                'ref': git_ref,
+                'path': path,
+                'sha': payload.get('sha'),
+                'content_preview': content[:500],
+                'archived_repository': bool(repo_data.get('archived')),
+            },
+        }
+        return verified_data, errors, github_url
+
+    def _split_identifier_words(self, value: str) -> set[str]:
+        value = re.sub(r'(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])', ' ', value)
+        return {
+            token for token in re.split(r'[^a-z0-9]+', value.lower())
+            if len(token) >= 3 or token.isdigit()
+        }
+
+    def _check_file_author_match(
+            self,
+            cited_authors: str,
+            repo_owner: str,
+            repo_owner_name: str,
+    ) -> bool:
+        if self._check_author_match(cited_authors, repo_owner, repo_owner_name):
+            return True
+        cited_tokens = self._split_identifier_words(cited_authors)
+        owner_tokens = self._split_identifier_words(f'{repo_owner} {repo_owner_name}')
+        return bool(cited_tokens.intersection(owner_tokens))
 
     def _verify_owner_reference(
             self,
